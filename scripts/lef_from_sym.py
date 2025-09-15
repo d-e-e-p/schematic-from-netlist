@@ -310,7 +310,7 @@ class KiCadSymbolLibParser:
                     f"  FOREIGN {value} 0 0 ;",
                     # TODO: explain negative origin
                     f"  ORIGIN {-origin_x:.3f} {-origin_y:.3f} ;",
-                    "  SYMMETRY X Y R90;",
+                    "  SYMMETRY X Y R90 ;",
                     f"  SIZE {width:.3f} BY {height:.3f} ;",
                 ]
             )
