@@ -1,0 +1,12 @@
+[project]
+name = "schematic-from-netlist"
+version = "0.1.0"
+description = "A tool to generate schematics from Verilog netlists."
+readme = "README.md"
+requires-python = ">=3.8"
+license = { file = "LICENSE" }
+authors = [{ name = "Sandeep M", email = "deep@tensorfield.ag" }]
+dependencies = ["pyverilog", "kahypar", "networkx", "pygraphviz"]
+
+[project.scripts]
+schematic-from-netlist = "schematic_from_netlist.cli:main"

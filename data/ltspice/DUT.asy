@@ -1,0 +1,6 @@
+Version 4
+SymbolType BLOCK
+RECTANGLE NORMAL -64 -40 64 40
+SYMATTR InstName U?
+SYMATTR Prefix X
+SYMATTR Value DUT

@@ -1,0 +1,236 @@
+This documentation outlines the core elements and their property mappings used by the LTspice writer, which translates LTspice schematic (`.asc`) and symbol (`.asy`) files into an intermediate data structure, primarily defined by the `LTSPICE_SCHEMATIC` class, before conversion to KiCad objects.
+
+### LTspice Writer Documentation
+
+**Overview**:
+This documentation details how various LTspice schematic and symbol file elements, along with their properties like line styles, widths, justifications, polarities, and orientations, are interpreted and mapped. This forms the basis for parsing LTspice designs.
+
+---
+
+**1. Line Styles and Widths**
+
+*   **Line Styles (`LINESTYLE`)**
+    *   These styles are applied to various graphical elements such as lines, rectangles, circles, and arcs.
+    *   **Mapping from integer values found in LTspice files**:
+        *   **0**: `SOLID`
+        *   **1**: `DASH`
+        *   **2**: `DOT`
+        *   **3**: `DASHDOT`
+        *   **4**: `DASHDOTDOT`
+        *   **Other values**: An `IO_ERROR` is thrown, expecting values 0 through 4.
+
+*   **Line Widths (`LINEWIDTH`)**
+    *   These define the thickness of graphical elements like lines, rectangles, circles, and arcs.
+    *   **Mapping from string values found in LTspice files**:
+        *   **"NORMAL"**: `Normal` (When converted to KiCad, this maps to a width of 6 mils).
+        *   **"WIDE"**: `Wide` (When converted to KiCad, this maps to a width of 12 mils).
+        *   **Other values**: An `IO_ERROR` is thrown, expecting "NORMAL" or "WIDE".
+    *   **Default for Wires**: Wires in LTspice schematics default to a `Normal` line width and `SOLID` line style when being converted to KiCad.
+
+---
+
+**2. Shapes and Graphical Elements**
+
+LTspice files define various graphical shapes, each with specific properties:
+
+*   **LINE**
+    *   **Syntax**: `LINE <lineWidth> <startX> <startY> <endX> <endY> [lineStyle]`.
+    *   **Properties**:
+        *   `LineWidth`: Utilizes the `LINEWIDTH` enum (e.g., "NORMAL", "WIDE").
+        *   `Start`: A `VECTOR2I` representing the starting (x, y) coordinates.
+        *   `End`: A `VECTOR2I` representing the ending (x, y) coordinates.
+        *   `LineStyle`: Uses the `LINESTYLE` enum. If not explicitly specified, it defaults to `SOLID`.
+
+*   **RECTANGLE**
+    *   **Syntax**: `RECTANGLE <lineWidth> <botRightX> <botRightY> <topLeftX> <topRightY> [lineStyle]`.
+    *   **Properties**:
+        *   `LineWidth`: Utilizes the `LINEWIDTH` enum.
+        *   `BotRight`: A `VECTOR2I` representing the bottom-right coordinates.
+        *   `TopLeft`: A `VECTOR2I` representing the top-left coordinates.
+        *   `LineStyle`: Uses the `LINESTYLE` enum. If not explicitly specified, it defaults to `SOLID`.
+        *   **Special Fill**: For symbols with a `SYMATTR Prefix X`, rectangles are rendered as filled with the background body color.
+
+*   **CIRCLE**
+    *   **Syntax**: `CIRCLE <lineWidth> <botRightX> <botRightY> <topLeftX> <topRightY> [lineStyle]`.
+    *   **Description**: In LTspice, a circle is defined by the bounding square (represented by its bottom-right and top-left coordinates) within which it is enclosed.
+    *   **Properties**:
+        *   `LineWidth`: Utilizes the `LINEWIDTH` enum.
+        *   `BotRight`: A `VECTOR2I` representing the bottom-right coordinates of the bounding square.
+        *   `TopLeft`: A `VECTOR2I` representing the top-left coordinates of the bounding square.
+        *   `LineStyle`: Uses the `LINESTYLE` enum. If not explicitly specified, it defaults to `SOLID`.
+
+*   **ARC**
+    *   **Syntax**: `ARC <lineWidth> <botRightX> <botRightY> <topLeftX> <topRightY> <arcStartX> <arcStartY> <arcEndX> <arcEndY> [lineStyle]`.
+    *   **Description**: An arc is defined by a bounding square (similar to a circle) and specific start and end points for the arc itself. It is drawn counterclockwise from the starting point to the ending point.
+    *   **Properties**:
+        *   `LineWidth`: Utilizes the `LINEWIDTH` enum.
+        *   `BotRight`: A `VECTOR2I` representing the bottom-right coordinates of the bounding box.
+        *   `TopLeft`: A `VECTOR2I` representing the top-left coordinates of the bounding box.
+        *   `ArcStart`: A `VECTOR2I` representing the arc's starting point.
+        *   `ArcEnd`: A `VECTOR2I` representing the arc's ending point.
+        *   `LineStyle`: Uses the `LINESTYLE` enum. If not explicitly specified, it defaults to `SOLID`.
+
+*   **WIRE**
+    *   **Syntax**: `WIRE <startX> <startY> <endX> <endY>`.
+    *   **Properties**:
+        *   `Start`: A `VECTOR2I` representing the starting coordinates.
+        *   `End`: A `VECTOR2I` representing the ending coordinates.
+        *   When converted to KiCad, wires are given a `Normal` line width and `SOLID` line style.
+
+*   **BUSTAP**
+    *   **Syntax**: `BUSTAP <startX> <startY> <endX> <endY>`.
+    *   **Properties**:
+        *   `Start`: A `VECTOR2I` representing the starting coordinates.
+        *   `End`: A `VECTOR2I` representing the ending coordinates.
+        *   Associated wires are plotted on the KiCad `SCH_LAYER_ID::LAYER_BUS`.
+
+---
+
+**3. Text and Labels**
+
+*   **TEXT**
+    *   **Syntax**: `TEXT <positionX> <positionY> <justification> <fontSize> <value>`.
+    *   **Properties**:
+        *   `Offset`: A `VECTOR2I` representing the text's position.
+        *   `Justification`: Uses the `JUSTIFICATION` enum (see below for specific mappings).
+        *   `FontSize`: An integer value. LTspice font sizes 1-7 map to specific KiCad MILS sizes (e.g., 1 -> 36 mils, 2 -> 42 mils). If the value is 0 or unrecognized, it defaults to size 2 (42 mils).
+        *   `Value`: The string content of the text. Multi-line text can be indicated by `!` or `;` followed by a space, or `\n` in the LTspice file.
+        *   **Includes Handling**: LTspice `.include`, `.inc`, and `.lib` directives found in text elements are commented out during conversion to KiCad, as they are handled via `Sim.Library` fields.
+
+*   **FLAG** (Global Labels)
+    *   **Syntax**: `FLAG <posX> <posY> <name>`.
+    *   **Properties**:
+        *   `Offset`: A `VECTOR2I` representing the flag's position.
+        *   `Value`: The string name of the flag.
+        *   `FontSize`: Defaults to 2 (42 mils).
+        *   **Special Case**: A flag with a `Value` of "0" is treated as a power symbol (GND) in KiCad. All other flags become global labels (`SCH_GLOBAL_LABEL_T`).
+
+*   **DATAFLAG** (Directives)
+    *   **Syntax**: `DATAFLAG <posX> <posY> <expression>`.
+    *   **Properties**:
+        *   `Offset`: A `VECTOR2I` representing the data flag's position.
+        *   `Expression`: The string content of the directive/expression.
+        *   `FontSize`: Defaults to 2 (42 mils). These are mapped to `SCH_DIRECTIVE_LABEL_T` in KiCad.
+
+*   **WINDOW** (Symbol Fields)
+    *   **Syntax**: `WINDOW <number> <windowPosX> <windowPosY> <justification> <fontSize>`.
+    *   **Description**: Defines how various symbol fields (e.g., reference, value, model parameters) are displayed within a symbol.
+    *   **Properties**:
+        *   `WindowNumber`: An integer identifier for the specific field. Common mappings include:
+            *   **0**: `InstName` (maps to KiCad `FIELD_T::REFERENCE`).
+            *   **3**: `Value` (maps to KiCad `FIELD_T::VALUE`).
+            *   **38**: `SpiceModel` (maps to KiCad "Sim.Name" field).
+            *   **39**: `SpiceLine` (maps to KiCad "Sim.Params" field).
+            *   Numerous other numbers exist for various properties like `PartNum`, `Type`, `RefName`, `QArea`, `Width`, `Length`, `Multi`, `Nec`, `Def_Sub`, `Digital_Timing_Model`, `Cell`, `W/L`, `PSIZE`, `NSIZE`, `sheets`, `sh#`, `Em_Scale`, `Epi`, `Sinker`, `Multi5`, `AQ`, `AQSUB`, `ZSIZE`, `ESR`, `Value2`, `COUPLE`, `Voltage`, `Area1` through `Area4`, `Multi1` through `Multi4`, `DArea`, `DPerim`, `CArea`, `CPerim`, `Shrink`, `Gate_Resize`, `BP`, `BN`, `Sim_Level`, `G_Voltage`, `SpiceLine3`, `D_VOLTAGES`, `Version`, `Comment`, `XDef_Sub`, `LVS_Area`, `User1` through `User5`, `Root`, `Class`, `Geometry`, `WL_Delimiter`, `T1`, `T2`, `DsgnName`, `Designer`, `RTN`, `PWR`, `BW`, `CAPROWS`, `CAPCOLS`, `NF`, `SLICES`, `CUR`, `TEMPRISE`, `STRIPS`, `WEM`, `LEM`, `BASES`, `COLS`, `XDef_Tub`.
+        *   `Position`: A `VECTOR2I` representing the field's offset relative to the symbol's origin.
+        *   `Justification`: Uses the `JUSTIFICATION` enum (see below).
+        *   `FontSize`: An integer value. If 0, it defaults to 2, and the field is rendered as invisible in KiCad.
+
+---
+
+**4. Justification (`JUSTIFICATION`)**
+
+*   This enum is used for both text and pin justification.
+*   **Mapping from string values found in LTspice files**:
+    *   **"LEFT"**: `LEFT`.
+        *   For text: Horizontal Left, Vertical Center (`GR_TEXT_H_ALIGN_LEFT`, `GR_TEXT_V_ALIGN_CENTER`).
+        *   For pins: `PIN_RIGHT` orientation.
+    *   **"CENTER"**: `CENTER`.
+        *   For text: Horizontal Center, Vertical Center (`GR_TEXT_H_ALIGN_CENTER`, `GR_TEXT_V_ALIGN_CENTER`).
+    *   **"RIGHT"**: `RIGHT`.
+        *   For text: Horizontal Right, Vertical Center (`GR_TEXT_H_ALIGN_RIGHT`, `GR_TEXT_V_ALIGN_CENTER`).
+        *   For pins: `PIN_LEFT` orientation.
+    *   **"TOP"**: `TOP`.
+        *   For text: Horizontal Center, Vertical Top (`GR_TEXT_H_ALIGN_CENTER`, `GR_TEXT_V_ALIGN_TOP`).
+        *   For pins: `PIN_DOWN` orientation.
+    *   **"BOTTOM"**: `BOTTOM`.
+        *   For text: Horizontal Center, Vertical Bottom (`GR_TEXT_H_ALIGN_CENTER`, `GR_TEXT_V_ALIGN_BOTTOM`).
+        *   For pins: `PIN_UP` orientation.
+    *   **"VLEFT"**: `VLEFT` (Vertical Left).
+        *   For text: Horizontal Left, Vertical Center, with Vertical Angle (`GR_TEXT_H_ALIGN_LEFT`, `GR_TEXT_V_ALIGN_CENTER`, `ANGLE_VERTICAL`).
+        *   For pins: `PIN_RIGHT` orientation.
+    *   **"VRIGHT"**: `VRIGHT` (Vertical Right).
+        *   For text: Horizontal Right, Vertical Center, with Vertical Angle (`GR_TEXT_H_ALIGN_RIGHT`, `GR_TEXT_V_ALIGN_CENTER`, `ANGLE_VERTICAL`).
+        *   For pins: `PIN_LEFT` orientation.
+    *   **"VCENTER"**: `VCENTER` (Vertical Center).
+        *   For text: Horizontal Center, Vertical Center, with Vertical Angle (`GR_TEXT_H_ALIGN_CENTER`, `GR_TEXT_V_ALIGN_CENTER`, `ANGLE_VERTICAL`).
+    *   **"VTOP"**: `VTOP` (Vertical Top).
+        *   For text: Horizontal Center, Vertical Top, with Vertical Angle (`GR_TEXT_H_ALIGN_CENTER`, `GR_TEXT_V_ALIGN_TOP`, `ANGLE_VERTICAL`).
+        *   For pins: `PIN_DOWN` orientation.
+    *   **"VBOTTOM"**: `VBOTTOM` (Vertical Bottom).
+        *   For text: Horizontal Center, Vertical Bottom, with Vertical Angle (`GR_TEXT_H_ALIGN_CENTER`, `GR_TEXT_V_ALIGN_BOTTOM`, `ANGLE_VERTICAL`).
+        *   For pins: `PIN_UP` orientation.
+    *   **"INVISIBLE"**: `INVISIBLE`.
+        *   For text: Sets visibility to false (`aText->SetVisible(false)`).
+    *   **"NONE"**: `NONE`.
+        *   Specific to pin justification: When used for a pin, it results in the pin name text size being set to 0, effectively making it invisible.
+    *   **Other values**: An `IO_ERROR` is thrown.
+    *   **Multiline Text Adjustment**: For multiline text, `LEFT`, `CENTER`, `RIGHT`, `VLEFT`, `VCENTER`, `VRIGHT` justifications align the text by its first line, and its vertical justification might be adjusted to `GR_TEXT_V_ALIGN_TOP` with an additional offset.
+
+---
+
+**5. Pins (`PIN`, `IOPIN`, `POLARITY`)**
+
+*   **Symbol Pins (`PIN`)**
+    *   **Syntax**: `PIN <pinLocationX> <pinLocationY> <Justification> <nameOffSet>`.
+    *   **Properties**:
+        *   `PinLocation`: A `VECTOR2I` representing the pin's coordinates.
+        *   `PinJustification`: Uses the `JUSTIFICATION` enum (see above for specific pin justifications, including `NONE`).
+        *   `NameOffSet`: An integer offset for the pin name relative to the pin location.
+        *   `PinAttribute`: A map to store additional pin attributes, such as "PinName".
+        *   **Name Visibility**: If `PinJustification` is `NONE`, the pin name text size is set to 0, making it invisible.
+        *   **LRC Components**: For simple 2-pin components like resistors ("res"), capacitors ("cap"), and inductors ("ind"), default pin names (e.g., A/B) are dropped to prevent them from dictating the net name.
+        *   **KiCad Orientation**: The pin's KiCad orientation (`PIN_ORIENTATION`) is derived from its `PinJustification` (e.g., `LEFT` or `VLEFT` map to `PIN_RIGHT`, `RIGHT` or `VRIGHT` map to `PIN_LEFT`, `BOTTOM` or `VBOTTOM` map to `PIN_UP`, `TOP` or `VTOP` map to `PIN_DOWN`).
+
+*   **Schematic I/O Pins (`IOPIN`)**
+    *   **Syntax**: `IOPIN <pinLocationX> <pinLocationY> <pinPolarity>`.
+    *   **Description**: Represents I/O contacts on a symbol used for schematic input/output operations.
+    *   **Properties**:
+        *   `Location`: A `VECTOR2I` representing the I/O pin's coordinates.
+        *   `Polarity`: Uses the `POLARITY` enum (see below).
+        *   **Name Association**: The name of an `IOPIN` is typically found from an associated `FLAG` element located at the same coordinates.
+
+*   **Polarity (`POLARITY`)**
+    *   This enum is used to define the electrical polarity of I/O pins (`IOPIN`).
+    *   **Mapping from string values found in LTspice files**:
+        *   **"I"** or **"IN"**: `PIN_INPUT` (Maps to KiCad's `LABEL_FLAG_SHAPE::L_INPUT`).
+        *   **"O"** or **"OUT"**: `OUTPUT` (Maps to KiCad's `LABEL_FLAG_SHAPE::L_OUTPUT`).
+        *   **"B"** or **"BIDIR"**: `BIDIR` (Maps to KiCad's `LABEL_FLAG_SHAPE::L_BIDI`).
+        *   **Other values**: An `IO_ERROR` is thrown.
+
+---
+
+**6. Symbols (`SYMBOL`, `SYMBOLTYPE`, `ORIENTATION`)**
+
+*   **Symbol Definition (`LT_SYMBOL`)**
+    *   **Syntax (in `.asc` file)**: `SYMBOL <symbolName> <posX> <posY> <rotate_mirror_option>`.
+    *   **Syntax (in `.asy` file)**: Comprises various graphical elements (lines, rectangles, circles, arcs), attributes, and pins.
+    *   **Properties**:
+        *   `Name`: A string identifier for the symbol (e.g., "res", "npn").
+        *   `Offset`: A `VECTOR2I` representing the symbol's position on the schematic sheet.
+        *   `SymbolOrientation`: Uses the `ORIENTATION` enum (rotation/mirror operations).
+        *   `SymbolType`: Uses the `SYMBOLTYPE` enum (e.g., "CELL", "BLOCK").
+        *   `SymAttributes`: A map containing key-value pairs for various symbol attributes, such as "TYPE", "PREFIX", "INSTNAME", "VALUE", "VALUE2", "MODELFILE", and "SPICELINE".
+        *   **Components**: Contains vectors of `LINE`, `CIRCLE`, `WINDOW`, `ARC`, `RECTANGLE`, `WIRE`, and `PIN` structs, which collectively define the symbol's graphical representation and connection points.
+        *   **Dummy Symbol**: If a symbol's corresponding `.asy` file cannot be found, a placeholder dummy symbol (a rectangle) is created to represent it.
+        *   **KiCad Field Generation**: Specific handling is in place for various device prefixes (R, C, L, E, F, G, H, B, V, I) and types (DIODE, NPN, etc.) to generate appropriate KiCad fields like "Sim.Device", "Sim.Params", and "Sim.Library" for simulation purposes.
+
+*   **Symbol Type (`SYMBOLTYPE`)**
+    *   This enum describes the classification of a symbol.
+    *   **Mapping from string values found in LTspice files**:
+        *   **"CELL"**: `CELL`.
+        *   **"BLOCK"**: `BLOCK`.
+        *   **Other values**: An `IO_ERROR` is thrown.
+
+*   **Orientation (`ORIENTATION`)**
+    *   This enum defines the various rotation and mirror operations that can be applied to an LTspice symbol.
+    *   **Mapping from string values found in LTspice files**:
+        *   **"R0"**: `R0` (0-degree rotation) (Maps to KiCad `SYM_ORIENT_0`).
+        *   **"R90"**: `R90` (90-degree rotation) (Maps to KiCad `SYM_ORIENT_180` followed by `SYM_ROTATE_COUNTERCLOCKWISE` for symbols, and a rotation for shapes).
+        *   **"R180"**: `R180` (180-degree rotation) (Maps to KiCad `SYM_ORIENT_180` for symbols, and two rotations for shapes).
+        *   **"R270"**: `R270` (270-degree rotation) (Maps to KiCad `SYM_ROTATE_COUNTERCLOCKWISE` for symbols, and one rotation for shapes).
+        *   **"M0"**: `M0` (0-degree mirror) (Maps to KiCad `SYM_MIRROR_Y` for symbols, and `MirrorVertically(0)` for shapes).
+        *   **"M90"**: `M90` (90-degree mirror) (Maps to KiCad `SYM_MIRROR_Y` followed by `SYM_ROTATE_COUNTERCLOCKWISE` for symbols, and `MirrorVertically(0)` then rotation for shapes).
+        *   **"M180"**: `M180` (180-degree mirror) (Maps to KiCad `SYM_MIRROR_X` for symbols, and `MirrorHorizontally(0)` for shapes).
+        *   **"M270"**: `M270` (270-degree mirror) (Maps to KiCad `SYM_MIRROR_Y` followed by `SYM_ROTATE_CLOCKWISE` for symbols, and `MirrorVertically(0)` then rotation for shapes).
+        *   **Other values**: An `IO_ERROR` is thrown.

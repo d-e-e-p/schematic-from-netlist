@@ -1,0 +1,4 @@
+pyverilog
+kahypar
+networkx
+pygraphviz
