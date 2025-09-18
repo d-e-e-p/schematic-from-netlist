@@ -37,6 +37,9 @@ class HypergraphPartitioner:
         G = nx.Graph()
         for e in range(self.g.numEdges()):
             pins = list(self.g.pins(e))
+            print(f"{e=} {len(pins)=}")
+            for pin in pins:
+                print(f"  {pin=}  {self.id_to_name[pin]=}")
             for u, v in combinations(pins, 2):
                 if G.has_edge(u, v):
                     G[u][v]["weight"] += 1  # accumulate weight
@@ -77,6 +80,7 @@ class HypergraphPartitioner:
         """
         G = self.hypergraph_to_graph()
         A = pgv.AGraph(directed=True, strict=False, rankdir="TB", ratio="auto")
+        print(f"Partition into {k} clusters complete")
 
         groups = {}
         for node, block_id in partition.items():
@@ -115,10 +119,9 @@ class HypergraphPartitioner:
             filenames[ft] = os.path.join(output_dir, f"{basename}.{ft}")
 
         # Layout and draw the graph
-        A.layout(prog="dot")
         A.write(filenames["dot"])
+        A.layout(prog="dot", args="-v")
         A.draw(filenames["png"], format="png")
         A.draw(filenames["json"], format="json")
-        print(f"Graph partition saved to {filenames['json']}")
+        print(f"Graph saved to {filenames['json']}")
         self.graph_json_data = filenames["json"]
-

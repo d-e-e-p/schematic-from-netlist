@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Dict, List, Optional, Set, Union
+from typing import Dict, List, Optional, Set
 
 from schematic_from_netlist.graph.graph_partition import HypergraphData
 
@@ -47,17 +47,21 @@ class Net:
     bit_range: Optional[tuple] = None  # (msb, lsb) for vectors
     pins: Set[Pin] = field(default_factory=set)
     id: int = -1
+    num_conn: int = 0
 
     def __post_init__(self):
         self.full_name = f"{self.module.full_name}.{self.name}"
         self.drivers: Set[Pin] = set()  # Output pins driving this net
         self.loads: Set[Pin] = set()  # Input pins loading this net
+        self.connections = set()  # drivers + loads
 
     def add_pin(self, pin: Pin):
         """Add a pin connection to this net"""
         self.pins.add(pin)
         pin.net = self
 
+        self.connections.add(pin)
+        self.num_conn += 1
         if pin.direction == PinDirection.OUTPUT:
             self.drivers.add(pin)
         elif pin.direction == PinDirection.INPUT:
@@ -69,13 +73,19 @@ class Net:
     def remove_pin(self, pin: Pin):
         """Remove a pin connection from this net"""
         self.pins.discard(pin)
+        self.connections.discard(pin)
         self.drivers.discard(pin)
         self.loads.discard(pin)
+        self.num_conn -= 1
         pin.net = None
 
     def get_fanout(self) -> int:
         """Get the fanout (number of loads) on this net"""
         return len(self.loads)
+
+    def get_connections(self) -> int:
+        """Get the num of connected pins for this net"""
+        return len(self.connections)
 
     def is_floating(self) -> bool:
         """Check if net has no drivers"""
@@ -147,10 +157,27 @@ class Module:
         else:
             self.full_name = self.name  # Top level module
 
-    def add_net(self, net_name: str, net_type: NetType = NetType.WIRE, bit_width: int = 1, bit_range: Optional[tuple] = None) -> Net:
+    def add_net(
+        self,
+        net_name: str,
+        net_type: NetType = NetType.WIRE,
+        bit_width: int = 1,
+        bit_range: Optional[tuple] = None,
+    ) -> Net:
         """Add a net to this module"""
-        net = Net(name=net_name, module=self, net_type=net_type, bit_width=bit_width, bit_range=bit_range)
+        net = Net(
+            name=net_name,
+            module=self,
+            net_type=net_type,
+            bit_width=bit_width,
+            bit_range=bit_range,
+        )
         self.nets[net_name] = net
+        return net
+
+    def remove_net(self, net_name):
+        if net_name in self.nets:
+            del self.nets[net_name]
         return net
 
     def add_instance(self, inst_name: str, module_ref: str) -> Instance:
@@ -189,7 +216,8 @@ class Module:
 class NetlistDatabase:
     """Main database class for the hierarchical netlist"""
 
-    def __init__(self):
+    def __init__(self, fanout_threshold: int = 10):
+        self.fanout_threshold = fanout_threshold
         self.top_module: Optional[Module] = None
         self.modules: Dict[str, Module] = {}  # Module definitions
 
@@ -202,6 +230,9 @@ class NetlistDatabase:
 
         self.id_by_instname: Dict[str, int] = {}
         self.id_by_netname: Dict[str, int] = {}
+
+        self.instname_by_id: Dict[int, str] = {}
+        self.netname_by_id: Dict[int, str] = {}
 
         self.buffered_nets_log: Dict[str, Dict] = {}
 
@@ -223,18 +254,18 @@ class NetlistDatabase:
         def traverse_module(module: Module):
             # Add all instances
             for instance in module.instances.values():
-                self.inst_by_name[instance.full_name] = instance
+                self.inst_by_name[instance.name] = instance
                 # Add all pins of this instance
                 for pin in instance.pins.values():
                     self.pins_by_name[pin.full_name] = pin
 
             # Add all nets
             for net in module.nets.values():
-                self.nets_by_name[net.full_name] = net
+                self.nets_by_name[net.name] = net
 
             # Add module ports as pins
             for port in module.ports.values():
-                self.pins_by_name[port.full_name] = port
+                self.pins_by_name[port.name] = port
 
             # Recursively traverse child modules
             for child_module in module.child_modules.values():
@@ -257,7 +288,11 @@ class NetlistDatabase:
 
     def get_net_connections(self, net: Net) -> Dict[str, List[Pin]]:
         """Get all connections to a net, organized by type"""
-        return {"drivers": list(net.drivers), "loads": list(net.loads), "all_pins": list(net.pins)}
+        return {
+            "drivers": list(net.drivers),
+            "loads": list(net.loads),
+            "all_pins": list(net.pins),
+        }
 
     def trace_net_path(self, start_pin: Pin, max_depth: int = 10) -> List[Pin]:
         """Trace the path from a pin through connected nets"""
@@ -290,7 +325,12 @@ class NetlistDatabase:
             return {}
 
         net = driver_pin.net
-        fanout_tree = {"driver": driver_pin.full_name, "net": net.full_name, "loads": [pin.full_name for pin in net.loads], "fanout": len(net.loads)}
+        fanout_tree = {
+            "driver": driver_pin.full_name,
+            "net": net.full_name,
+            "loads": [pin.full_name for pin in net.loads],
+            "fanout": len(net.loads),
+        }
 
         return fanout_tree
 
@@ -326,19 +366,33 @@ class NetlistDatabase:
         return paths
 
     def generate_ids(self):
-        id_counter = 0
-        for name, inst in self.inst_by_name.items():
-            inst.id = id_counter
-            self.id_by_instname[id_counter] = name
-            self.inst_by_id[id_counter] = inst
-            id_counter += 1
+        net_id_counter = 0
+        inst_id_counter = 0
 
-        id_counter = 0
+        """
+        for name, inst in self.inst_by_name.items():
+            inst.id = inst_id_counter
+            self.id_by_instname[name] = inst_id_counter
+            self.inst_by_id[inst_id_counter] = inst
+            inst_id_counter += 1
+        """
+
         for name, net in self.nets_by_name.items():
-            net.id = id_counter
-            self.id_by_netname[id_counter] = name
-            self.nets_by_id[id_counter] = net
-            id_counter += 1
+            if net.num_conn > 0 and net.num_conn < self.fanout_threshold:
+                net.id = net_id_counter
+                self.id_by_netname[name] = net_id_counter
+                self.nets_by_id[net_id_counter] = net
+                self.netname_by_id[net_id_counter] = name
+                net_id_counter += 1
+                for pin in net.pins:
+                    instname = pin.instance.name
+                    if instname not in self.id_by_instname:
+                        self.id_by_instname[instname] = inst_id_counter
+                        self.instname_by_id[inst_id_counter] = instname
+                        self.inst_by_id[inst_id_counter] = pin.instance
+                        pin.instance.id = inst_id_counter
+                        inst_id_counter += 1
+                        pass
 
     def buffer_multi_fanout_nets(self):
         """Inserts buffers on nets with fanout > 1"""
@@ -422,7 +476,7 @@ class NetlistDatabase:
                 stats["multi_driven_nets"] += 1
 
         if len(self.nets_by_name) > 0:
-            stats["avg_fanout"] = total_fanout / len(self.nets_by_name)
+            stats["avg_fanout"] = total_fanout // len(self.nets_by_name)
 
         return stats
 
@@ -439,9 +493,17 @@ class NetlistDatabase:
         index_vector = [0]
 
         for net in sorted_nets:
-            connected_instance_ids = sorted(list({pin.instance.id for pin in net.pins if pin.instance.id != -1}))
+            connected_instance_ids = sorted(list({pin.instance.id for pin in net.pins}))
+            connected_instpin_names = [f"{pin.instance.name}/{pin.name}" for pin in net.pins]
             edge_vector.extend(connected_instance_ids)
             index_vector.append(len(edge_vector))
+            print(f"connecting {net.name=} conn {net.num_conn}: {connected_instance_ids=} {connected_instpin_names=}")
+            # print(f"{len(edge_vector)=} {len(index_vector)=} {edge_vector=} {index_vector=}")
+
+            if index_vector[-1] != len(edge_vector):
+                print(f"Bad sentinel: {index_vector[-1]=} != {len(edge_vector)=}")
+        if len(index_vector) != num_edges + 1:
+            print(f"Mismatch: {len(index_vector)=} vs {num_edges + 1=}")
 
         return HypergraphData(
             num_nodes=num_nodes,

@@ -40,7 +40,7 @@ def main():
     hypergraph_data = db.build_hypergraph_data()
 
     # 3. Partition the hypergraph
-    partitioner = HypergraphPartitioner(hypergraph_data, db.id_by_instname)
+    partitioner = HypergraphPartitioner(hypergraph_data, db.instname_by_id)
     partition = partitioner.run_partitioning(args.k, args.config)
 
     # 4. Dump the partitioned graph to JSON, DOT, and PNG
