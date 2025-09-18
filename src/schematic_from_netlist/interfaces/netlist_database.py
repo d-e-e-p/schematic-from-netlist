@@ -1,7 +1,8 @@
-from schematic_from_netlist.graph.graph_partition import HypergraphData
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Dict, List, Optional, Set, Union
+
+from schematic_from_netlist.graph.graph_partition import HypergraphData
 
 
 class PinDirection(Enum):
@@ -201,7 +202,7 @@ class NetlistDatabase:
 
         self.id_by_instname: Dict[str, int] = {}
         self.id_by_netname: Dict[str, int] = {}
-        
+
         self.buffered_nets_log: Dict[str, Dict] = {}
 
     def set_top_module(self, module: Module):
@@ -344,32 +345,33 @@ class NetlistDatabase:
         if not self.top_module:
             return
 
+        # TODO : handle multiple drivers
         nets_to_buffer = [net for net in self.nets_by_name.values() if net.get_fanout() > 1]
 
         for net in nets_to_buffer:
             original_net_name = net.name
-            self.buffered_nets_log[original_net_name] = {'loads': list(net.loads), 'buffer_insts': [], 'new_nets': []}
-            
+            self.buffered_nets_log[original_net_name] = {"loads": list(net.loads), "buffer_insts": [], "new_nets": []}
+
             loads = list(net.loads)
             for i, load_pin in enumerate(loads):
                 buffer_name = f"buf_{original_net_name}_{i}"
                 buffer_inst = self.top_module.add_instance(buffer_name, "BUF")
-                self.buffered_nets_log[original_net_name]['buffer_insts'].append(buffer_inst)
+                self.buffered_nets_log[original_net_name]["buffer_insts"].append(buffer_inst)
 
                 # Input pin of buffer
                 buf_in_pin = buffer_inst.add_pin("I", PinDirection.INPUT)
-                net.add_pin(buf_in_pin) # Connect buffer input to original net
+                net.add_pin(buf_in_pin)  # Connect buffer input to original net
 
                 # Output pin of buffer
                 buf_out_pin = buffer_inst.add_pin("O", PinDirection.OUTPUT)
-                
+
                 # New net for buffer output
                 new_net_name = f"{original_net_name}_buf_{i}"
                 new_net = self.top_module.add_net(new_net_name)
-                self.buffered_nets_log[original_net_name]['new_nets'].append(new_net)
-                
+                self.buffered_nets_log[original_net_name]["new_nets"].append(new_net)
+
                 new_net.add_pin(buf_out_pin)
-                
+
                 # Disconnect load from original net and connect to new net
                 net.remove_pin(load_pin)
                 new_net.add_pin(load_pin)
@@ -387,20 +389,20 @@ class NetlistDatabase:
                 continue
 
             # Reconnect original loads
-            for load_pin in log['loads']:
+            for load_pin in log["loads"]:
                 original_net.add_pin(load_pin)
 
             # Delete buffer instances and disconnect their input pins
-            for buffer_inst in log['buffer_insts']:
+            for buffer_inst in log["buffer_insts"]:
                 for pin in buffer_inst.pins.values():
                     if pin.net:
                         pin.net.remove_pin(pin)
                 del self.top_module.instances[buffer_inst.name]
 
             # Delete new nets
-            for new_net in log['new_nets']:
+            for new_net in log["new_nets"]:
                 del self.top_module.nets[new_net.name]
-        
+
         self.buffered_nets_log.clear()
         self._build_lookup_tables()
 

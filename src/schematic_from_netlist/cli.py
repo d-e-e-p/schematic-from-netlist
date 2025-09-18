@@ -1,7 +1,7 @@
 import argparse
 import os
 
-from schematic_from_netlist.graph.create_schematic import CreateSchematic
+from schematic_from_netlist.graph.gen_sch_data import GenSchematicData
 from schematic_from_netlist.graph.graph_partition import HypergraphPartitioner
 from schematic_from_netlist.interfaces.json_graph import ParseJson
 from schematic_from_netlist.interfaces.ltspice_writer import LTSpiceWriter
@@ -34,7 +34,7 @@ def main():
     verilog_parser = VerilogParser()
     db = verilog_parser.parse_and_store_in_db([args.netlist_file])
     # insert fanout buffers
-    db.buffer_multi_fanout_nets()
+    # db.buffer_multi_fanout_nets()
 
     # 2. Build hypergraph data for partitioning
     hypergraph_data = db.build_hypergraph_data()
@@ -50,13 +50,12 @@ def main():
     if partitioner.graph_json_data:
         json_parser = ParseJson(partitioner.graph_json_data)
         geom_db = json_parser.parse()
-        
+
         # 6. Associate geometry with the netlist
-        schematic_db = CreateSchematic(geom_db, db)
+        schematic_db = GenSchematicData(geom_db, db)
         schematic_db.generate_schematic_info()
-        
-        # 7. Patch buffers and write the final schematic
-        schematic_db.patch_and_remove_buffers()
+
+        # 7.write the final schematic
         ltspice_writer = LTSpiceWriter(db, schematic_db)
         ltspice_writer.produce_schematic(args.output_dir)
 

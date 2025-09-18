@@ -2,24 +2,31 @@ import json
 from dataclasses import dataclass, field
 from typing import List, Tuple
 
+
 @dataclass
 class GeomPort:
     """Represents the geometric location of a port on an instance."""
+
     name: str  # Head instance name
     conn: str  # Tail instance name
     rect: Tuple[float, float, float, float]
 
+
 @dataclass
 class GeomNet:
     """Represents the geometric path of a wire."""
+
     conn: List[str]
     points: List[Tuple[float, float]]
+
 
 @dataclass
 class GeomDB:
     """A database for geometric primitives extracted from the graph layout."""
+
     ports: List[GeomPort] = field(default_factory=list)
     nets: List[GeomNet] = field(default_factory=list)
+
 
 class ParseJson:
     def __init__(self, json_file):
@@ -39,7 +46,7 @@ class ParseJson:
             try:
                 head_gvid = edge.get("head")
                 tail_gvid = edge.get("tail")
-                
+
                 head_name = gvid_to_name.get(head_gvid)
                 tail_name = gvid_to_name.get(tail_gvid)
 
@@ -65,6 +72,6 @@ class ParseJson:
 
             except (KeyError, IndexError, AttributeError, ValueError, TypeError):
                 continue
-        
+
         print(f"Parsed {len(geom_db.ports)} ports and {len(geom_db.nets)} nets from JSON.")
         return geom_db
