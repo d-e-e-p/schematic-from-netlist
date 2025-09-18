@@ -102,6 +102,7 @@ class HypergraphPartitioner:
         # The arrow can be styled with: 'dot', 'inv', 'none', 'normal', etc.
         A.edge_attr["arrowhead"] = "dot"
         A.edge_attr["arrowtail"] = "dot"
+        A.edge_attr["arrowsize"] = "0.0"
         A.edge_attr["dir"] = "both"
 
         # Ensure output directories exist
@@ -120,3 +121,4 @@ class HypergraphPartitioner:
         A.draw(filenames["json"], format="json")
         print(f"Graph partition saved to {filenames['json']}")
         self.graph_json_data = filenames["json"]
+

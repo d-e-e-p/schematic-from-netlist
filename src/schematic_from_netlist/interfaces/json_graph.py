@@ -9,7 +9,7 @@ class GeomPort:
 
     name: str  # Head instance name
     conn: str  # Tail instance name
-    rect: Tuple[float, float, float, float]
+    point: Tuple[float, float]
 
 
 @dataclass
@@ -55,15 +55,13 @@ class ParseJson:
 
                 # Extract port rectangle from the head of the edge
                 head_rect_data = edge["_hdraw_"][-1]["rect"]
-                x_h, y_h, w_h, h_h = head_rect_data
-                head_port_rect = (x_h - w_h, y_h - h_h, x_h + w_h, y_h + h_h)
-                geom_db.ports.append(GeomPort(name=head_name, conn=tail_name, rect=head_port_rect))
+                x_h, y_h, _, _ = head_rect_data
+                geom_db.ports.append(GeomPort(name=head_name, conn=tail_name, point=(x_h, y_h)))
 
                 # Extract port rectangle from the tail of the edge
                 tail_rect_data = edge["_tdraw_"][-1]["rect"]
-                x_t, y_t, w_t, h_t = tail_rect_data
-                tail_port_rect = (x_t - w_t, y_t - h_t, x_t + w_t, y_t + h_t)
-                geom_db.ports.append(GeomPort(name=tail_name, conn=head_name, rect=tail_port_rect))
+                x_t, y_t, _, _ = tail_rect_data
+                geom_db.ports.append(GeomPort(name=tail_name, conn=head_name, point=(x_t, y_t)))
 
                 # Extract wire points
                 points_data = edge["_draw_"][-1]["points"]

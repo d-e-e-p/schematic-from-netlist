@@ -54,15 +54,51 @@ class LTSpiceWriter:
         min_dist = min(dist_left, dist_right, dist_top, dist_bottom)
 
         if min_dist == dist_left:
-            return "LEFT"
-        elif min_dist == dist_right:
             return "RIGHT"
+        elif min_dist == dist_right:
+            return "LEFT"
         elif min_dist == dist_top:
-            return "TOP"
-        elif min_dist == dist_bottom:
             return "BOTTOM"
+        elif min_dist == dist_bottom:
+            return "TOP"
 
         return "TOP"
+
+    def generate_symbol_window_commands(self, hw, hh):
+        """Generate symbol with properly positioned WINDOW fields."""
+
+        # Symbol shape
+        asy = f"RECTANGLE NORMAL {-hw} {-hh} {hw} {hh}\n"
+
+        # Calculate text positions relative to symbol bounds
+        # Rectangle bounds: left=-hw, top=-hh, right=hw, bottom=hh
+
+        # Option 1: Outside the rectangle
+        ref_x = hw + 8  # Reference name to the right
+        ref_y = -hh  # Aligned with top
+
+        val_x = hw + 8  # Value to the right
+        val_y = hh  # Aligned with bottom
+
+        # Option 2: Inside the rectangle (if large enough)
+        if hw > 30 and hh > 20:
+            ref_x = 0  # Centered horizontally
+            ref_y = -hh + 8  # Near top, inside
+            val_x = 0  # Centered horizontally
+            val_y = hh - 8  # Near bottom, inside
+
+        simd_x, simd_y = (0, -10)
+        simp_x, simp_y = (0, 10)
+
+        # Add WINDOW definitions
+        font_size = int(2 * (self.schematic_db.scale / 100))
+        asy = ""
+        asy += f"WINDOW 0 {ref_x} {ref_y} Left {font_size}\n"  # InstName (Reference)
+        asy += f"WINDOW 3 {val_x} {val_y} Left {font_size}\n"  # Value
+        asy += f"WINDOW 38 {simd_x} {simd_x} Left {font_size}\n"  # Sim.Device
+        asy += f"WINDOW 39 {simp_y} {simp_y} Left {font_size}\n"  # Sim.Params
+
+        return asy
 
     def _generate_symbol_asy(self, inst_shape, output_dir="data/ltspice"):
         """Generates an .asy file for a given module."""
@@ -79,11 +115,12 @@ class LTSpiceWriter:
         asy = "Version 4\n"
         asy += "SymbolType BLOCK\n"
         asy += f"RECTANGLE NORMAL {-hw} {-hh} {hw} {hh}\n"
-
+        asy += f"SYMATTR SpiceModel {inst_shape.module_ref}\n"  # This sets Sim.Device
+        asy += f"SYMATTR SpiceLine -\n"  # This sets Sim.Device
+        asy += self.generate_symbol_window_commands(hw, hh)
         for shape in inst_shape.port_shapes:
-            rect = shape.rect
-            port_center_x = (rect[2] + rect[0]) // 2
-            port_center_y = (rect[3] + rect[1]) // 2
+            port_center_x = shape.point[0]
+            port_center_y = shape.point[1]
             x = port_center_x - inst_offset_x
             y = port_center_y - inst_offset_y
             pt = [x, y]

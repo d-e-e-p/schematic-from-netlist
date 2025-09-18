@@ -13,7 +13,7 @@ class NetShape:
 @dataclass
 class PortShape:
     pin: Pin
-    rect: Tuple[int, int, int, int]
+    point: Tuple[int, int]
 
 
 @dataclass
@@ -37,7 +37,11 @@ class GenSchematicData(SchmaticData):
         super().__init__()
         self.geom_db = geom_db
         self.netlist_db = netlist_db
-        self.scale = 10  # from graphviz to LTspice
+        self.scale = 16  # from graphviz to LTspice
+        self.grid_size = 16  # needs to be a multiple of 50 mils on kicad import for wires to connect to pin
+        # TODO: many make it equal area to the smallest other macro?
+        self.min_block_size = 10 * self.scale
+        self.block_moat_size = int(1 * self.scale)
 
     def find_net_between_inst(self, list_of_inst):
         """
@@ -74,9 +78,9 @@ class GenSchematicData(SchmaticData):
             for net in match_nets:
                 for pin in net.pins:
                     if pin.instance.name == inst1.name:
-                        scaled_rect = tuple(coord * self.scale for coord in port.rect)
-                        scaled_rect = tuple(map(int, scaled_rect))
-                        ps = PortShape(pin, scaled_rect)
+                        x, y = port.point
+                        scaled_point = (int(x * self.scale), int(y * self.scale))
+                        ps = PortShape(pin, scaled_point)
                         self.port_shapes.append(ps)
 
     def find_block_bounding_boxes(self):
@@ -92,29 +96,36 @@ class GenSchematicData(SchmaticData):
 
         # Aggregate rects for each instance
         for instname, shapes in instname2shapes.items():
-            rect_list = [s.rect for s in shapes if hasattr(s, "rect")]
+            pt_list = [s.point for s in shapes if hasattr(s, "point")]
 
-            if not rect_list:
+            if not pt_list:
                 continue
 
-            if len(rect_list) == 1:
-                # only 1 port how sad..
-                scale = 10
-                r = rect_list[0]
-                xw = scale * (r[2] - r[0])
-                yh = scale * (r[3] - r[1])
-                x_min = r[0] - xw
-                y_min = r[1] - yh
-                x_max = r[2] + xw
-                y_max = r[2] + yh
-                rect = (x_min, y_min, x_max, y_max)
-            else:
-                x_min = min(r[0] for r in rect_list)
-                y_min = min(r[1] for r in rect_list)
-                x_max = max(r[2] for r in rect_list)
-                y_max = max(r[3] for r in rect_list)
-                rect = (x_min, y_min, x_max, y_max)
+            # TODO: need to grow nicely -- if only 1 port
+            # if len(pt_list) == 1:
 
+            x_min = min(p[0] for p in pt_list)
+            y_min = min(p[1] for p in pt_list)
+            x_max = max(p[0] for p in pt_list)
+            y_max = max(p[1] for p in pt_list)
+
+            # too small -- need to grow
+            bs = self.min_block_size
+            if x_max - x_min < bs:
+                x_min -= bs // 2
+                x_max += bs // 2
+            if y_max - y_min < bs:
+                y_min -= bs // 2
+                y_max += bs // 2
+
+            # block_moat_size a bit
+            bf = self.block_moat_size
+            x_min -= bf
+            x_max += bf
+            y_min -= bf
+            y_max += bf
+
+            rect = (x_min, y_min, x_max, y_max)
             # Ensure hierarchical instname is well-formed
             full_instname = instname
             if not full_instname.startswith(self.netlist_db.top_module.name + "/"):
@@ -128,44 +139,13 @@ class GenSchematicData(SchmaticData):
             module_ref = getattr(inst, "module_ref", "")
             print(f"{instname=} {module_ref=} {rect=}")
             for shape in shapes:
-                print(f"  {shape.pin.name=} {shape.rect=}")
+                print(f"  {shape.pin.name=} {shape.point=}")
             inst_shape = InstShape(
                 name=full_instname,
                 module_ref=module_ref,
                 rect=rect,
                 port_shapes=shapes,
             )
-            self.inst_shapes.append(inst_shape)
-
-    def find_outline_of_block(self):
-        instname2shapes = {}
-        for shape in self.port_shapes:
-            pin = shape.pin
-            if pin.instance.name not in instname2shapes:
-                instname2shapes[pin.instance.name] = []
-            instname2shapes[pin.instance.name].append(shape)
-
-        # ok now for each inst look at all the geom
-        rects = {}
-        for instname, shapes in instname2shapes.items():
-            if instname not in rects:
-                rects[instname] = []
-            for shape in shapes:
-                rect = shape.rect
-                rects[instname].append(rect)
-
-        for instname, rect_list in rects.items():
-            x_min = min(rect[0] for rect in rect_list)
-            y_min = min(rect[1] for rect in rect_list)
-            x_max = max(rect[0] for rect in rect_list)
-            y_max = max(rect[1] for rect in rect_list)
-            rect = (x_min, y_min, x_max, y_max)
-
-            full_instname = self.netlist_db.top_module.name + "/" + instname
-            port_shapes = instname2shapes[instname]
-            inst = self.netlist_db.inst_by_name[full_instname]
-            module_ref = inst.module_ref
-            inst_shape = InstShape(name=full_instname, module_ref=module_ref, rect=rect, port_shapes=port_shapes)
             self.inst_shapes.append(inst_shape)
 
     def scale_and_uniq_points(self, points):
@@ -300,13 +280,10 @@ class GenSchematicData(SchmaticData):
 
         for shape in self.inst_shapes:
             for shape in shape.port_shapes:
-                x1, y1, x2, y2 = shape.rect
+                x, y = shape.point
                 # Reflect across horizontal axis at sheet_height
-                y1_flipped = sheet_height - y1
-                y2_flipped = sheet_height - y2
-                # Normalize (y1 should be min, y2 max)
-                y1n, y2n = min(y1_flipped, y2_flipped), max(y1_flipped, y2_flipped)
-                shape.rect = (x1, y1n, x2, y2n)
+                y_flipped = sheet_height - y
+                shape.point = (x, y_flipped)
 
         # Flip net points
         for shape in self.net_shapes:
@@ -315,10 +292,39 @@ class GenSchematicData(SchmaticData):
                 flipped_points.append((x, sheet_height - y))
             shape.points = flipped_points
 
+    def snap_all_points_to_grid(self):
+        """
+        Snap all schematic geometry (instances, ports, nets) to the nearest grid point.
+        Ensures coordinates are multiples of self.grid_size.
+        """
+        grid = self.grid_size
+
+        def snap(v):
+            # Round to nearest multiple of grid
+            return round(v / grid) * grid
+
+        # Snap instance rectangles
+        for inst_shape in self.inst_shapes:
+            x1, y1, x2, y2 = inst_shape.rect
+            inst_shape.rect = (snap(x1), snap(y1), snap(x2), snap(y2))
+
+            # Snap instance ports
+            for port_shape in inst_shape.port_shapes:
+                x, y = port_shape.point
+                port_shape.point = (snap(x), snap(y))
+
+        # Snap net shapes
+        for net_shape in self.net_shapes:
+            snapped_points = []
+            for x, y in net_shape.points:
+                snapped_points.append((snap(x), snap(y)))
+            net_shape.points = snapped_points
+
     def generate_schematic_info(self):
         self.associate_ports_to_blocks()
         self.find_block_bounding_boxes()
         self.find_net_shapes()
+        self.snap_all_points_to_grid()
         self.calc_sheet_size()
         self.flip_y_axis()
         return self
