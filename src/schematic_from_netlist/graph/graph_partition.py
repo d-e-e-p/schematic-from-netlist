@@ -47,6 +47,70 @@ class HypergraphPartitioner:
                     G.add_edge(u, v, weight=1)
         return G
 
+    def compute_modularity_and_conductance(self, partition):
+        """
+        partition: dict node_id -> block_id
+        Returns: modularity, average conductance
+        """
+        G = self.hypergraph_to_graph()
+        # Prepare communities list for NetworkX modularity
+        communities = {}
+        for node, block in partition.items():
+            communities.setdefault(block, set()).add(node)
+        community_list = list(communities.values())
+
+        # Compute modularity
+        modularity = nx.algorithms.community.quality.modularity(G, community_list, weight="weight")
+
+        # Compute conductance for each community
+        conductances = []
+        for comm in community_list:
+            cond = nx.algorithms.cuts.conductance(G, comm)
+            conductances.append(cond)
+        avg_conductance = sum(conductances) / len(conductances)
+
+        return modularity, avg_conductance
+
+    def combined_score(self, modularity, conductance, w_mod=0.7, w_cond=0.3):
+        """
+        Combine modularity and conductance into a single score.
+        Higher score = better.
+        w_mod + w_cond should = 1
+        """
+        good_cond = 1.0 - conductance
+        return w_mod * modularity + w_cond * good_cond
+
+    def evaluate_run(self):
+        self.extract_groups()
+        print("Cut edges:", self.cut_metric())
+        partition_dict = {v: self.g.blockID(v) for v in range(self.g.numNodes())}
+
+        modularity, avg_cond = self.compute_modularity_and_conductance(partition_dict)
+        combined = self.combined_score(modularity, avg_cond)
+
+        print(f"QOR: Modularity: {modularity:.4f} Conductance: {avg_cond:.4f}  combined {combined:.4f}")
+        return modularity, avg_cond, combined
+
+    def extract_groups(self):
+        groups = {}
+        for v in range(self.g.numNodes()):
+            part = self.g.blockID(v)
+            groups.setdefault(part, []).append(v)
+
+        for group, members in groups.items():
+            nodes = [self.id_to_name[v] for v in members]
+            print(f"Group {group}: {nodes}")
+
+        return groups
+
+    def cut_metric(self):
+        cut_edges = 0
+        for e in range(self.g.numEdges()):
+            parts_touched = set(self.g.blockID(v) for v in self.g.pins(e))
+            if len(parts_touched) > 1:
+                cut_edges += 1
+        return cut_edges
+
     def setup_run(self, k, ini_file):
         """Configures KaHyPar context with internal settings."""
         self.context = kahypar.Context()
@@ -82,6 +146,30 @@ class HypergraphPartitioner:
         A = pgv.AGraph(directed=True, strict=False, rankdir="TB", ratio="auto")
         print(f"Partition into {k} clusters complete")
 
+        # --- Add text information ---
+        modularity, conductance, combined = self.evaluate_run()
+        info_text = f"Partitions: {k}\nModularity: {modularity:.4f}\nConductance: {conductance:.4f}\nCombined Score: {combined:.4f}"
+        A.graph_attr["label"] = info_text
+        A.graph_attr["labelloc"] = "t"
+        A.graph_attr["fontsize"] = "20"
+
+        # --- Node size scaling ---
+        degrees = dict(G.degree())
+        min_degree = min(degrees.values()) if degrees else 1
+        max_degree = max(degrees.values()) if degrees else 1
+
+        min_macro_size = 1.0
+        max_macro_size = 10.0
+        buffer_size = 0.2
+
+        def scale_macro_size(degree):
+            if max_degree == min_degree:
+                return min_macro_size
+            size = min_macro_size + (degree - min_degree) * (max_macro_size - min_macro_size) / (max_degree - min_degree)
+            # round to one decimal place
+            return round(size, 1)
+
+        # Group nodes by partition
         groups = {}
         for node, block_id in partition.items():
             groups.setdefault(block_id, []).append(node)
@@ -91,23 +179,53 @@ class HypergraphPartitioner:
             A.add_subgraph(name=subgraph_name, label=f"Partition {block_id}", color="lightgrey", style="filled")
             subgraph = A.get_subgraph(subgraph_name)
             for node in nodes:
-                subgraph.add_node(self.id_to_name[node], shape="box")
+                node_name = self.id_to_name.get(node, str(node))
+                if node_name.startswith("buf⊕_"):
+                    subgraph.add_node(node_name, width=buffer_size, height=buffer_size, fixedsize=True, shape="circle")
+                else:
+                    degree = degrees.get(node, 0)
+                    size = scale_macro_size(degree)
+                    subgraph.add_node(node_name, width=size, height=size, fixedsize=True, shape="box")
+                    # printf(f"Node {node_name} has degree {degree} and size {size}")
 
+        # Add edges
         for u, v in G.edges():
             A.add_edge(self.id_to_name[u], self.id_to_name[v])
 
         # Set graph attributes for better layout
-        A.graph_attr["splines"] = "ortho"
-        A.graph_attr["overlap"] = "false"
-        A.node_attr["style"] = "filled"
-        A.node_attr["fillcolor"] = "white"
-        A.node_attr["fontsize"] = "10"
-        A.edge_attr["fontsize"] = "8"
-        # The arrow can be styled with: 'dot', 'inv', 'none', 'normal', etc.
-        A.edge_attr["arrowhead"] = "dot"
-        A.edge_attr["arrowtail"] = "dot"
-        A.edge_attr["arrowsize"] = "0.0"
-        A.edge_attr["dir"] = "both"
+
+        # Graph-level attributes
+        A.graph_attr.update(
+            {
+                "fontsize": "20",
+                "maxiter": "10000",  # Allow more iterations for force-based layouts
+                "overlap": "false",  # Avoid node overlaps
+                "pack": "true",  # Enable packing of disconnected components
+                "packmode": "cluster",  # Pack clusters together
+                "sep": "+20",  # Extra separation between clusters
+                "splines": "ortho",  # Orthogonal edge routing
+            }
+        )
+
+        # Node-level attributes
+        A.node_attr.update(
+            {
+                "style": "filled",
+                "fillcolor": "white",
+                "fontsize": "10",
+            }
+        )
+
+        # Edge-level attributes
+        A.edge_attr.update(
+            {
+                "fontsize": "8",
+                "arrowhead": "dot",  # Options: 'dot', 'inv', 'normal', 'none', ...
+                "arrowtail": "dot",
+                "arrowsize": "0.0",  # Zero-size arrows (basically hidden)
+                "dir": "both",  # Draw arrows at both ends
+            }
+        )
 
         # Ensure output directories exist
         file_types = ["dot", "png", "json"]
@@ -120,7 +238,8 @@ class HypergraphPartitioner:
 
         # Layout and draw the graph
         A.write(filenames["dot"])
-        A.layout(prog="dot", args="-v")
+        # A.layout(prog="dot", args="-v")
+        A.layout(prog="sfdp", args="-v")
         A.draw(filenames["png"], format="png")
         A.draw(filenames["json"], format="json")
         print(f"Graph saved to {filenames['json']}")

@@ -37,7 +37,7 @@ class GenSchematicData(SchmaticData):
         super().__init__()
         self.geom_db = geom_db
         self.netlist_db = netlist_db
-        self.scale = 16  # from graphviz to LTspice
+        self.scale = 4  # from graphviz to LTspice, needs to be adjusted to avoid limits
         self.grid_size = 16  # needs to be a multiple of 50 mils on kicad import for wires to connect to pin
         # TODO: many make it equal area to the smallest other macro?
         self.min_block_size = 10 * self.scale
@@ -126,12 +126,8 @@ class GenSchematicData(SchmaticData):
             y_max += bf
 
             rect = (x_min, y_min, x_max, y_max)
-            # Ensure hierarchical instname is well-formed
-            full_instname = instname
-            if not full_instname.startswith(self.netlist_db.top_module.name + "/"):
-                full_instname = f"{self.netlist_db.top_module.name}/{instname}"
 
-            inst = self.netlist_db.inst_by_name.get(full_instname)
+            inst = self.netlist_db.inst_by_name.get(instname)
             if inst is None:
                 # fallback or skip if inst not found
                 continue
@@ -141,7 +137,7 @@ class GenSchematicData(SchmaticData):
             for shape in shapes:
                 print(f"  {shape.pin.name=} {shape.point=}")
             inst_shape = InstShape(
-                name=full_instname,
+                name=instname,
                 module_ref=module_ref,
                 rect=rect,
                 port_shapes=shapes,
@@ -216,8 +212,8 @@ class GenSchematicData(SchmaticData):
 
                 if input_port and output_port:
                     # Create a new wire to "patch" the connection
-                    in_rect = input_port.rect
-                    out_rect = output_port.rect
+                    in_point = input_port.point
+                    out_point = output_port.point
 
                     # Get center points of the port rectangles
                     scaled_points = self.center_points(in_rect, out_rect)
