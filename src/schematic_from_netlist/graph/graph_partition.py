@@ -21,12 +21,32 @@ class HypergraphData:
     edge_vector: List[int]
 
 
+from dataclasses import dataclass, field
+
+
+@dataclass
+class Edge:
+    src: str
+    dst: str
+    name: str | None = None  # optional label
+    color: str | None = None  # optional color
+    fontsize: int | None = None
+    weight: int | None = None
+
+    @property
+    def attrs(self) -> dict:
+        """Return a dictionary of Graphviz attributes, skipping None values."""
+        return {k: v for k, v in {"label": self.name, "color": self.color, "fontsize": self.fontsize, "weight": self.weight}.items() if v is not None}
+
+
 class HypergraphPartitioner:
-    def __init__(self, hypergraph_data: HypergraphData, id_to_name: Dict[int, str]):
+    def __init__(self, hypergraph_data: HypergraphData, db):
         self.hypergraph_data = hypergraph_data
-        self.id_to_name = id_to_name
+        self.db = db
+        self.id_to_name = db.instname_by_id
         self.context = None
         self.g = None
+        self.k = 1
         self.graph_json_data = None
 
     def hypergraph_to_graph(self):
@@ -37,9 +57,9 @@ class HypergraphPartitioner:
         G = nx.Graph()
         for e in range(self.g.numEdges()):
             pins = list(self.g.pins(e))
-            print(f"{e=} {len(pins)=}")
-            for pin in pins:
-                print(f"  {pin=}  {self.id_to_name[pin]=}")
+            # print(f"{e=} {len(pins)=}")
+            # for pin in pins:
+            #   print(f"  {pin=}  {self.id_to_name[pin]=}")
             for u, v in combinations(pins, 2):
                 if G.has_edge(u, v):
                     G[u][v]["weight"] += 1  # accumulate weight
@@ -111,14 +131,14 @@ class HypergraphPartitioner:
                 cut_edges += 1
         return cut_edges
 
-    def setup_run(self, k, ini_file):
+    def setup_run(self, ini_file):
         """Configures KaHyPar context with internal settings."""
         self.context = kahypar.Context()
         self.context.loadINIconfiguration(ini_file)
 
         # General settings
-        self.context.setK(k)
-        self.context.setEpsilon(0.03)  # 3% imbalance
+        self.context.setK(self.k)
+        self.context.setEpsilon(0.90)  # higher => more imbalance
         self.context.setSeed(42)
 
         # Create hypergraph for this run
@@ -127,12 +147,13 @@ class HypergraphPartitioner:
             self.hypergraph_data.num_edges,
             self.hypergraph_data.index_vector,
             self.hypergraph_data.edge_vector,
-            k,
+            self.k,
         )
 
     def run_partitioning(self, k, ini_file):
         """Sets up and runs the partitioning."""
-        self.setup_run(k, ini_file)
+        self.k = k
+        self.setup_run(ini_file)
         kahypar.partition(self.g, self.context)
         partition_dict = {v: self.g.blockID(v) for v in range(self.g.numNodes())}
         return partition_dict
@@ -147,11 +168,12 @@ class HypergraphPartitioner:
         print(f"Partition into {k} clusters complete")
 
         # --- Add text information ---
-        modularity, conductance, combined = self.evaluate_run()
-        info_text = f"Partitions: {k}\nModularity: {modularity:.4f}\nConductance: {conductance:.4f}\nCombined Score: {combined:.4f}"
-        A.graph_attr["label"] = info_text
-        A.graph_attr["labelloc"] = "t"
-        A.graph_attr["fontsize"] = "20"
+        if self.k > 1:
+            modularity, conductance, combined = self.evaluate_run()
+            info_text = f"Partitions: {k}\nModularity: {modularity:.4f}\nConductance: {conductance:.4f}\nCombined Score: {combined:.4f}"
+            A.graph_attr["label"] = info_text
+            A.graph_attr["labelloc"] = "t"
+            A.graph_attr["fontsize"] = "20"
 
         # --- Node size scaling ---
         degrees = dict(G.degree())
@@ -188,9 +210,10 @@ class HypergraphPartitioner:
                     subgraph.add_node(node_name, width=size, height=size, fixedsize=True, shape="box")
                     # printf(f"Node {node_name} has degree {degree} and size {size}")
 
-        # Add edges
-        for u, v in G.edges():
-            A.add_edge(self.id_to_name[u], self.id_to_name[v])
+        for block_id, nodes in groups.items():
+            edges = self.db.get_edges_between_nodes(nodes)
+            for edge in edges:
+                A.add_edge(edge.src, edge.dst, **edge.attrs)
 
         # Set graph attributes for better layout
 
@@ -200,8 +223,7 @@ class HypergraphPartitioner:
                 "fontsize": "20",
                 "maxiter": "10000",  # Allow more iterations for force-based layouts
                 "overlap": "false",  # Avoid node overlaps
-                "pack": "true",  # Enable packing of disconnected components
-                "packmode": "cluster",  # Pack clusters together
+                "pack": "false",  # Enable packing of disconnected components
                 "sep": "+20",  # Extra separation between clusters
                 "splines": "ortho",  # Orthogonal edge routing
             }

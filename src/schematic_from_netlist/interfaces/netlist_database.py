@@ -2,7 +2,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Dict, List, Optional, Set
 
-from schematic_from_netlist.graph.graph_partition import HypergraphData
+from schematic_from_netlist.graph.graph_partition import Edge, HypergraphData
 
 
 class PinDirection(Enum):
@@ -216,7 +216,7 @@ class Module:
 class NetlistDatabase:
     """Main database class for the hierarchical netlist"""
 
-    def __init__(self, fanout_threshold: int = 10):
+    def __init__(self, fanout_threshold: int = 15):
         self.fanout_threshold = fanout_threshold
         self.top_module: Optional[Module] = None
         self.modules: Dict[str, Module] = {}  # Module definitions
@@ -235,6 +235,8 @@ class NetlistDatabase:
         self.netname_by_id: Dict[int, str] = {}
 
         self.buffered_nets_log: Dict[str, Dict] = {}
+
+        self.inserted_buf_prefix = "buf⊕_"
 
     def set_top_module(self, module: Module):
         """Set the top-level module"""
@@ -396,39 +398,33 @@ class NetlistDatabase:
 
     def buffer_multi_fanout_nets(self):
         """Inserts buffers on nets with fanout > 1"""
+
         if not self.top_module:
             return
 
-        # TODO : handle multiple drivers
-        nets_to_buffer = [net for net in self.nets_by_name.values() if net.get_fanout() > 1]
+        nets_to_buffer = [net for net in self.nets_by_name.values() if net.num_conn > 2 and net.num_conn < self.fanout_threshold]
 
         for net in nets_to_buffer:
             original_net_name = net.name
-            self.buffered_nets_log[original_net_name] = {"loads": list(net.loads), "buffer_insts": [], "new_nets": []}
+            self.buffered_nets_log[original_net_name] = {"pins": net.pins, "buffer_insts": [], "new_nets": []}
 
-            loads = list(net.loads)
-            for i, load_pin in enumerate(loads):
-                buffer_name = f"buf_{original_net_name}_{i}"
-                buffer_inst = self.top_module.add_instance(buffer_name, "BUF")
-                self.buffered_nets_log[original_net_name]["buffer_insts"].append(buffer_inst)
+            buffer_name = f"{self.inserted_buf_prefix}{original_net_name}"
+            buffer_inst = self.top_module.add_instance(buffer_name, "FANOUT_BUFFER")
+            buf_inout_pin = buffer_inst.add_pin("IO", PinDirection.INOUT)
+            self.buffered_nets_log[original_net_name]["buffer_insts"].append(buffer_inst)
 
-                # Input pin of buffer
-                buf_in_pin = buffer_inst.add_pin("I", PinDirection.INPUT)
-                net.add_pin(buf_in_pin)  # Connect buffer input to original net
-
-                # Output pin of buffer
-                buf_out_pin = buffer_inst.add_pin("O", PinDirection.OUTPUT)
-
+            pins_to_buffer = list(net.pins)
+            for i, pin in enumerate(pins_to_buffer):
                 # New net for buffer output
-                new_net_name = f"{original_net_name}_buf_{i}"
+                new_net_name = f"{original_net_name}_fanout_buffer_{i}"
                 new_net = self.top_module.add_net(new_net_name)
-                self.buffered_nets_log[original_net_name]["new_nets"].append(new_net)
 
-                new_net.add_pin(buf_out_pin)
+                new_net.add_pin(buf_inout_pin)
 
                 # Disconnect load from original net and connect to new net
-                net.remove_pin(load_pin)
-                new_net.add_pin(load_pin)
+                net.remove_pin(pin)
+                new_net.add_pin(pin)
+                self.buffered_nets_log[original_net_name]["new_nets"].append(new_net)
 
         self._build_lookup_tables()
 
@@ -511,6 +507,49 @@ class NetlistDatabase:
             index_vector=index_vector,
             edge_vector=edge_vector,
         )
+
+    def get_edges_between_nodes(self, nodes):
+        def add_edge(name, src, dst, instlist):
+            if src in instlist and dst in instlist:
+                # skip buffer nets
+                if name.startswith(self.inserted_buf_prefix):
+                    edge = Edge(src=src.name, dst=dst.name)
+                else:
+                    edge = Edge(src=src.name, dst=dst.name, name=name)
+                return edge
+            return None
+
+        print(nodes)
+        inst_list = []
+        for id in nodes:
+            inst_list.append(self.inst_by_id[id])
+
+        # find all nets connected to these instances
+        net_list = []
+        seen_nets = set()
+        for inst in inst_list:
+            for net in inst.get_connected_nets():
+                if net.name not in seen_nets:
+                    net_list.append(net)
+                    seen_nets.add(net.name)
+
+        # print(f"{seen_nets=}")
+        edges = []
+        for net in net_list:
+            if net.num_conn < 2:
+                continue
+            elif net.num_conn > self.fanout_threshold:
+                continue
+            else:
+                # multi-pin net so generate all pairwise connections
+                conn_inst_list = [pin.instance for pin in net.pins]
+                for i in range(len(conn_inst_list)):
+                    for j in range(i + 1, len(conn_inst_list)):
+                        src, dst = conn_inst_list[i], conn_inst_list[j]
+                        if edge := add_edge(net.name, src, dst, inst_list):
+                            edges.append(edge)
+
+        return edges
 
 
 # Example usage and helper functions

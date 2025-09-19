@@ -33,14 +33,13 @@ def main():
     # 1. Parse Verilog netlist into a database
     verilog_parser = VerilogParser()
     db = verilog_parser.parse_and_store_in_db([args.netlist_file])
-    # insert fanout buffers
-    # db.buffer_multi_fanout_nets()
+    db.buffer_multi_fanout_nets()  # insert fanout buffers
 
     # 2. Build hypergraph data for partitioning
     hypergraph_data = db.build_hypergraph_data()
 
     # 3. Partition the hypergraph
-    partitioner = HypergraphPartitioner(hypergraph_data, db.instname_by_id)
+    partitioner = HypergraphPartitioner(hypergraph_data, db)
     partition = partitioner.run_partitioning(args.k, args.config)
 
     # 4. Dump the partitioned graph to JSON, DOT, and PNG
