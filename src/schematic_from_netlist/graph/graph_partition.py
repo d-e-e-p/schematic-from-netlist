@@ -261,7 +261,8 @@ class HypergraphPartitioner:
         # Layout and draw the graph
         A.write(filenames["dot"])
         # A.layout(prog="dot", args="-v")
-        A.layout(prog="sfdp", args="-v")
+        # A.layout(prog="sfdp", args="-v")
+        A.layout(prog="sfdp", args="")
         A.draw(filenames["png"], format="png")
         A.draw(filenames["json"], format="json")
         print(f"Graph saved to {filenames['json']}")

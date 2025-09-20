@@ -2,3 +2,5 @@ pyverilog
 kahypar
 networkx
 pygraphviz
+igraph
+matplotlib

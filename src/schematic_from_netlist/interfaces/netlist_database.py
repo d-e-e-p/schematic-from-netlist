@@ -493,7 +493,7 @@ class NetlistDatabase:
             connected_instpin_names = [f"{pin.instance.name}/{pin.name}" for pin in net.pins]
             edge_vector.extend(connected_instance_ids)
             index_vector.append(len(edge_vector))
-            print(f"connecting {net.name=} conn {net.num_conn}: {connected_instance_ids=} {connected_instpin_names=}")
+            # print(f"connecting {net.name=} conn {net.num_conn}: {connected_instance_ids=} {connected_instpin_names=}")
             # print(f"{len(edge_vector)=} {len(index_vector)=} {edge_vector=} {index_vector=}")
 
             if index_vector[-1] != len(edge_vector):
