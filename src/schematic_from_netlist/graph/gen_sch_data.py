@@ -1,4 +1,5 @@
 import re
+from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import List, Tuple
 
@@ -8,13 +9,21 @@ from schematic_from_netlist.interfaces.netlist_database import Pin
 @dataclass
 class NetShape:
     name: str
-    points: List[Tuple[int, int]]
+    points: List[Tuple[int, int]] | None = None
+    segments: List[Tuple[Tuple[int, int], Tuple[int, int]]] | None = None
+
+    def __hash__(self):
+        return hash(self.name)
 
 
 @dataclass
 class PortShape:
+    name: str
     pin: Pin
     point: Tuple[int, int]
+
+    def __hash__(self):
+        return hash(self.name)
 
 
 @dataclass
@@ -24,6 +33,9 @@ class InstShape:
     rect: Tuple[int, int, int, int]
     port_shapes: List[PortShape]
 
+    def __hash__(self):
+        return hash(self.name)
+
 
 @dataclass
 class SchmaticData:
@@ -31,6 +43,38 @@ class SchmaticData:
     port_shapes: List[PortShape] = field(default_factory=list)
     inst_shapes: List[InstShape] = field(default_factory=list)
     net_shapes: List[NetShape] = field(default_factory=list)
+    # lookup tables (lazy-built via _build_lookup_tables)
+    netshape_by_name: dict[str, NetShape] = field(init=False, default_factory=dict)
+    instshape_by_name: dict[str, InstShape] = field(init=False, default_factory=dict)
+    portshapes_by_instname: dict[str, list[PortShape]] = field(init=False, default_factory=dict)
+    portshape_by_name: dict[str, PortShape] = field(init=False, default_factory=dict)
+
+    def _build_lookup_tables(self):
+        """Build fast lookup dictionaries for nets, instances, and ports."""
+
+        # Nets
+        self.netshape_by_name = {net.name: net for net in self.net_shapes}
+
+        # Instances
+        self.instshape_by_name = {inst.name: inst for inst in self.inst_shapes}
+
+        # Ports by instance name
+        ports_by_inst = defaultdict(list)
+        for inst in self.inst_shapes:
+            for port in inst.port_shapes:
+                ports_by_inst[inst.name].append(port)
+        self.portshapes_by_instname = dict(ports_by_inst)
+
+        # Ports by name (unique lookup)
+        self.portshape_by_name = {}
+        # TODO: First add top-level sheet ports
+
+        # Then add instance ports
+        for inst in self.inst_shapes:
+            for port in inst.port_shapes:
+                if port.name in self.portshape_by_name:
+                    raise ValueError(f"Duplicate port name across instances: {port.name}")
+                self.portshape_by_name[port.name] = port
 
 
 class GenSchematicData(SchmaticData):
@@ -38,7 +82,7 @@ class GenSchematicData(SchmaticData):
         super().__init__()
         self.geom_db = geom_db
         self.netlist_db = netlist_db
-        self.graph_to_sch_scale = 1  # from graphviz to LTspice, needs to be adjusted to avoid limits
+        self.graph_to_sch_scale = 0.25  # from graphviz to LTspice, needs to be adjusted to avoid limits
         self.schematic_grid_size = 16  # needs to be a multiple of 50 mils on kicad import for wires to connect to pin
         # TODO: many make it equal area to the smallest other macro?
         self.min_block_size_in_gridlines = 10
@@ -82,7 +126,11 @@ class GenSchematicData(SchmaticData):
                     if pin.instance.name == inst1.name:
                         x, y = port.point
                         scaled_point = (int(x * self.graph_to_sch_scale), int(y * self.graph_to_sch_scale))
-                        ps = PortShape(pin, scaled_point)
+                        pinname = f"{inst1.name}/{pin.name}"
+                        if pinname == "buf⊕_b/IO0":
+                            print(f" {pinname=} {port.point=}")
+                            self._build_lookup_tables()
+                        ps = PortShape(pinname, pin, scaled_point)
                         self.port_shapes.append(ps)
 
     def find_block_bounding_boxes(self):
@@ -322,6 +370,7 @@ class GenSchematicData(SchmaticData):
         self.associate_ports_to_blocks()
         self.find_block_bounding_boxes()
         self.find_net_shapes()
+        self._build_lookup_tables()
         # self.patch_and_remove_buffers()
         self.snap_all_points_to_grid()
         self.calc_sheet_size()

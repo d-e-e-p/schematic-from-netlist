@@ -78,6 +78,7 @@ class Net:
         self.loads.discard(pin)
         self.num_conn -= 1
         pin.net = None
+        print(f"after remove_pin {self.name=} {self.num_conn=}")
 
     def get_fanout(self) -> int:
         """Get the fanout (number of loads) on this net"""

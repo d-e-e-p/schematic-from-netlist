@@ -7,13 +7,35 @@ class LTSpiceWriter:
         self.schematic_db = schematic_db
         self.module_names = {}
 
+    def upscale_rect(self, rect: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
+        """Scale a rectangle (x1,y1,x2,y2) from grid units to real units."""
+        g = self.schematic_db.schematic_grid_size
+        return (rect[0] * g, rect[1] * g, rect[2] * g, rect[3] * g)
+
+    def upscale_segments(self, segments: list[tuple[tuple[int, int], tuple[int, int]]]) -> list[tuple[tuple[int, int], tuple[int, int]]]:
+        """Scale a list of line segments [((x1,y1),(x2,y2)), ...]."""
+        g = self.schematic_db.schematic_grid_size
+        return [((x1 * g, y1 * g), (x2 * g, y2 * g)) for (x1, y1), (x2, y2) in segments]
+
+    def upscale_points(self, points: list[tuple[int, int]]) -> list[tuple[int, int]]:
+        """Scale a list of points [(x,y), ...]."""
+        g = self.schematic_db.schematic_grid_size
+        return [(x * g, y * g) for (x, y) in points]
+
+    def upscale_point(self, point: tuple[int, int]) -> tuple[int, int]:
+        """Scale a list of points [(x,y), ...]."""
+        g = self.schematic_db.schematic_grid_size
+        x, y = point
+        return (x * g, y * g)
+
     def _asc_place_inst(self, inst_shape):
         """Formats a single symbol line for the .asc file."""
         out = ""
         name = inst_shape.name
         module_ref = inst_shape.module_ref
-        x = (inst_shape.rect[0] + inst_shape.rect[2]) // 2
-        y = (inst_shape.rect[1] + inst_shape.rect[3]) // 2
+        x1, y1, x2, y2 = self.upscale_rect(inst_shape.rect)
+        x = (x1 + x2) // 2
+        y = (y1 + y2) // 2
         out += f"SYMBOL {module_ref} {x} {y} R0\n"
         out += f"SYMATTR InstName {name}\n"
         out += f"SYMATTR Value {module_ref}\n"
@@ -23,11 +45,19 @@ class LTSpiceWriter:
         """Formats a single WIRE line for the .asc file."""
         # out = "* WIRE\n"
         out = ""
-        pt_start = wire_shape.points[0]
-        for pt in wire_shape.points[1:]:
-            pt_end = pt
-            out += f"WIRE {pt_start[0]} {pt_start[1]} {pt_end[0]} {pt_end[1]}\n"
-            pt_start = pt_end
+        if wire_shape.segments is not None:
+            segments = self.upscale_segments(wire_shape.segments)
+            for seg in segments:
+                pt_start, pt_end = seg
+                out += f"WIRE {pt_start[0]} {pt_end[0]} {pt_end[1]} {pt_end[1]}\n"
+
+        if wire_shape.points is not None:
+            points = self.upscale_points(wire_shape.points)
+            pt_start = points[0]
+            for pt in points[1:]:
+                pt_end = pt
+                out += f"WIRE {pt_start[0]} {pt_start[1]} {pt_end[0]} {pt_end[1]}\n"
+                pt_start = pt_end
         return out
 
     def _uniquify_module_name(self, inst_name, module_name):
@@ -91,7 +121,7 @@ class LTSpiceWriter:
         simp_x, simp_y = (0, 10)
 
         # Add WINDOW definitions
-        font_size = int(2 * (self.schematic_db.scale / 100))
+        font_size = round(10 * self.schematic_db.graph_to_sch_scale)
         asy = ""
         asy += f"WINDOW 0 {ref_x} {ref_y} Left {font_size}\n"  # InstName (Reference)
         asy += f"WINDOW 3 {val_x} {val_y} Left {font_size}\n"  # Value
@@ -103,7 +133,7 @@ class LTSpiceWriter:
     def _generate_symbol_asy(self, inst_shape, output_dir="data/ltspice"):
         """Generates an .asy file for a given module."""
 
-        rect = inst_shape.rect
+        rect = self.upscale_rect(inst_shape.rect)
         hw = (rect[2] - rect[0]) // 2  # half width
         hh = (rect[3] - rect[1]) // 2  # half height
 
@@ -119,11 +149,10 @@ class LTSpiceWriter:
         asy += f"SYMATTR SpiceLine -\n"  # This sets Sim.Device
         asy += self.generate_symbol_window_commands(hw, hh)
         for shape in inst_shape.port_shapes:
-            port_center_x = shape.point[0]
-            port_center_y = shape.point[1]
+            port_center_x, port_center_y = self.upscale_point(shape.point)
             x = port_center_x - inst_offset_x
             y = port_center_y - inst_offset_y
-            pt = [x, y]
+            pt = (x, y)
             side = self._get_pin_side(pt, cell_rect)
             # breakpoint()
             asy += f"PIN {x} {y} {side} 0\n"
@@ -154,8 +183,10 @@ class LTSpiceWriter:
         top_module_name = self.db.top_module.name
         asc_path = os.path.join(output_dir, f"{top_module_name}.asc")
 
-        sheet_size = self.schematic_db.sheet_size
-        asc_content = ["Version 4", f"Sheet 1 {sheet_size[0]} {sheet_size[1]}"]
+        width, height = self.schematic_db.sheet_size
+        width *= self.schematic_db.schematic_grid_size
+        height *= self.schematic_db.schematic_grid_size
+        asc_content = ["Version 4", f"Sheet 1 {width} {height}"]
 
         for inst_shape in self.schematic_db.inst_shapes:
             asc_content.append(self._asc_place_inst(inst_shape))
