@@ -1,3 +1,4 @@
+import re
 from dataclasses import dataclass, field
 from typing import List, Tuple
 
@@ -51,7 +52,7 @@ class GenSchematicData(SchmaticData):
         if not list_of_inst:
             return []
 
-        # Get nets of the first inst
+        # Get nets of the first inst.. common_bets is a dict of name2net
         common_nets = {net.name: net for net in list_of_inst[0].get_connected_nets()}
 
         # Intersect with the rest
@@ -72,6 +73,7 @@ class GenSchematicData(SchmaticData):
 
             # find a net connecting these 2 inst
             match_nets = self.find_net_between_inst([inst1, inst2])
+            print(f"{[net.name for net in match_nets]=} {inst1.name=} {inst2.name=}")
 
             # if multiple net connections between the same 2 inst, we have to assign one port pair
             # to each connection
@@ -130,6 +132,7 @@ class GenSchematicData(SchmaticData):
             inst = self.netlist_db.inst_by_name.get(instname)
             if inst is None:
                 # fallback or skip if inst not found
+                print(f"Inst {instname} not found")
                 continue
 
             module_ref = getattr(inst, "module_ref", "")
@@ -175,19 +178,27 @@ class GenSchematicData(SchmaticData):
                 net_shape = NetShape(name=netname, points=points)
                 self.net_shapes.append(net_shape)
 
-    def center_points(self, rect0, rect1):
+    def center_points(self, rect):
         # center of first rectangle
-        center0_x = (rect0[0] + rect0[2]) / 2
-        center0_y = (rect0[1] + rect0[3]) / 2
+        center_x = round((rect[0] + rect[2]) / 2)
+        center_y = round((rect[1] + rect[3]) / 2)
+        point = (center_x, center_y)
+        return point
 
-        # center of second rectangle
-        center1_x = (rect1[0] + rect1[2]) / 2
-        center1_y = (rect1[1] + rect1[3]) / 2
-
-        point0 = (int(center0_x), int(center0_y))
-        point1 = (int(center1_x), int(center1_y))
-
-        return [point0, point1]
+    def snap_buffer_wire_to_center(self, pt_center, pt_port):
+        for shape in self.net_shapes:
+            points = shape.points
+            new_pts = []
+            modified = False
+            for pt_wire in points:
+                if pt_wire == pt_port:
+                    new_pts.append(pt_center)
+                else:
+                    new_pts.append(pt_wire)
+                    modified = True
+            if modified:
+                shape.points = new_pts
+                shape.name = re.sub(r"_fanout_buffer_\d+", "", shape.name)
 
     def patch_and_remove_buffers(self):
         """
@@ -195,41 +206,22 @@ class GenSchematicData(SchmaticData):
         and then removes them from the logical netlist.
         """
         buffers_to_remove = []
-        new_wires = []
 
         # Find buffer instance shapes
         for inst_shape in self.inst_shapes:
-            if inst_shape.name.find("/buf_") > 0:
+            if inst_shape.name.startswith(self.netlist_db.inserted_buf_prefix):
                 buffers_to_remove.append(inst_shape)
 
-                input_port = None
-                output_port = None
+                # Get center points of the buffer inst
+                pt_center = self.center_points(inst_shape.rect)
                 for port_shape in inst_shape.port_shapes:
-                    if port_shape.pin.name == "I":
-                        input_port = port_shape
-                    elif port_shape.pin.name == "O":
-                        output_port = port_shape
-
-                if input_port and output_port:
-                    # Create a new wire to "patch" the connection
-                    in_point = input_port.point
-                    out_point = output_port.point
-
-                    # Get center points of the port rectangles
-                    scaled_points = self.center_points(in_rect, out_rect)
-
-                    # The net can be anything as it's just for drawing, just should NOT be labeled
-                    # TODO: replace orig name
-                    new_wires.append(NetShape(name="", points=scaled_points))
+                    pt_port = port_shape.point
+                    self.snap_buffer_wire_to_center(pt_center, pt_port)
 
         # Remove buffer shapes from the list
-        self.inst_shapes = [s for s in self.inst_shapes if s not in buffers_to_remove]
-
-        # Add the new patch wires
-        self.net_shapes.extend(new_wires)
-
         # Remove buffers from the logical netlist
-        self.netlist_db.remove_buffers()
+        # self.inst_shapes = [s for s in self.inst_shapes if s not in buffers_to_remove]
+        # self.netlist_db.remove_buffers()
         print(f"Patched and removed {len(buffers_to_remove)} buffer instances.")
 
     def calc_sheet_size(self):
@@ -253,7 +245,7 @@ class GenSchematicData(SchmaticData):
             xsize = int(max(xs) - min(xs) + 2 * padding)
             ysize = int(max(ys) - min(ys) + 2 * padding)
 
-            self.sheet_size = (int(max(xs) - min(xs) + 2 * padding), int(max(ys) - min(ys) + 2 * padding))
+            self.sheet_size = (xsize, ysize)
         else:
             self.sheet_size = (1000, 1000)
 
@@ -320,6 +312,7 @@ class GenSchematicData(SchmaticData):
         self.associate_ports_to_blocks()
         self.find_block_bounding_boxes()
         self.find_net_shapes()
+        # self.patch_and_remove_buffers()
         self.snap_all_points_to_grid()
         self.calc_sheet_size()
         self.flip_y_axis()

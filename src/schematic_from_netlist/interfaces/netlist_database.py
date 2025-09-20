@@ -410,7 +410,6 @@ class NetlistDatabase:
 
             buffer_name = f"{self.inserted_buf_prefix}{original_net_name}"
             buffer_inst = self.top_module.add_instance(buffer_name, "FANOUT_BUFFER")
-            buf_inout_pin = buffer_inst.add_pin("IO", PinDirection.INOUT)
             self.buffered_nets_log[original_net_name]["buffer_insts"].append(buffer_inst)
 
             pins_to_buffer = list(net.pins)
@@ -419,6 +418,7 @@ class NetlistDatabase:
                 new_net_name = f"{original_net_name}_fanout_buffer_{i}"
                 new_net = self.top_module.add_net(new_net_name)
 
+                buf_inout_pin = buffer_inst.add_pin(f"IO{i}", PinDirection.INOUT)
                 new_net.add_pin(buf_inout_pin)
 
                 # Disconnect load from original net and connect to new net
