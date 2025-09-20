@@ -3,6 +3,7 @@ import os
 
 from schematic_from_netlist.graph.gen_sch_data import GenSchematicData
 from schematic_from_netlist.graph.graph_partition import HypergraphPartitioner
+from schematic_from_netlist.graph.pathfinder import Pathfinder
 from schematic_from_netlist.interfaces.json_graph import ParseJson
 from schematic_from_netlist.interfaces.ltspice_writer import LTSpiceWriter
 from schematic_from_netlist.interfaces.verilog_parser import VerilogParser
@@ -54,7 +55,11 @@ def main():
         schematic_db = GenSchematicData(geom_db, db)
         schematic_db.generate_schematic_info()
 
-        # 7.write the final schematic
+        # 7.improve routing
+        pathfinder = Pathfinder(db, schematic_db)
+        pathfinder.cleanup_routes()
+
+        # 8.write the final schematic
         ltspice_writer = LTSpiceWriter(db, schematic_db)
         ltspice_writer.produce_schematic(args.output_dir)
 

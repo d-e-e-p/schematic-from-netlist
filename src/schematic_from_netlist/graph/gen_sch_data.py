@@ -38,11 +38,11 @@ class GenSchematicData(SchmaticData):
         super().__init__()
         self.geom_db = geom_db
         self.netlist_db = netlist_db
-        self.scale = 4  # from graphviz to LTspice, needs to be adjusted to avoid limits
-        self.grid_size = 16  # needs to be a multiple of 50 mils on kicad import for wires to connect to pin
+        self.graph_to_sch_scale = 1  # from graphviz to LTspice, needs to be adjusted to avoid limits
+        self.schematic_grid_size = 16  # needs to be a multiple of 50 mils on kicad import for wires to connect to pin
         # TODO: many make it equal area to the smallest other macro?
-        self.min_block_size = 10 * self.scale
-        self.block_moat_size = int(1 * self.scale)
+        self.min_block_size_in_gridlines = 10
+        self.block_moat_size_in_gridlines = 1
 
     def find_net_between_inst(self, list_of_inst):
         """
@@ -73,7 +73,7 @@ class GenSchematicData(SchmaticData):
 
             # find a net connecting these 2 inst
             match_nets = self.find_net_between_inst([inst1, inst2])
-            print(f"{[net.name for net in match_nets]=} {inst1.name=} {inst2.name=}")
+            # print(f"{[net.name for net in match_nets]=} {inst1.name=} {inst2.name=}")
 
             # if multiple net connections between the same 2 inst, we have to assign one port pair
             # to each connection
@@ -81,7 +81,7 @@ class GenSchematicData(SchmaticData):
                 for pin in net.pins:
                     if pin.instance.name == inst1.name:
                         x, y = port.point
-                        scaled_point = (int(x * self.scale), int(y * self.scale))
+                        scaled_point = (int(x * self.graph_to_sch_scale), int(y * self.graph_to_sch_scale))
                         ps = PortShape(pin, scaled_point)
                         self.port_shapes.append(ps)
 
@@ -112,33 +112,33 @@ class GenSchematicData(SchmaticData):
             y_max = max(p[1] for p in pt_list)
 
             # too small -- need to grow
-            bs = self.min_block_size
-            if x_max - x_min < bs:
-                x_min -= bs // 2
-                x_max += bs // 2
-            if y_max - y_min < bs:
-                y_min -= bs // 2
-                y_max += bs // 2
+            size = self.min_block_size_in_gridlines
+            if x_max - x_min < size:
+                x_min -= size // 2
+                x_max += size // 2
+            if y_max - y_min < size:
+                y_min -= size // 2
+                y_max += size // 2
 
             # block_moat_size a bit
-            bf = self.block_moat_size
-            x_min -= bf
-            x_max += bf
-            y_min -= bf
-            y_max += bf
+            size = self.block_moat_size_in_gridlines
+            x_min -= size
+            x_max += size
+            y_min -= size
+            y_max += size
 
             rect = (x_min, y_min, x_max, y_max)
 
             inst = self.netlist_db.inst_by_name.get(instname)
             if inst is None:
                 # fallback or skip if inst not found
-                print(f"Inst {instname} not found")
+                print(f"Warning: Inst {instname} not found")
                 continue
 
             module_ref = getattr(inst, "module_ref", "")
-            print(f"{instname=} {module_ref=} {rect=}")
-            for shape in shapes:
-                print(f"  {shape.pin.name=} {shape.point=}")
+            # print(f"{instname=} {module_ref=} {rect=}")
+            # for shape in shapes:
+            #    print(f"  {shape.pin.name=} {shape.point=}")
             inst_shape = InstShape(
                 name=instname,
                 module_ref=module_ref,
@@ -154,7 +154,7 @@ class GenSchematicData(SchmaticData):
         if not points:
             return []
 
-        scaled_points = [(int(x * self.scale), int(y * self.scale)) for x, y in points]
+        scaled_points = [(int(x * self.graph_to_sch_scale), int(y * self.graph_to_sch_scale)) for x, y in points]
         unique_points = [scaled_points[0]]  # Always keep the first point
 
         for pt in scaled_points[1:]:
@@ -174,7 +174,7 @@ class GenSchematicData(SchmaticData):
             if nets:
                 netname = nets[0].name
                 points = self.scale_and_uniq_points(net_geom.points)
-                print(f"{netname}: {points}")
+                # print(f"{netname}: {points}")
                 net_shape = NetShape(name=netname, points=points)
                 self.net_shapes.append(net_shape)
 
@@ -224,6 +224,16 @@ class GenSchematicData(SchmaticData):
         # self.netlist_db.remove_buffers()
         print(f"Patched and removed {len(buffers_to_remove)} buffer instances.")
 
+    def shift_all_geom_by(self, dx, dy):
+        for inst_shape in self.inst_shapes:
+            x1, y1, x2, y2 = inst_shape.rect
+            inst_shape.rect = (x1 + dx, y1 + dy, x2 + dx, y2 + dy)
+            for port_shape in inst_shape.port_shapes:
+                port_shape.point = (port_shape.point[0] + dx, port_shape.point[1] + dy)
+
+        for net_shape in self.net_shapes:
+            net_shape.points = [(x + dx, y + dy) for x, y in net_shape.points]
+
     def calc_sheet_size(self):
         """too concise perhaps?"""
         coords = []
@@ -237,17 +247,19 @@ class GenSchematicData(SchmaticData):
             for x, y in net_shape.points:
                 coords.extend([x, y])
 
+        padding = 100  # units is in grid by this point
         if coords:
             xs = coords[::2]  # Even indices
             ys = coords[1::2]  # Odd indices
+            if min(xs) < padding or min(ys) < padding:
+                self.shift_all_geom_by(padding - min(xs), padding - min(ys))
 
-            padding = 100
             xsize = int(max(xs) - min(xs) + 2 * padding)
             ysize = int(max(ys) - min(ys) + 2 * padding)
 
             self.sheet_size = (xsize, ysize)
         else:
-            self.sheet_size = (1000, 1000)
+            self.sheet_size = (padding, padding)
 
     def flip_y_axis(self):
         """
@@ -282,14 +294,12 @@ class GenSchematicData(SchmaticData):
 
     def snap_all_points_to_grid(self):
         """
-        Snap all schematic geometry (instances, ports, nets) to the nearest grid point.
         Ensures coordinates are multiples of self.grid_size.
         """
-        grid = self.grid_size
 
         def snap(v):
             # Round to nearest multiple of grid
-            return round(v / grid) * grid
+            return round(v * self.graph_to_sch_scale)
 
         # Snap instance rectangles
         for inst_shape in self.inst_shapes:
@@ -315,5 +325,5 @@ class GenSchematicData(SchmaticData):
         # self.patch_and_remove_buffers()
         self.snap_all_points_to_grid()
         self.calc_sheet_size()
-        self.flip_y_axis()
+        # self.flip_y_axis()
         return self
