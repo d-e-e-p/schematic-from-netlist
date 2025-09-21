@@ -1,5 +1,6 @@
 import json
 import os
+import re
 from dataclasses import dataclass
 from itertools import combinations
 from typing import Dict, List
@@ -249,21 +250,25 @@ class HypergraphPartitioner:
             }
         )
 
-        # Ensure output directories exist
-        file_types = ["dot", "png", "json"]
-        filenames = {}
-        basename = f"partition_{k}"
-        for ft in file_types:
+        def build_fn(tag: str, data_dir: str = "data") -> str:
+            """
+            Given a tag like 'dot0' or 'json2', return the full path
+            e.g. 'data/dot/stage0.dot' or 'data/json/stage2.json'.
+            """
+            m = re.match(r"([a-zA-Z]+)(\d+)$", tag)
+            if not m:
+                raise ValueError(f"Invalid tag format: {tag}")
+
+            ft, num = m.groups()  # ft = "dot", num = "0"
             output_dir = os.path.join(data_dir, ft)
             os.makedirs(output_dir, exist_ok=True)
-            filenames[ft] = os.path.join(output_dir, f"{basename}.{ft}")
+            return os.path.join(output_dir, f"stage{num}.{ft}")
 
         # Layout and draw the graph
-        A.write(filenames["dot"])
-        # A.layout(prog="dot", args="-v")
-        # A.layout(prog="sfdp", args="-v")
-        A.layout(prog="sfdp", args="")
-        A.draw(filenames["png"], format="png")
-        A.draw(filenames["json"], format="json")
-        print(f"Graph saved to {filenames['json']}")
-        self.graph_json_data = filenames["json"]
+        A.write(build_fn("dot0"))
+        A.layout(prog="sfdp", args="-v")
+        A.write(build_fn("dot1"))
+        A.draw(build_fn("png1"), format="png")
+        A.draw(build_fn("json1"), format="json")
+        self.graph_json_data = build_fn("json1")
+        print(f"Graph saved to {build_fn('png1')}")

@@ -53,7 +53,7 @@ class Net:
         self.full_name = f"{self.module.full_name}.{self.name}"
         self.drivers: Set[Pin] = set()  # Output pins driving this net
         self.loads: Set[Pin] = set()  # Input pins loading this net
-        self.connections = set()  # drivers + loads
+        self.connections = set()  # drivers + loads TODO: use pins instead
 
     def add_pin(self, pin: Pin):
         """Add a pin connection to this net"""
@@ -158,6 +158,7 @@ class Module:
         else:
             self.full_name = self.name  # Top level module
 
+    # TODO : check if unique in add_net command
     def add_net(
         self,
         net_name: str,
@@ -217,7 +218,7 @@ class Module:
 class NetlistDatabase:
     """Main database class for the hierarchical netlist"""
 
-    def __init__(self, fanout_threshold: int = 15):
+    def __init__(self, fanout_threshold: int = 55):
         self.fanout_threshold = fanout_threshold
         self.top_module: Optional[Module] = None
         self.modules: Dict[str, Module] = {}  # Module definitions
@@ -238,6 +239,7 @@ class NetlistDatabase:
         self.buffered_nets_log: Dict[str, Dict] = {}
 
         self.inserted_buf_prefix = "buf⊕_"
+        self.inserted_net_suffix = "_fanout_buffer_"
 
     def set_top_module(self, module: Module):
         """Set the top-level module"""
@@ -407,16 +409,19 @@ class NetlistDatabase:
 
         for net in nets_to_buffer:
             original_net_name = net.name
-            self.buffered_nets_log[original_net_name] = {"pins": net.pins, "buffer_insts": [], "new_nets": []}
+            self.buffered_nets_log[original_net_name] = {"old_pins": set(), "buffer_insts": [], "new_nets": []}
+
+            log = self.buffered_nets_log[original_net_name]
+            log["old_pins"] = net.pins.copy()
 
             buffer_name = f"{self.inserted_buf_prefix}{original_net_name}"
             buffer_inst = self.top_module.add_instance(buffer_name, "FANOUT_BUFFER")
-            self.buffered_nets_log[original_net_name]["buffer_insts"].append(buffer_inst)
+            log["buffer_insts"].append(buffer_inst)
 
             pins_to_buffer = list(net.pins)
             for i, pin in enumerate(pins_to_buffer):
-                # New net for buffer output
-                new_net_name = f"{original_net_name}_fanout_buffer_{i}"
+                # New net for buffer io
+                new_net_name = f"{original_net_name}{self.inserted_net_suffix}{i}"
                 new_net = self.top_module.add_net(new_net_name)
 
                 buf_inout_pin = buffer_inst.add_pin(f"IO{i}", PinDirection.INOUT)
@@ -425,23 +430,23 @@ class NetlistDatabase:
                 # Disconnect load from original net and connect to new net
                 net.remove_pin(pin)
                 new_net.add_pin(pin)
-                self.buffered_nets_log[original_net_name]["new_nets"].append(new_net)
+                log["new_nets"].append(new_net)
 
         self._build_lookup_tables()
 
-    def remove_buffers(self):
+    def remove_multi_fanout_buffers(self):
         """Removes buffers inserted by buffer_multi_fanout_nets"""
         if not self.top_module:
             return
 
         for original_net_name, log in self.buffered_nets_log.items():
-            original_net = self.find_net(f"{self.top_module.name}.{original_net_name}")
+            original_net = self.find_net(original_net_name)
             if not original_net:
                 continue
 
             # Reconnect original loads
-            for load_pin in log["loads"]:
-                original_net.add_pin(load_pin)
+            for pin in log["old_pins"]:
+                original_net.add_pin(pin)
 
             # Delete buffer instances and disconnect their input pins
             for buffer_inst in log["buffer_insts"]:

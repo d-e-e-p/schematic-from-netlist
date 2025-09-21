@@ -60,7 +60,7 @@ def main():
         pathfinder.cleanup_routes()
 
         # 8.write the final schematic
-        schematic_db.flip_y_axis()
+        # schematic_db.flip_y_axis()
         ltspice_writer = LTSpiceWriter(db, schematic_db)
         ltspice_writer.produce_schematic(args.output_dir)
 

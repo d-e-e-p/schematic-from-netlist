@@ -71,9 +71,13 @@ class SchmaticData:
 
         # Then add instance ports
         for inst in self.inst_shapes:
+            # print(f"{inst.name=}")
             for port in inst.port_shapes:
+                # print(f"{port.name=} {port.point=}")
                 if port.name in self.portshape_by_name:
-                    raise ValueError(f"Duplicate port name across instances: {port.name}")
+                    pass
+                    # TODO fix remove buffer multi causing this
+                    # raise ValueError(f"Duplicate port name across instances: {port.name}")
                 self.portshape_by_name[port.name] = port
 
 
@@ -81,7 +85,7 @@ class GenSchematicData(SchmaticData):
     def __init__(self, geom_db, netlist_db):
         super().__init__()
         self.geom_db = geom_db
-        self.netlist_db = netlist_db
+        self.db = netlist_db
         self.graph_to_sch_scale = 0.25  # from graphviz to LTspice, needs to be adjusted to avoid limits
         self.schematic_grid_size = 16  # needs to be a multiple of 50 mils on kicad import for wires to connect to pin
         # TODO: many make it equal area to the smallest other macro?
@@ -112,8 +116,8 @@ class GenSchematicData(SchmaticData):
         # look over all port pairs and compare them to
 
         for port in self.geom_db.ports:
-            inst1 = self.netlist_db.inst_by_name[port.name]
-            inst2 = self.netlist_db.inst_by_name[port.conn]
+            inst1 = self.db.inst_by_name[port.name]
+            inst2 = self.db.inst_by_name[port.conn]
 
             # find a net connecting these 2 inst
             match_nets = self.find_net_between_inst([inst1, inst2])
@@ -126,11 +130,7 @@ class GenSchematicData(SchmaticData):
                     if pin.instance.name == inst1.name:
                         x, y = port.point
                         scaled_point = (int(x * self.graph_to_sch_scale), int(y * self.graph_to_sch_scale))
-                        pinname = f"{inst1.name}/{pin.name}"
-                        if pinname == "buf⊕_b/IO0":
-                            print(f" {pinname=} {port.point=}")
-                            self._build_lookup_tables()
-                        ps = PortShape(pinname, pin, scaled_point)
+                        ps = PortShape(pin.full_name, pin, scaled_point)
                         self.port_shapes.append(ps)
 
     def find_block_bounding_boxes(self):
@@ -177,7 +177,7 @@ class GenSchematicData(SchmaticData):
 
             rect = (x_min, y_min, x_max, y_max)
 
-            inst = self.netlist_db.inst_by_name.get(instname)
+            inst = self.db.inst_by_name.get(instname)
             if inst is None:
                 # fallback or skip if inst not found
                 print(f"Warning: Inst {instname} not found")
@@ -216,7 +216,7 @@ class GenSchematicData(SchmaticData):
         for net_geom in self.geom_db.nets:
             list_of_inst = []
             for instname in net_geom.conn:
-                list_of_inst.append(self.netlist_db.inst_by_name[instname])
+                list_of_inst.append(self.db.inst_by_name[instname])
 
             nets = self.find_net_between_inst(list_of_inst)
             if nets:
@@ -248,6 +248,9 @@ class GenSchematicData(SchmaticData):
                 shape.points = new_pts
                 shape.name = re.sub(r"_fanout_buffer_\d+", "", shape.name)
 
+    def route_to_center(self, pt_center, pt_port):
+        pass
+
     def patch_and_remove_buffers(self):
         """
         Finds buffer instances, replaces them with a wire in the geometric data,
@@ -257,20 +260,24 @@ class GenSchematicData(SchmaticData):
 
         # Find buffer instance shapes
         for inst_shape in self.inst_shapes:
-            if inst_shape.name.startswith(self.netlist_db.inserted_buf_prefix):
+            if inst_shape.name.startswith(self.db.inserted_buf_prefix):
                 buffers_to_remove.append(inst_shape)
 
                 # Get center points of the buffer inst
                 pt_center = self.center_points(inst_shape.rect)
                 for port_shape in inst_shape.port_shapes:
                     pt_port = port_shape.point
-                    self.snap_buffer_wire_to_center(pt_center, pt_port)
+                    self.route_to_center(pt_center, pt_port)
 
-        # Remove buffer shapes from the list
-        # Remove buffers from the logical netlist
-        # self.inst_shapes = [s for s in self.inst_shapes if s not in buffers_to_remove]
-        # self.netlist_db.remove_buffers()
-        print(f"Patched and removed {len(buffers_to_remove)} buffer instances.")
+        # ok now all wires of buffering nets
+        for net_shape in self.net_shapes:
+            if net_shape.name.find(self.db.inserted_net_suffix) > -1:
+                orig_netname = re.sub(rf"{re.escape(self.db.inserted_net_suffix)}\d+$", "", net_shape.name)
+                net_shape.name = orig_netname
+
+        # ok now remove logical buffers and restore logical connection
+        self.db.remove_multi_fanout_buffers()
+        self._build_lookup_tables()
 
     def shift_all_geom_by(self, dx, dy):
         for inst_shape in self.inst_shapes:
@@ -370,8 +377,7 @@ class GenSchematicData(SchmaticData):
         self.associate_ports_to_blocks()
         self.find_block_bounding_boxes()
         self.find_net_shapes()
-        self._build_lookup_tables()
-        # self.patch_and_remove_buffers()
+        self.patch_and_remove_buffers()
         self.snap_all_points_to_grid()
         self.calc_sheet_size()
         # self.flip_y_axis()

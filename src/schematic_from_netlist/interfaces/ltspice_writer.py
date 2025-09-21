@@ -6,6 +6,7 @@ class LTSpiceWriter:
         self.db = db
         self.schematic_db = schematic_db
         self.module_names = {}
+        self.add_comments = False  # kicad can't seem to parse spice with comments
 
     def upscale_rect(self, rect: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
         """Scale a rectangle (x1,y1,x2,y2) from grid units to real units."""
@@ -45,18 +46,20 @@ class LTSpiceWriter:
         """Formats a single WIRE line for the .asc file."""
         # out = "* WIRE\n"
         out = ""
+        comment = f" $   {wire_shape.name}" if self.add_comments else ""
         if wire_shape.segments is not None:
             segments = self.upscale_segments(wire_shape.segments)
+            print(f"{wire_shape.name} {segments=}")
             for seg in segments:
                 pt_start, pt_end = seg
-                out += f"WIRE {pt_start[0]} {pt_end[0]} {pt_end[1]} {pt_end[1]}\n"
+                out += f"WIRE {pt_start[0]} {pt_start[1]} {pt_end[0]} {pt_end[1]}{comment}\n"
 
         if wire_shape.points is not None:
             points = self.upscale_points(wire_shape.points)
             pt_start = points[0]
             for pt in points[1:]:
                 pt_end = pt
-                out += f"WIRE {pt_start[0]} {pt_start[1]} {pt_end[0]} {pt_end[1]}\n"
+                # out += f"WIRE {pt_start[0]} {pt_start[1]} {pt_end[0]} {pt_end[1]}{comment}\n"
                 pt_start = pt_end
         return out
 
@@ -154,7 +157,6 @@ class LTSpiceWriter:
             y = port_center_y - inst_offset_y
             pt = (x, y)
             side = self._get_pin_side(pt, cell_rect)
-            # breakpoint()
             asy += f"PIN {x} {y} {side} 0\n"
             asy += f"PINATTR PinName {shape.pin.name}\n"
 
