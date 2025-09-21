@@ -3,6 +3,7 @@ import os
 
 from schematic_from_netlist.graph.gen_sch_data import GenSchematicData
 from schematic_from_netlist.graph.graph_partition import HypergraphPartitioner
+from schematic_from_netlist.graph.group_maker import GroupMaker
 from schematic_from_netlist.graph.pathfinder import Pathfinder
 from schematic_from_netlist.interfaces.json_graph import ParseJson
 from schematic_from_netlist.interfaces.ltspice_writer import LTSpiceWriter
@@ -31,23 +32,33 @@ def main():
     print(f"Using configuration file: {args.config}")
 
     # --- Core Logic ---
-    # 1. Parse Verilog netlist into a database
+    # 0. Parse Verilog netlist into a database
     verilog_parser = VerilogParser()
     db = verilog_parser.parse_and_store_in_db([args.netlist_file])
     db.buffer_multi_fanout_nets()  # insert fanout buffers
 
-    # 2. Build hypergraph data for partitioning
-    hypergraph_data = db.build_hypergraph_data()
+    num_iterations = 2
+    for i in range(num_iterations):
+        print(f"Running pathfinder iteration {i + 1}/{num_iterations}")
 
-    # 3. Partition the hypergraph
-    partitioner = HypergraphPartitioner(hypergraph_data, db)
-    partition = partitioner.run_partitioning(args.k, args.config)
+        # 1. insert buffers for any multi fanout nets
+        db.buffer_multi_fanout_nets()  # insert fanout buffers
 
-    # 4. Dump the partitioned graph to JSON, DOT, and PNG
-    partitioner.dump_graph_to_json(args.k, partition, "data")
+        # 2. Build hypergraph data for partitioning
+        hypergraph_data = db.build_hypergraph_data()
 
-    # 5. Parse the generated JSON to extract schematic data
-    if partitioner.graph_json_data:
+        # 3. Partition the hypergraph
+        partitioner = HypergraphPartitioner(hypergraph_data, db)
+        partition = partitioner.run_partitioning(args.k, args.config)
+
+        # 4. Dump the partitioned graph to json for parsing
+        partitioner.dump_graph_to_json(i, args.k, partition, "data")
+
+        # 5. Parse the generated JSON to extract schematic data
+        if not partitioner.graph_json_data:
+            print(f"Error: graph data not found ...")
+            return
+
         json_parser = ParseJson(partitioner.graph_json_data)
         geom_db = json_parser.parse()
 
@@ -55,16 +66,17 @@ def main():
         schematic_db = GenSchematicData(geom_db, db)
         schematic_db.generate_schematic_info()
 
-        # 7.improve routing
-        pathfinder = Pathfinder(db, schematic_db)
-        pathfinder.cleanup_routes()
-
-        # 8.write the final schematic
+        # 7.write the final schematic
         # schematic_db.flip_y_axis()
         ltspice_writer = LTSpiceWriter(db, schematic_db)
         ltspice_writer.produce_schematic(args.output_dir)
 
-    print("Schematic generation process completed.")
+        # 8.improve routing expect last iteration
+        if i < num_iterations - 1:
+            group_maker = GroupMaker(db, schematic_db)
+            group_maker.insert_route_guide_buffers()
+
+    print("Run Complete .")
 
 
 if __name__ == "__main__":

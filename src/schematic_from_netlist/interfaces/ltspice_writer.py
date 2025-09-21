@@ -59,7 +59,7 @@ class LTSpiceWriter:
             pt_start = points[0]
             for pt in points[1:]:
                 pt_end = pt
-                # out += f"WIRE {pt_start[0]} {pt_start[1]} {pt_end[0]} {pt_end[1]}{comment}\n"
+                out += f"WIRE {pt_start[0]} {pt_start[1]} {pt_end[0]} {pt_end[1]}{comment}\n"
                 pt_start = pt_end
         return out
 

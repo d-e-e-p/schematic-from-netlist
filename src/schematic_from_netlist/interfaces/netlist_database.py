@@ -69,6 +69,7 @@ class Net:
         else:  # INOUT
             self.drivers.add(pin)
             self.loads.add(pin)
+        print(f"after add_pin {self.name=} {self.num_conn=} {pin.full_name=}")
 
     def remove_pin(self, pin: Pin):
         """Remove a pin connection from this net"""
@@ -383,21 +384,41 @@ class NetlistDatabase:
         """
 
         for name, net in self.nets_by_name.items():
+            print(f"{name} {net.num_conn=}")
             if net.num_conn > 0 and net.num_conn < self.fanout_threshold:
                 net.id = net_id_counter
                 self.id_by_netname[name] = net_id_counter
+                print(f"net {name} now has {net.id=}")
                 self.nets_by_id[net_id_counter] = net
                 self.netname_by_id[net_id_counter] = name
                 net_id_counter += 1
                 for pin in net.pins:
                     instname = pin.instance.name
+                    if instname in self.id_by_instname:
+                        print(f"looking at {pin.full_name} with instname {instname=} already has id = {self.id_by_instname[instname]=}")
                     if instname not in self.id_by_instname:
                         self.id_by_instname[instname] = inst_id_counter
                         self.instname_by_id[inst_id_counter] = instname
                         self.inst_by_id[inst_id_counter] = pin.instance
                         pin.instance.id = inst_id_counter
+                        print(f"created id of {pin.full_name} with instname {instname=} has id = {self.id_by_instname[instname]=}")
                         inst_id_counter += 1
-                        pass
+
+        # ok check we got everyone
+        for name, inst in self.inst_by_name.items():
+            if inst.id == -1:
+                print(f"Inst {name} not assigned an ID")
+                self.id_by_instname[inst.name] = inst_id_counter
+                self.instname_by_id[inst_id_counter] = inst.name
+                self.inst_by_id[inst_id_counter] = inst
+                inst.id = inst_id_counter
+                inst_id_counter += 1
+        for name, net in self.nets_by_name.items():
+            if net.id == -1:
+                print(f"Net {name} not assigned an ID")
+        from pprint import pprint
+
+        pprint(self.id_by_instname)
 
     def buffer_multi_fanout_nets(self):
         """Inserts buffers on nets with fanout > 1"""
@@ -462,6 +483,36 @@ class NetlistDatabase:
         self.buffered_nets_log.clear()
         self._build_lookup_tables()
 
+    def create_buffering_for_groups(self, net, ordering, clusters):
+        """deal with fanout routing"""
+        original_net_name = net.name
+
+        for i, cluster in enumerate(clusters):
+            self.buffered_nets_log[original_net_name] = {"old_pins": set(), "buffer_insts": [], "new_nets": []}
+
+            log = self.buffered_nets_log[original_net_name]
+            log["old_pins"] = net.pins.copy()
+
+            buffer_name = f"{self.inserted_buf_prefix}{i}{original_net_name}"
+            buffer_inst = self.top_module.add_instance(buffer_name, "FANOUT_BUFFER")
+            log["buffer_insts"].append(buffer_inst)
+            print(f" connecting {buffer_name=} to cluster {cluster=}")
+
+            pins_to_buffer = [self.find_pin(pinname) for pinname in cluster]
+            for j, pin in enumerate(pins_to_buffer):
+                # New net for buffer io
+                new_net_name = f"{original_net_name}{self.inserted_net_suffix}{j}"
+                new_net = self.top_module.add_net(new_net_name)
+
+                buf_inout_pin = buffer_inst.add_pin(f"IO{j}", PinDirection.INOUT)
+                new_net.add_pin(buf_inout_pin)
+
+                # Disconnect load from original net and connect to new net
+                net.remove_pin(pin)
+                new_net.add_pin(pin)
+                log["new_nets"].append(new_net)
+        self._build_lookup_tables()
+
     def get_design_statistics(self) -> Dict:
         """Get overall design statistics"""
         stats = {"total_instances": len(self.inst_by_name), "total_nets": len(self.nets_by_name), "total_pins": len(self.pins_by_name), "modules": len(self.modules), "floating_nets": 0, "multi_driven_nets": 0, "max_fanout": 0, "avg_fanout": 0}
@@ -499,7 +550,7 @@ class NetlistDatabase:
             connected_instpin_names = [f"{pin.instance.name}/{pin.name}" for pin in net.pins]
             edge_vector.extend(connected_instance_ids)
             index_vector.append(len(edge_vector))
-            # print(f"connecting {net.name=} conn {net.num_conn}: {connected_instance_ids=} {connected_instpin_names=}")
+            print(f"connecting {net.name=} conn {net.num_conn}: {connected_instance_ids=} {connected_instpin_names=}")
             # print(f"{len(edge_vector)=} {len(index_vector)=} {edge_vector=} {index_vector=}")
 
             if index_vector[-1] != len(edge_vector):

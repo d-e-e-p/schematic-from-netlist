@@ -159,7 +159,7 @@ class HypergraphPartitioner:
         partition_dict = {v: self.g.blockID(v) for v in range(self.g.numNodes())}
         return partition_dict
 
-    def dump_graph_to_json(self, k, partition, data_dir="data"):
+    def dump_graph_to_json(self, stage, k, partition, data_dir="data"):
         """
         Draws and saves the graph with a hierarchical layout, grouping partitions
         into labeled clusters, and saves it as a JSON file.
@@ -223,7 +223,7 @@ class HypergraphPartitioner:
             {
                 "fontsize": "20",
                 "maxiter": "10000",  # Allow more iterations for force-based layouts
-                "overlap": "false",  # Avoid node overlaps
+                "overlap": "false",  # Avoid node overlaps, TODO: try out vpsc
                 "pack": "false",  # Enable packing of disconnected components
                 "sep": "+20",  # Extra separation between clusters
                 "splines": "ortho",  # Orthogonal edge routing
@@ -262,7 +262,7 @@ class HypergraphPartitioner:
             ft, num = m.groups()  # ft = "dot", num = "0"
             output_dir = os.path.join(data_dir, ft)
             os.makedirs(output_dir, exist_ok=True)
-            return os.path.join(output_dir, f"stage{num}.{ft}")
+            return os.path.join(output_dir, f"stage{num}_{stage}.{ft}")
 
         # Layout and draw the graph
         A.write(build_fn("dot0"))

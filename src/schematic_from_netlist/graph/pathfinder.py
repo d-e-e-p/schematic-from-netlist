@@ -132,6 +132,9 @@ class Pathfinder:
         clearences = []
         # assume has shape!
         for pin in net.connections:
+            print(f"looking for pin {pin.full_name} of {pin.instance.name} : {self.schematic_db.portshape_by_name.keys()}")
+            if pin.full_name not in self.schematic_db.portshape_by_name:
+                breakpoint()
             port_shape = self.schematic_db.portshape_by_name[pin.full_name]
             inst_shape = self.schematic_db.instshape_by_name[pin.instance.name]
             endpoints.append(port_shape.point)

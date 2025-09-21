@@ -121,17 +121,19 @@ class GenSchematicData(SchmaticData):
 
             # find a net connecting these 2 inst
             match_nets = self.find_net_between_inst([inst1, inst2])
-            # print(f"{[net.name for net in match_nets]=} {inst1.name=} {inst2.name=}")
+            print(f"{[net.name for net in match_nets]=} {inst1.name=} {inst2.name=}")
 
-            # if multiple net connections between the same 2 inst, we have to assign one port pair
+            # TODO: if multiple net connections between the same 2 inst, we have to assign one port pair
             # to each connection
-            for net in match_nets:
-                for pin in net.pins:
-                    if pin.instance.name == inst1.name:
+            for inst in [inst1, inst2]:
+                for pin in inst.pins.values():
+                    if pin.net in match_nets:
                         x, y = port.point
                         scaled_point = (int(x * self.graph_to_sch_scale), int(y * self.graph_to_sch_scale))
                         ps = PortShape(pin.full_name, pin, scaled_point)
                         self.port_shapes.append(ps)
+                        if pin.full_name == "TOP/U4/PIN0":
+                            print(f"DEBUG adding {pin.full_name=}")
 
     def find_block_bounding_boxes(self):
         instname2shapes = {}
