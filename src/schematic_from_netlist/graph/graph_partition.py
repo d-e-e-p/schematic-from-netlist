@@ -252,23 +252,44 @@ class HypergraphPartitioner:
 
         def build_fn(tag: str, data_dir: str = "data") -> str:
             """
-            Given a tag like 'dot0' or 'json2', return the full path
-            e.g. 'data/dot/stage0.dot' or 'data/json/stage2.json'.
+            Given a tag like 'pre_dot' or 'post_json', return the full path.
+            Example:
+              pre_dot   -> data/dot/pre_stage{stage}.dot
+              post_json -> data/json/post_stage{stage}.json
             """
-            m = re.match(r"([a-zA-Z]+)(\d+)$", tag)
+            m = re.match(r"^(pre|post)_(dot|json)$", tag)
             if not m:
                 raise ValueError(f"Invalid tag format: {tag}")
 
-            ft, num = m.groups()  # ft = "dot", num = "0"
+            prefix, ft = m.groups()
+
             output_dir = os.path.join(data_dir, ft)
             os.makedirs(output_dir, exist_ok=True)
-            return os.path.join(output_dir, f"stage{num}_{stage}.{ft}")
+            return os.path.join(output_dir, f"{prefix}_stage{stage}.{ft}")
+
+        def build_fn(tag: str, data_dir: str = "data") -> str:
+            m = re.match(r"^(\w+?)(?:_(\w+))?$", tag)
+            if not m:
+                raise ValueError(f"Invalid tag format: {tag}")
+
+            prefix, ft = m.groups()
+
+            # If there's no explicit prefix (e.g. "png"), use "stage" as the basename
+            if ft is None:
+                ft = prefix
+                prefix = ""
+            else:
+                prefix += "_"
+
+            output_dir = os.path.join(data_dir, ft)
+            os.makedirs(output_dir, exist_ok=True)
+            return os.path.join(output_dir, f"{prefix}stage{stage}.{ft}")
 
         # Layout and draw the graph
-        A.write(build_fn("dot0"))
-        A.layout(prog="sfdp", args="-v")
-        A.write(build_fn("dot1"))
-        A.draw(build_fn("png1"), format="png")
-        A.draw(build_fn("json1"), format="json")
-        self.graph_json_data = build_fn("json1")
-        print(f"Graph saved to {build_fn('png1')}")
+        A.write(build_fn("pre_dot"))
+        A.layout(prog="sfdp", args="")
+        A.write(build_fn("placed_dot"))
+        A.draw(build_fn("png"), format="png")
+        A.draw(build_fn("json"), format="json")
+        self.graph_json_data = build_fn("json")
+        print(f"Graph saved to {build_fn('png')}")

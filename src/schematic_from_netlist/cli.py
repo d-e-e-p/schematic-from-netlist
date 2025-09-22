@@ -35,7 +35,10 @@ def main():
     # 0. Parse Verilog netlist into a database
     verilog_parser = VerilogParser()
     db = verilog_parser.parse_and_store_in_db([args.netlist_file])
+    table_output_dir = "data/tables"
+    db.dump_netlist_db_to_table(table_output_dir, "0_initial_parse", -1)
     db.buffer_multi_fanout_nets()  # insert fanout buffers
+    db.dump_netlist_db_to_table(table_output_dir, "1_after_initial_buffering", -1)
 
     num_iterations = 2
     for i in range(num_iterations):
@@ -43,9 +46,11 @@ def main():
 
         # 1. insert buffers for any multi fanout nets
         db.buffer_multi_fanout_nets()  # insert fanout buffers
+        db.dump_netlist_db_to_table(table_output_dir, "2_after_iteration_buffering", i)
 
         # 2. Build hypergraph data for partitioning
         hypergraph_data = db.build_hypergraph_data()
+        db.dump_netlist_db_to_table(table_output_dir, "3_after_hypergraph_build", i)
 
         # 3. Partition the hypergraph
         partitioner = HypergraphPartitioner(hypergraph_data, db)
@@ -75,7 +80,10 @@ def main():
         if i < num_iterations - 1:
             group_maker = GroupMaker(db, schematic_db)
             group_maker.insert_route_guide_buffers()
+            db.dump_netlist_db_to_table(table_output_dir, "4_after_route_guide_insertion", i)
 
+    db.remove_multi_fanout_buffers()
+    db.dump_netlist_db_to_table(table_output_dir, "5_final_state_after_buffer_removal", -1)
     print("Run Complete .")
 
 
