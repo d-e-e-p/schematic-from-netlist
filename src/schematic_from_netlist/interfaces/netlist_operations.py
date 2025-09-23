@@ -1,6 +1,7 @@
 import csv
 import json
 import os
+import re
 from pprint import pprint
 from typing import Dict, List, Optional
 
@@ -157,20 +158,27 @@ class NetlistOperationsMixin:
 
         for net in nets_to_buffer:
             original_net_name = net.name
+            net.shape = []
             print(f"instrumentation: Buffering net {original_net_name} with {net.num_conn} connections.")
             self.buffered_nets_log[original_net_name] = {"old_pins": set(), "buffer_insts": [], "new_nets": []}
 
             log = self.buffered_nets_log[original_net_name]
             log["old_pins"] = net.pins.copy()
 
-            buffer_name = f"{self.inserted_buf_prefix}{original_net_name}"
+            i = 0
+            buffer_name = f"{self.inserted_buf_prefix}{i}_{original_net_name}"
             buffer_inst = self.top_module.add_instance(buffer_name, "FANOUT_BUFFER")
+            buffer_inst.is_buffer = True
+            buffer_inst.buffer_original_netname = original_net_name
             log["buffer_insts"].append(buffer_inst)
 
             pins_to_buffer = list(net.pins)
             for i, pin in enumerate(pins_to_buffer):
                 new_net_name = f"{original_net_name}{self.inserted_net_suffix}{i}"
                 new_net = self.top_module.add_net(new_net_name)
+                new_net.is_buffered_net = True
+                new_net.buffer_original_netname = original_net_name
+                print(f"instrumentation: created net {new_net.name} derived from {new_net.buffer_original_netname}")
 
                 buf_inout_pin = buffer_inst.add_pin(f"IO{i}", PinDirection.INOUT)
                 new_net.add_pin(buf_inout_pin)
@@ -220,6 +228,11 @@ class NetlistOperationsMixin:
         for net_name in nets_to_delete:
             if net_name in self.top_module.nets:
                 print(f"instrumentation: Deleting buffer net {net_name}")
+                # clone wires before delete
+                net = self.top_module.nets[net_name]
+                print(f"looking for original of {net_name=} =  {net.buffer_original_netname}")
+                original_net = self.nets_by_name.get(net.buffer_original_netname)
+                original_net.shape.extend(net.shape)
                 del self.top_module.nets[net_name]
 
         self.buffered_nets_log.clear()
@@ -257,6 +270,8 @@ class NetlistOperationsMixin:
                     continue
                 new_net_name = f"{original_net_name}{self.inserted_net_suffix}{i}_{j}"
                 new_net = self.top_module.add_net(new_net_name)
+                new_net.is_buffered_net = True
+                new_net.buffer_original_netname = original_net_name
 
                 buf_inout_pin = buffer_inst.add_pin(f"IO{j}", PinDirection.INOUT)
                 new_net.add_pin(buf_inout_pin)
@@ -273,6 +288,8 @@ class NetlistOperationsMixin:
                 if src_buffer_inst and dst_buffer_inst:
                     chain_net_name = f"top_{self.inserted_buf_prefix}{src_buf_idx}_{dst_buf_idx}_{original_net_name}"
                     chain_net = self.top_module.add_net(chain_net_name)
+                    chain_net.is_buffered_net = True
+                    chain_net.buffer_original_netname = original_net_name
 
                     src_pin_num, dst_pin_num = len(src_buffer_inst.pins), len(dst_buffer_inst.pins)
                     src_pin = src_buffer_inst.add_pin(f"IO{src_pin_num}", PinDirection.INOUT)
@@ -363,3 +380,29 @@ class NetlistOperationsMixin:
                             edge = Edge(src.name, dst.name, name=None if net.name.startswith(self.inserted_buf_prefix) else net.name)
                             edges.append(edge)
         return edges
+
+    def clear_all_shapes(self):
+        for inst in self.top_module.get_all_instances().values():
+            inst.shape = ()
+
+        for net in self.top_module.get_all_nets().values():
+            net.shape.clear()
+            net.buffer_patch_points.clear()
+
+        for inst in self.top_module.get_all_instances().values():
+            for pin in inst.pins.values():
+                pin.shape = ()
+
+    def uniquify_module_names(self):
+        """needed to have each ref having different shape"""
+        seen = {}
+        for inst in self.top_module.get_all_instances().values():
+            if seen.get(inst.module_ref):
+                counter = seen[inst.module_ref]
+            else:
+                counter = 0
+
+            name = f"{inst.module_ref}{counter}"
+            safe_name = re.sub(r"[^a-zA-Z0-9_]", "_", name)
+            inst.module_ref_uniq = safe_name
+            seen[inst.module_ref] = counter + 1

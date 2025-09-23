@@ -1,31 +1,31 @@
 import json
+import os
 from dataclasses import dataclass, field
-from typing import List, Tuple
-
-
-@dataclass
-class GeomPort:
-    """Represents the geometric location of a port on an instance."""
-
-    name: str  # Head instance name
-    conn: str  # Tail instance name
-    point: Tuple[float, float]
-
-
-@dataclass
-class GeomNet:
-    """Represents the geometric path of a wire."""
-
-    conn: List[str]
-    points: List[Tuple[float, float]]
+from typing import Dict, List, Tuple
 
 
 @dataclass
 class GeomDB:
     """A database for geometric primitives extracted from the graph layout."""
 
-    ports: List[GeomPort] = field(default_factory=list)
-    nets: List[GeomNet] = field(default_factory=list)
+    ports: Dict[str, Tuple[float, float]] = field(default_factory=dict)
+    nets: Dict[str, List[Tuple[float, float]]] = field(default_factory=dict)
+
+    def write_geom_db_report(self, filepath: str = "data/json/read_json.rpt"):
+        os.makedirs(os.path.dirname(filepath), exist_ok=True)
+
+        out = "PORTS\n"
+        for name in sorted(self.ports.keys()):
+            port = self.ports[name]
+            out += f" {name:20}: {port}\n"
+
+        out += "NETS\n"
+        for name in sorted(self.nets.keys()):
+            pts = self.nets[name]
+            out += f" {name:20}: {pts}\n"
+
+        with open(filepath, "w") as f:
+            f.write(out)
 
 
 class ParseJson:
@@ -35,41 +35,31 @@ class ParseJson:
             self.json_data = json.load(f)
 
     def parse(self) -> GeomDB:
-        """Parses the JSON file and populates the geometric database."""
+        """Parses the JSON file and populates geomdb."""
         geom_db = GeomDB()
-        objects = self.json_data.get("objects", [])
-
-        # Create a mapping from gvid to object name for quick lookup
-        gvid_to_name = {i: obj.get("name") for i, obj in enumerate(objects)}
 
         for edge in self.json_data.get("edges", []):
             try:
-                head_gvid = edge.get("head")
-                tail_gvid = edge.get("tail")
-
-                head_name = gvid_to_name.get(head_gvid)
-                tail_name = gvid_to_name.get(tail_gvid)
-
-                if not head_name or not tail_name:
-                    continue
-
                 # Extract port rectangle from the head of the edge
-                head_rect_data = edge["_hdraw_"][-1]["rect"]
-                x_h, y_h, _, _ = head_rect_data
-                geom_db.ports.append(GeomPort(name=head_name, conn=tail_name, point=(x_h, y_h)))
+                rect_data = edge["_hdraw_"][-1]["rect"]
+                text_data = edge["headlabel"]
+                x, y, _, _ = rect_data
+                geom_db.ports[text_data] = (x, y)
 
                 # Extract port rectangle from the tail of the edge
-                tail_rect_data = edge["_tdraw_"][-1]["rect"]
-                x_t, y_t, _, _ = tail_rect_data
-                geom_db.ports.append(GeomPort(name=tail_name, conn=head_name, point=(x_t, y_t)))
+                rect_data = edge["_tdraw_"][-1]["rect"]
+                text_data = edge["taillabel"]
+                x, y, _, _ = rect_data
+                geom_db.ports[text_data] = (x, y)
 
                 # Extract wire points
+                text_data = edge["label"]
                 points_data = edge["_draw_"][-1]["points"]
-                wire_points = [(p[0], p[1]) for p in points_data]
-                geom_db.nets.append(GeomNet(conn=[head_name, tail_name], points=wire_points))
+                geom_db.nets[text_data] = points_data
 
             except (KeyError, IndexError, AttributeError, ValueError, TypeError):
                 continue
 
-        print(f"Parsed {len(geom_db.ports)} ports and {len(geom_db.nets)} nets from JSON.")
+        print(f"Parsed {len(geom_db.ports)} ports and {len(geom_db.nets)} nets from graph.")
+        geom_db.write_geom_db_report()
         return geom_db

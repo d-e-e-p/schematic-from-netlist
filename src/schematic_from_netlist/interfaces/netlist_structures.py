@@ -1,7 +1,8 @@
 from __future__ import annotations
+
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 
 class PinDirection(Enum):
@@ -27,6 +28,7 @@ class Pin:
     net: Optional["Net"] = None
     bit_width: int = 1
     bit_range: Optional[tuple] = None  # (msb, lsb) for vectors
+    shape: Tuple[int, int] = ()
 
     def __post_init__(self):
         self.full_name = f"{self.instance.full_name}/{self.name}"
@@ -47,6 +49,10 @@ class Net:
     pins: Set[Pin] = field(default_factory=set)
     id: int = -1
     num_conn: int = 0
+    shape: List[Tuple[Tuple[int, int], Tuple[int, int]]] = field(default_factory=list)
+    is_buffer_wire: bool = False
+    buffer_original_netname: Optional[str] = None
+    buffer_patch_points: List[Tuple[Tuple[int, int], Tuple[int, int]]] = field(default_factory=list)
 
     def __post_init__(self):
         self.full_name = f"{self.module.full_name}.{self.name}"
@@ -116,6 +122,11 @@ class Instance:
     pins: Dict[str, Pin] = field(default_factory=dict)
     parameters: Dict[str, Any] = field(default_factory=dict)
     id: int = -1
+    shape: Tuple[int, int, int, int] = ()
+
+    is_buffer: bool = False
+    buffer_original_netname: Optional[str] = None
+    module_ref_uniq: Optional[str] = None  # fake module_ref for ltspice netlist
 
     def __post_init__(self):
         self.full_name = f"{self.parent_module.full_name}/{self.name}"

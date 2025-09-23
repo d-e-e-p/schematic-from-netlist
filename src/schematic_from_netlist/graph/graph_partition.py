@@ -33,6 +33,8 @@ class Edge:
     color: str | None = None  # optional color
     fontsize: int | None = None
     weight: int | None = None
+    headlabel: str | None = None
+    taillabel: str | None = None
 
     @property
     def attrs(self) -> dict:
@@ -211,11 +213,15 @@ class HypergraphPartitioner:
                     subgraph.add_node(node_name, width=size, height=size, fixedsize=True, shape="box")
                     # printf(f"Node {node_name} has degree {degree} and size {size}")
 
-        for block_id, nodes in groups.items():
-            edges = self.db.get_edges_between_nodes(nodes)
-            for edge in edges:
-                A.add_edge(edge.src, edge.dst, **edge.attrs)
-
+        # Add edges: arrow heads and tail labels swapped see:
+        # see https://gitlab.com/graphviz/graphviz/-/issues/144#note_326549080
+        for name, net in self.db.nets_by_name.items():
+            if 2 <= net.num_conn <= self.db.fanout_threshold:
+                pins = list(net.connections)
+                src = pins[0]
+                for dst in pins[1:]:
+                    A.add_edge(src.instance.name, dst.instance.name, label=net.name, headlabel=dst.full_name, taillabel=src.full_name)
+        print(f"{len(A.nodes())} nodes, {len(A.edges())} edges")
         # Set graph attributes for better layout
 
         # Graph-level attributes
@@ -249,23 +255,6 @@ class HypergraphPartitioner:
                 "dir": "both",  # Draw arrows at both ends
             }
         )
-
-        def build_fn(tag: str, data_dir: str = "data") -> str:
-            """
-            Given a tag like 'pre_dot' or 'post_json', return the full path.
-            Example:
-              pre_dot   -> data/dot/pre_stage{stage}.dot
-              post_json -> data/json/post_stage{stage}.json
-            """
-            m = re.match(r"^(pre|post)_(dot|json)$", tag)
-            if not m:
-                raise ValueError(f"Invalid tag format: {tag}")
-
-            prefix, ft = m.groups()
-
-            output_dir = os.path.join(data_dir, ft)
-            os.makedirs(output_dir, exist_ok=True)
-            return os.path.join(output_dir, f"{prefix}_stage{stage}.{ft}")
 
         def build_fn(tag: str, data_dir: str = "data") -> str:
             m = re.match(r"^(\w+?)(?:_(\w+))?$", tag)

@@ -6,151 +6,59 @@ from typing import List, Tuple
 from schematic_from_netlist.interfaces.netlist_database import Pin
 
 
-@dataclass
-class NetShape:
-    name: str
-    points: List[Tuple[int, int]] | None = None
-    segments: List[Tuple[Tuple[int, int], Tuple[int, int]]] | None = None
-
-    def __hash__(self):
-        return hash(self.name)
-
-
-@dataclass
-class PortShape:
-    name: str
-    pin: Pin
-    point: Tuple[int, int]
-
-    def __hash__(self):
-        return hash(self.name)
-
-
-@dataclass
-class InstShape:
-    name: str
-    module_ref: str
-    rect: Tuple[int, int, int, int]
-    port_shapes: List[PortShape]
-
-    def __hash__(self):
-        return hash(self.name)
-
-
-@dataclass
-class SchmaticData:
-    sheet_size: Tuple[int, int] = (1000, 1000)
-    port_shapes: List[PortShape] = field(default_factory=list)
-    inst_shapes: List[InstShape] = field(default_factory=list)
-    net_shapes: List[NetShape] = field(default_factory=list)
-    # lookup tables (lazy-built via _build_lookup_tables)
-    netshape_by_name: dict[str, NetShape] = field(init=False, default_factory=dict)
-    instshape_by_name: dict[str, InstShape] = field(init=False, default_factory=dict)
-    portshapes_by_instname: dict[str, list[PortShape]] = field(init=False, default_factory=dict)
-    portshape_by_name: dict[str, PortShape] = field(init=False, default_factory=dict)
-
-    def _build_lookup_tables(self):
-        """Build fast lookup dictionaries for nets, instances, and ports."""
-
-        # Nets
-        self.netshape_by_name = {net.name: net for net in self.net_shapes}
-
-        # Instances
-        self.instshape_by_name = {inst.name: inst for inst in self.inst_shapes}
-
-        # Ports by instance name
-        ports_by_inst = defaultdict(list)
-        for inst in self.inst_shapes:
-            for port in inst.port_shapes:
-                ports_by_inst[inst.name].append(port)
-        self.portshapes_by_instname = dict(ports_by_inst)
-
-        # Ports by name (unique lookup)
-        self.portshape_by_name = {}
-        # TODO: First add top-level sheet ports
-
-        # Then add instance ports
-        for inst in self.inst_shapes:
-            # print(f"{inst.name=}")
-            for port in inst.port_shapes:
-                # print(f"{port.name=} {port.point=}")
-                if port.name in self.portshape_by_name:
-                    pass
-                    # TODO fix remove buffer multi causing this
-                    # raise ValueError(f"Duplicate port name across instances: {port.name}")
-                self.portshape_by_name[port.name] = port
-
-
-class GenSchematicData(SchmaticData):
+class GenSchematicData:
     def __init__(self, geom_db, netlist_db):
-        super().__init__()
         self.geom_db = geom_db
         self.db = netlist_db
-        self.graph_to_sch_scale = 0.25  # from graphviz to LTspice, needs to be adjusted to avoid limits
+        self.sheet_size: Tuple[int, int] = (1000, 1000)
+        self.graph_to_sch_scale = 0.24  # from graphviz to LTspice, about 72/0.24 = 300dpi
         self.schematic_grid_size = 16  # needs to be a multiple of 50 mils on kicad import for wires to connect to pin
         # TODO: many make it equal area to the smallest other macro?
         self.min_block_size_in_gridlines = 10
         self.block_moat_size_in_gridlines = 1
 
-    def find_net_between_inst(self, list_of_inst):
-        """
-        Find nets that are common to all instances in list_of_inst.
-        Each inst must have .get_connected_nets() -> List[Net].
-        """
-        if not list_of_inst:
-            return []
+    # first some geom helpers
+    def scale_rect(self, rect: tuple[float, float, float, float]) -> tuple[int, int, int, int]:
+        """Scale a rectangle (x1,y1,x2,y2) from grid units to real units."""
+        s = self.graph_to_sch_scale
+        return (round(rect[0] * s), round(rect[1] * s), round(rect[2] * s), round(rect[3] * s))
 
-        # Get nets of the first inst.. common_bets is a dict of name2net
-        common_nets = {net.name: net for net in list_of_inst[0].get_connected_nets()}
+    def scale_points(self, points: list[tuple[float, float]]) -> list[tuple[int, int]]:
+        """Scale a list of points [(x,y), ...]."""
+        s = self.graph_to_sch_scale
+        return [(round(x * s), round(y * s)) for (x, y) in points]
 
-        # Intersect with the rest
-        for inst in list_of_inst[1:]:
-            inst_nets = {net.name: net for net in inst.get_connected_nets()}
-            # keep only common nets
-            common_nets = {n: net for n, net in common_nets.items() if n in inst_nets}
+    def scale_point(self, point: tuple[float, float]) -> tuple[int, int]:
+        """Scale a single points (x,y)"""
+        s = self.graph_to_sch_scale
+        x, y = point
+        return (round(x * s), round(y * s))
 
-        # Return list of Net objects
-        return list(common_nets.values())
-
-    def associate_ports_to_blocks(self):
-        # look over all port pairs and compare them to
-
-        for port in self.geom_db.ports:
-            inst1 = self.db.inst_by_name[port.name]
-            inst2 = self.db.inst_by_name[port.conn]
-
-            # find a net connecting these 2 inst
-            match_nets = self.find_net_between_inst([inst1, inst2])
-            print(f"{[net.name for net in match_nets]=} {inst1.name=} {inst2.name=}")
-
-            # TODO: if multiple net connections between the same 2 inst, we have to assign one port pair
-            # to each connection
-            for inst in [inst1, inst2]:
-                for pin in inst.pins.values():
-                    if pin.net in match_nets:
-                        x, y = port.point
-                        scaled_point = (int(x * self.graph_to_sch_scale), int(y * self.graph_to_sch_scale))
-                        ps = PortShape(pin.full_name, pin, scaled_point)
-                        self.port_shapes.append(ps)
-                        if pin.full_name == "TOP/U4/PIN0":
-                            print(f"DEBUG adding {pin.full_name=}")
+    def center_of_points(self, points):
+        sum_x = sum(p[0] for p in points)
+        sum_y = sum(p[1] for p in points)
+        num_points = len(points)
+        center_x = round(sum_x / num_points)
+        center_y = round(sum_y / num_points)
+        point = (center_x, center_y)
+        return point
 
     def find_block_bounding_boxes(self):
-        instname2shapes = {}
+        """record inst shape as bounding box covering all pin geom ..."""
+        instname2shapes = defaultdict(list)
+        # pass 1: record pin shapes
+        for _, inst in self.db.top_module.get_all_instances().items():
+            for _, pin in inst.pins.items():
+                if pin.full_name in self.geom_db.ports:
+                    pin.shape = self.scale_point(self.geom_db.ports[pin.full_name])
+                    instname2shapes[inst.name].append(pin.shape)
+                else:
+                    print(f"missing geom data for {pin.full_name=}")
 
-        # Group port_shapes by instance name
-        for shape in self.port_shapes:
-            pin = getattr(shape, "pin", None)
-            if pin is None or pin.instance is None:
-                continue  # skip dangling ports
-            instname = pin.instance.name
-            instname2shapes.setdefault(instname, []).append(shape)
-
-        # Aggregate rects for each instance
-        for instname, shapes in instname2shapes.items():
-            pt_list = [s.point for s in shapes if hasattr(s, "point")]
-
+        # pass 2: found bonding box
+        for instname, pt_list in instname2shapes.items():
             if not pt_list:
+                print(f"Warning: Inst {instname} has no geom data")
                 continue
 
             # TODO: need to grow nicely -- if only 1 port
@@ -180,22 +88,7 @@ class GenSchematicData(SchmaticData):
             rect = (x_min, y_min, x_max, y_max)
 
             inst = self.db.inst_by_name.get(instname)
-            if inst is None:
-                # fallback or skip if inst not found
-                print(f"Warning: Inst {instname} not found")
-                continue
-
-            module_ref = getattr(inst, "module_ref", "")
-            # print(f"{instname=} {module_ref=} {rect=}")
-            # for shape in shapes:
-            #    print(f"  {shape.pin.name=} {shape.point=}")
-            inst_shape = InstShape(
-                name=instname,
-                module_ref=module_ref,
-                rect=rect,
-                port_shapes=shapes,
-            )
-            self.inst_shapes.append(inst_shape)
+            inst.shape = rect
 
     def scale_and_uniq_points(self, points):
         """
@@ -204,9 +97,9 @@ class GenSchematicData(SchmaticData):
         if not points:
             return []
 
-        scaled_points = [(int(x * self.graph_to_sch_scale), int(y * self.graph_to_sch_scale)) for x, y in points]
-        unique_points = [scaled_points[0]]  # Always keep the first point
+        scaled_points = self.scale_points(points)
 
+        unique_points = [scaled_points[0]]  # Always keep the first point
         for pt in scaled_points[1:]:
             # Only add if different from the previous point
             if pt != unique_points[-1]:
@@ -215,73 +108,72 @@ class GenSchematicData(SchmaticData):
         return unique_points
 
     def find_net_shapes(self):
-        for net_geom in self.geom_db.nets:
-            list_of_inst = []
-            for instname in net_geom.conn:
-                list_of_inst.append(self.db.inst_by_name[instname])
-
-            nets = self.find_net_between_inst(list_of_inst)
-            if nets:
-                netname = nets[0].name
-                points = self.scale_and_uniq_points(net_geom.points)
-                # print(f"{netname}: {points}")
-                net_shape = NetShape(name=netname, points=points)
-                self.net_shapes.append(net_shape)
-
-    def center_points(self, rect):
-        # center of first rectangle
-        center_x = round((rect[0] + rect[2]) / 2)
-        center_y = round((rect[1] + rect[3]) / 2)
-        point = (center_x, center_y)
-        return point
-
-    def snap_buffer_wire_to_center(self, pt_center, pt_port):
-        for shape in self.net_shapes:
-            points = shape.points
-            new_pts = []
-            modified = False
-            for pt_wire in points:
-                if pt_wire == pt_port:
-                    new_pts.append(pt_center)
-                else:
-                    new_pts.append(pt_wire)
-                    modified = True
-            if modified:
-                shape.points = new_pts
-                shape.name = re.sub(r"_fanout_buffer_\d+", "", shape.name)
+        for name, net in self.db.top_module.get_all_nets().items():
+            if name in self.geom_db.nets:
+                points = self.geom_db.nets[name]
+                points = self.scale_and_uniq_points(points)
+                pt_start = points[0]
+                for pt in points[1:]:
+                    pt_end = pt
+                    net.shape.append((pt_start, pt_end))
+                    pt_start = pt_end
 
     def route_to_center(self, pt_center, pt_port):
         pass
 
-    def patch_and_remove_buffers(self):
+    def mark_multi_fanout_buffers(self):
+        """locate inst/net by pattern"""
+
+        pattern_net = re.compile(rf"^(?P<original>.+?){re.escape(self.db.inserted_net_suffix)}")
+
+        def extract_original_from_net(name: str) -> str | None:
+            """Return the original net name if it matches the split pattern, else None."""
+            if m := pattern_net.match(name):
+                return m.group("original")
+            return None
+
+        for name, net in self.db.top_module.get_all_nets().items():
+            if original_net_name := extract_original_from_net(name):
+                net.is_buffered_net = True
+                net.buffer_original_netname = original_net_name
+
+        pattern_cell = re.compile(rf"^{re.escape(self.db.inserted_buf_prefix)}\d+_(?P<original>.+)$")
+
+        def extract_original_from_cell(name: str) -> str | None:
+            if m := pattern_cell.match(name):
+                return m.group("original")
+            return None
+
+        for name, inst in self.db.top_module.get_all_instances().items():
+            # if prefix is self.inserted_buf_prefix
+            if original := extract_original_from_cell(name):
+                inst.is_buffer = True
+                inst.buffer_original_netname = original
+
+    def patch_pins_of_buffers(self):
         """
-        Finds buffer instances, replaces them with a wire in the geometric data,
-        and then removes them from the logical netlist.
+        shorts pins of buffers instances
         """
-        buffers_to_remove = []
 
-        # Find buffer instance shapes
-        for inst_shape in self.inst_shapes:
-            if inst_shape.name.startswith(self.db.inserted_buf_prefix):
-                buffers_to_remove.append(inst_shape)
+        for _, inst in self.db.top_module.get_all_instances().items():
+            if inst.is_buffer:
+                points = []
+                for _, pin in inst.pins.items():
+                    points.append(pin.shape)
+                pt_center = self.center_of_points(points)
 
-                # Get center points of the buffer inst
-                pt_center = self.center_points(inst_shape.rect)
-                for port_shape in inst_shape.port_shapes:
-                    pt_port = port_shape.point
-                    self.route_to_center(pt_center, pt_port)
-
-        # ok now all wires of buffering nets
-        for net_shape in self.net_shapes:
-            if net_shape.name.find(self.db.inserted_net_suffix) > -1:
-                orig_netname = re.sub(rf"{re.escape(self.db.inserted_net_suffix)}\d+$", "", net_shape.name)
-                net_shape.name = orig_netname
-
-        # ok now remove logical buffers and restore logical connection
-        self.db.remove_multi_fanout_buffers()
-        self._build_lookup_tables()
+                if inst.buffer_original_netname in self.db.nets_by_name:
+                    net = self.db.nets_by_name[inst.buffer_original_netname]
+                    for pt in points:
+                        segment = (pt_center, pt)
+                        net.buffer_patch_points.append(segment)
+                    print(f"Patched buffer {inst.name} with net {inst.buffer_original_netname=} {net.buffer_patch_points=}")
+                else:
+                    print(f"Warning: Net {inst.buffer_original_netname} not found")
+        # ok now we're ready to remove logical buffers and restore logical connection
 
     def shift_all_geom_by(self, dx, dy):
+        """
         for inst_shape in self.inst_shapes:
             x1, y1, x2, y2 = inst_shape.rect
             inst_shape.rect = (x1 + dx, y1 + dy, x2 + dx, y2 + dy)
@@ -290,29 +182,29 @@ class GenSchematicData(SchmaticData):
 
         for net_shape in self.net_shapes:
             net_shape.points = [(x + dx, y + dy) for x, y in net_shape.points]
+        """
 
     def calc_sheet_size(self):
         """too concise perhaps?"""
         coords = []
 
-        # Rectangles: extract x1, y1, x2, y2
-        for shape in self.inst_shapes:
-            coords.extend([shape.rect[0], shape.rect[1], shape.rect[2], shape.rect[3]])
-
-        # Points: extract x, y from each point
-        for net_shape in self.net_shapes:
-            for x, y in net_shape.points:
+        for _, net in self.db.top_module.get_all_nets().items():
+            for x, y in net.shape:
                 coords.extend([x, y])
 
-        padding = 100  # units is in grid by this point
-        if coords:
-            xs = coords[::2]  # Even indices
-            ys = coords[1::2]  # Odd indices
-            if min(xs) < padding or min(ys) < padding:
-                self.shift_all_geom_by(padding - min(xs), padding - min(ys))
+            if net.buffer_patch_points:
+                for x, y in net.buffer_patch_points:
+                    coords.extend([x, y])
 
-            xsize = int(max(xs) - min(xs) + 2 * padding)
-            ysize = int(max(ys) - min(ys) + 2 * padding)
+        padding = 100  # units is in grid at this point
+        if coords:
+            xs = [x for x, y in coords]
+            ys = [y for x, y in coords]
+            # if min(xs) < padding or min(ys) < padding:
+            #    self.shift_all_geom_by(padding - min(xs), padding - min(ys))
+
+            xsize = round(max(xs) - min(xs) + 2 * padding)
+            ysize = round(max(ys) - min(ys) + 2 * padding)
 
             self.sheet_size = (xsize, ysize)
         else:
@@ -349,38 +241,13 @@ class GenSchematicData(SchmaticData):
                 flipped_points.append((x, sheet_height - y))
             shape.points = flipped_points
 
-    def snap_all_points_to_grid(self):
-        """
-        Ensures coordinates are multiples of self.grid_size.
-        """
-
-        def snap(v):
-            # Round to nearest multiple of grid
-            return round(v * self.graph_to_sch_scale)
-
-        # Snap instance rectangles
-        for inst_shape in self.inst_shapes:
-            x1, y1, x2, y2 = inst_shape.rect
-            inst_shape.rect = (snap(x1), snap(y1), snap(x2), snap(y2))
-
-            # Snap instance ports
-            for port_shape in inst_shape.port_shapes:
-                x, y = port_shape.point
-                port_shape.point = (snap(x), snap(y))
-
-        # Snap net shapes
-        for net_shape in self.net_shapes:
-            snapped_points = []
-            for x, y in net_shape.points:
-                snapped_points.append((snap(x), snap(y)))
-            net_shape.points = snapped_points
-
     def generate_schematic_info(self):
-        self.associate_ports_to_blocks()
+        self.db.clear_all_shapes()
+        self.mark_multi_fanout_buffers()
         self.find_block_bounding_boxes()
         self.find_net_shapes()
-        self.patch_and_remove_buffers()
-        self.snap_all_points_to_grid()
+        self.patch_pins_of_buffers()
+        self.db.remove_multi_fanout_buffers()
         self.calc_sheet_size()
         # self.flip_y_axis()
         return self
