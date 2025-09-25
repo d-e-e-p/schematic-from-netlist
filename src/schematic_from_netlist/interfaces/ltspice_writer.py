@@ -33,6 +33,10 @@ class LTSpiceWriter:
     def asc_place_inst(self, inst):
         """Formats a single symbol line for the .asc file."""
         out = ""
+
+        if not inst.shape:
+            return out
+
         name = inst.name
         module_ref = inst.module_ref_uniq
         x1, y1, x2, y2 = self.upscale_rect(inst.shape)
@@ -134,6 +138,9 @@ class LTSpiceWriter:
     def generate_symbol_asy(self, inst):
         """Generates an .asy file for a given module."""
 
+        # eg a cap connected between vdd and gnd
+        if not inst.shape:
+            return
         rect = self.upscale_rect(inst.shape)
         hw = (rect[2] - rect[0]) // 2  # half width
         hh = (rect[3] - rect[1]) // 2  # half height
@@ -151,8 +158,7 @@ class LTSpiceWriter:
         asy += self.generate_symbol_window_commands(hw, hh)
         for pinname, pin in inst.pins.items():
             if not pin.shape:
-                print(f"Pin {pinname} has no shape!")
-                breakpoint()
+                continue
             port_center_x, port_center_y = self.upscale_point(pin.shape)
             x = port_center_x - inst_offset_x
             y = port_center_y - inst_offset_y
