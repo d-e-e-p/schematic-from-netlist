@@ -1,4 +1,4 @@
-from typing import Dict, Optional
+from typing import Dict, List, Optional, Tuple
 
 from .netlist_operations import NetlistOperationsMixin
 from .netlist_structures import Instance, Module, Net, NetType, Pin, PinDirection
@@ -9,6 +9,13 @@ class NetlistDatabase(NetlistOperationsMixin):
 
     def __init__(self, fanout_threshold: int = 55):
         self.fanout_threshold = fanout_threshold
+
+        self.debug: bool = False
+        self.geom_db: Optional[object] = None
+        self.schematic_db: Optional[object] = None
+        self.groups: list[tuple[int, list[Instance]]] = []
+        self.stage: Optional[str] = None
+
         self.top_module: Optional[Module] = None
         self.modules: Dict[str, Module] = {}  # Module definitions
 

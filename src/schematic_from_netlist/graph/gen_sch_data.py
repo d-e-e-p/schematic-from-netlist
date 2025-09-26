@@ -7,9 +7,9 @@ from schematic_from_netlist.interfaces.netlist_database import Pin
 
 
 class GenSchematicData:
-    def __init__(self, geom_db, netlist_db):
-        self.geom_db = geom_db
-        self.db = netlist_db
+    def __init__(self, db):
+        self.db = db
+        self.geom_db = self.db.geom_db
         self.sheet_size: Tuple[int, int] = (1000, 1000)
         self.graph_to_sch_scale = 0.24  # from graphviz to LTspice, about 72/0.24 = 300dpi
         self.schematic_grid_size = 16  # needs to be a multiple of 50 mils on kicad import for wires to connect to pin
@@ -159,7 +159,8 @@ class GenSchematicData:
             if inst.is_buffer:
                 points = []
                 for _, pin in inst.pins.items():
-                    points.append(pin.shape)
+                    if pin.shape:
+                        points.append(pin.shape)
                 pt_center = self.center_of_points(points)
 
                 if inst.buffer_original_netname in self.db.nets_by_name:
@@ -241,7 +242,7 @@ class GenSchematicData:
                 flipped_points.append((x, sheet_height - y))
             shape.points = flipped_points
 
-    def generate_schematic_info(self):
+    def generate_schematic(self):
         self.db.clear_all_shapes()
         self.mark_multi_fanout_buffers()
         self.find_block_bounding_boxes()

@@ -110,24 +110,24 @@ class NetlistOperationsMixin:
         inst_id_counter = 0
 
         for name, net in self.nets_by_name.items():
-            print(f"{name} {net.num_conn=}")
+            # print(f"{name} {net.num_conn=}")
             if net.num_conn > 0 and net.num_conn < self.fanout_threshold:
                 net.id = net_id_counter
                 self.id_by_netname[name] = net_id_counter
-                print(f"net {name} now has {net.id=}")
+                # print(f"net {name} now has {net.id=}")
                 self.nets_by_id[net_id_counter] = net
                 self.netname_by_id[net_id_counter] = name
                 net_id_counter += 1
                 for pin in net.pins:
                     instname = pin.instance.name
-                    if instname in self.id_by_instname:
-                        print(f"looking at {pin.full_name} with instname {instname=} already has id = {self.id_by_instname[instname]=}")
+                    # if instname in self.id_by_instname:
+                    # print(f"looking at {pin.full_name} with instname {instname=} already has id = {self.id_by_instname[instname]=}")
                     if instname not in self.id_by_instname:
                         self.id_by_instname[instname] = inst_id_counter
                         self.instname_by_id[inst_id_counter] = instname
                         self.inst_by_id[inst_id_counter] = pin.instance
                         pin.instance.id = inst_id_counter
-                        print(f"created id of {pin.full_name} with instname {instname=} has id = {self.id_by_instname[instname]=}")
+                        # print(f"created id of {pin.full_name} with instname {instname=} has id = {self.id_by_instname[instname]=}")
                         inst_id_counter += 1
 
         # ok check we got everyone
@@ -147,19 +147,20 @@ class NetlistOperationsMixin:
 
     def buffer_multi_fanout_nets(self):
         """Inserts buffers on nets with fanout > 1"""
-        print("--- Before buffering ---")
-        pprint(self.get_design_statistics())
+        pprint(f" before buffering: {self.get_design_statistics()}")
 
         if not self.top_module:
             return
+        if not self.debug:
+            return
 
         nets_to_buffer = [net for net in self.nets_by_name.values() if net.num_conn > 2 and net.num_conn < self.fanout_threshold]
-        print(f"instrumentation: Found {len(nets_to_buffer)} nets to buffer.")
+        # print(f"instrumentation: Found {len(nets_to_buffer)} nets to buffer.")
 
         for net in nets_to_buffer:
             original_net_name = net.name
             net.shape = []
-            print(f"instrumentation: Buffering net {original_net_name} with {net.num_conn} connections.")
+            # print(f"instrumentation: Buffering net {original_net_name} with {net.num_conn} connections.")
             self.buffered_nets_log[original_net_name] = {"old_pins": set(), "buffer_insts": [], "new_nets": []}
 
             log = self.buffered_nets_log[original_net_name]
@@ -178,27 +179,25 @@ class NetlistOperationsMixin:
                 new_net = self.top_module.add_net(new_net_name)
                 new_net.is_buffered_net = True
                 new_net.buffer_original_netname = original_net_name
-                print(f"instrumentation: created net {new_net.name} derived from {new_net.buffer_original_netname}")
+                # print(f"instrumentation: created net {new_net.name} derived from {new_net.buffer_original_netname}")
 
                 buf_inout_pin = buffer_inst.add_pin(f"IO{i}", PinDirection.INOUT)
                 new_net.add_pin(buf_inout_pin)
 
-                print(f"instrumentation: Moving pin {pin.full_name} from {net.name} to {new_net.name}")
+                # print(f"instrumentation: Moving pin {pin.full_name} from {net.name} to {new_net.name}")
                 net.remove_pin(pin)
                 new_net.add_pin(pin)
                 log["new_nets"].append(new_net)
 
         self._build_lookup_tables()
-        print("--- After buffering ---")
-        pprint(self.get_design_statistics())
+        pprint(f" after buffering: {self.get_design_statistics()}")
 
     def remove_multi_fanout_buffers(self):
         """Removes all buffers and restores original connectivity."""
         if not self.top_module:
             return
 
-        print("--- Before removing buffers ---")
-        pprint(self.get_design_statistics())
+        pprint(f" before removing buffers: {self.get_design_statistics()}")
 
         # Restore original nets from the log
         for original_net_name, log in self.buffered_nets_log.items():
@@ -207,19 +206,25 @@ class NetlistOperationsMixin:
                 print(f"instrumentation: Could not find original net {original_net_name} during restore.")
                 continue
 
-            print(f"instrumentation: Restoring pins for {original_net_name}")
+            # print(f"instrumentation: Restoring pins for {original_net_name}")
             for pin in log.get("old_pins", []):
                 if pin.net != original_net:
                     original_net.add_pin(pin)
 
         # Proactively find and delete all buffer instances and nets
-        instances_to_delete = [inst_name for inst_name in self.top_module.instances if inst_name.startswith(self.inserted_buf_prefix)]
-        nets_to_delete = [net_name for net_name in self.top_module.nets if self.inserted_net_suffix in net_name or net_name.startswith(f"top_{self.inserted_buf_prefix}")]
+        instances_to_delete = [
+            inst_name for inst_name in self.top_module.instances if inst_name.startswith(self.inserted_buf_prefix)
+        ]
+        nets_to_delete = [
+            net_name
+            for net_name in self.top_module.nets
+            if self.inserted_net_suffix in net_name or net_name.startswith(f"top_{self.inserted_buf_prefix}")
+        ]
 
         for inst_name in instances_to_delete:
             instance = self.top_module.instances.get(inst_name)
             if instance:
-                print(f"instrumentation: Deleting buffer instance {instance.name}")
+                # print(f"instrumentation: Deleting buffer instance {instance.name}")
                 for pin in instance.pins.values():
                     if pin.net:
                         pin.net.remove_pin(pin)
@@ -227,10 +232,10 @@ class NetlistOperationsMixin:
 
         for net_name in nets_to_delete:
             if net_name in self.top_module.nets:
-                print(f"instrumentation: Deleting buffer net {net_name}")
+                # print(f"instrumentation: Deleting buffer net {net_name}")
                 # clone wires before delete
                 net = self.top_module.nets[net_name]
-                print(f"looking for original of {net_name=} =  {net.buffer_original_netname}")
+                # print(f"looking for original of {net_name=} =  {net.buffer_original_netname}")
                 original_net = self.nets_by_name.get(net.buffer_original_netname)
                 original_net.shape.extend(net.shape)
                 del self.top_module.nets[net_name]
@@ -238,14 +243,13 @@ class NetlistOperationsMixin:
         self.buffered_nets_log.clear()
         self._build_lookup_tables()
 
-        print("--- After removing buffers ---")
-        pprint(self.get_design_statistics())
+        pprint(f" after removing buffers: {self.get_design_statistics()}")
 
     def create_buffering_for_groups(self, net, ordering, clusters):
         """deal with fanout routing"""
         original_net_name = net.name
         table_output_dir = "data/tables"
-        self.dump_netlist_db_to_table(table_output_dir, f"pre_buffering_{original_net_name}", -1)
+        self.dump_to_table(table_output_dir, f"pre_buffering_{original_net_name}", -1)
 
         buffer_insts_map = {}
 
@@ -297,20 +301,21 @@ class NetlistOperationsMixin:
 
                     chain_net.add_pin(src_pin)
                     chain_net.add_pin(dst_pin)
-                    print(f"instrumentation: Chaining buffer {src_buffer_inst.name} to {dst_buffer_inst.name} with net {chain_net.name}")
+                    # print(f"instrumentation: Chaining buffer {src_buffer_inst.name} to {dst_buffer_inst.name} with net {chain_net.name}")
 
         self._build_lookup_tables()
-        self.dump_netlist_db_to_table(table_output_dir, f"post_buffering_{original_net_name}", -1)
+        # self.dump_to_table(table_output_dir, f"post_buffering_{original_net_name}", -1)
 
-    def dump_netlist_db_to_table(self, output_dir: str, stage_name: str, iteration: int = -1):
+    def dump_to_table(self, stage_name: str):
         """Dumps the netlist database to a CSV file."""
+        # TODO: make this only operate in debug mode
+        output_dir = os.path.join("data", "tables")
         os.makedirs(output_dir, exist_ok=True)
 
-        base_filename = f"{stage_name}_iteration_{iteration}" if iteration >= 0 else stage_name
-        filename = os.path.join(output_dir, f"{base_filename}.csv")
-        log_filename = os.path.join(output_dir, f"{base_filename}_buffer_log.json")
+        filename = os.path.join(output_dir, f"{stage_name}.csv")
+        log_filename = os.path.join(output_dir, f"{stage_name}_buffer_log.json")
 
-        print(f"instrumentation: Dumping netlist DB to {filename}")
+        # print(f"instrumentation: Dumping netlist DB to {filename}")
 
         with open(filename, "w", newline="") as csvfile:
             writer = csv.writer(csvfile)
@@ -337,7 +342,16 @@ class NetlistOperationsMixin:
 
     def get_design_statistics(self) -> "Dict":
         """Get overall design statistics"""
-        stats = {"total_instances": len(self.inst_by_name), "total_nets": len(self.nets_by_name), "total_pins": len(self.pins_by_name), "modules": len(self.modules), "floating_nets": 0, "multi_driven_nets": 0, "max_fanout": 0, "avg_fanout": 0}
+        stats = {
+            "total_instances": len(self.inst_by_name),
+            "total_nets": len(self.nets_by_name),
+            "total_pins": len(self.pins_by_name),
+            "modules": len(self.modules),
+            "floating_nets": 0,
+            "multi_driven_nets": 0,
+            "max_fanout": 0,
+            "avg_fanout": 0,
+        }
         total_fanout = sum(net.get_fanout() for net in self.nets_by_name.values())
 
         for net in self.nets_by_name.values():
@@ -362,9 +376,17 @@ class NetlistOperationsMixin:
             connected_instance_ids = sorted(list({pin.instance.id for pin in net.pins}))
             edge_vector.extend(connected_instance_ids)
             index_vector.append(len(edge_vector))
-            print(f"connecting {net.name=} conn {net.num_conn}: {connected_instance_ids=} {[f'{pin.instance.name}/{pin.name}' for pin in net.pins]=}")
+            # print(f"connecting {net.name=} conn {net.num_conn}: {connected_instance_ids=} {[f'{pin.instance.name}/{pin.name}' for pin in net.pins]=}")
 
         return HypergraphData(num_nodes, num_edges, index_vector, edge_vector)
+
+    def assign_to_groups(self, partitions):
+        for id, part in partitions.items():
+            if inst := self.inst_by_id[id]:
+                inst.partition = part
+            else:
+                print(f"warning: instance not found matching {id=}")
+        self.groups = set(partitions.values())
 
     def get_edges_between_nodes(self, nodes):
         inst_list = [self.inst_by_id[id] for id in nodes]
@@ -377,7 +399,9 @@ class NetlistOperationsMixin:
                     for j in range(i + 1, len(conn_inst_list)):
                         src, dst = conn_inst_list[i], conn_inst_list[j]
                         if src in inst_list and dst in inst_list:
-                            edge = Edge(src.name, dst.name, name=None if net.name.startswith(self.inserted_buf_prefix) else net.name)
+                            edge = Edge(
+                                src.name, dst.name, name=None if net.name.startswith(self.inserted_buf_prefix) else net.name
+                            )
                             edges.append(edge)
         return edges
 

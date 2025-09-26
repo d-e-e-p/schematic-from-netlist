@@ -65,7 +65,7 @@ class Net:
         if pin.net is not None:
             if pin.net == self:
                 return
-            print(f"instrumentation: Pin {pin.full_name} is on {pin.net.full_name}, removing it.")
+            # print(f"instrumentation: Pin {pin.full_name} is on {pin.net.full_name}, removing it.")
             pin.net.remove_pin(pin)
 
         self.pins.add(pin)
@@ -80,7 +80,7 @@ class Net:
         else:  # INOUT
             self.drivers.add(pin)
             self.loads.add(pin)
-        print(f"after add_pin {self.name=} {self.num_conn=} {pin.full_name=}")
+        # print(f"after add_pin {self.name=} {self.num_conn=} {pin.full_name=}")
 
     def remove_pin(self, pin: Pin):
         """Remove a pin connection from this net"""
@@ -122,6 +122,7 @@ class Instance:
     pins: Dict[str, Pin] = field(default_factory=dict)
     parameters: Dict[str, Any] = field(default_factory=dict)
     id: int = -1
+    partition: int = -1
     shape: Tuple[int, int, int, int] = ()
 
     is_buffer: bool = False

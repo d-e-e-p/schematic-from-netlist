@@ -1,9 +1,7 @@
-module TOP ( input [3:0] in, output [3:0] out);
+module TOP ( );
   supply0 VSS;
   supply1 VDD;
   
-  wire [3:0] mid;
-  // Each net (a, b, c) has fanout = 8
 BLK U1  (a, b);
 BLK U2  (b, c);
 BLK U3  (c, a);
@@ -21,11 +19,9 @@ BLK U14 (b, c);
 BLK U15 (c, a);
 BLK U16 (a, a);
 BLK U17 (a, b);
-BLK U18 (b, c);
-/*
-BLK U19 (c, a);
+BLK U18 (VSS, c);
+BLK U19 (VDD, a);
 BLK U20 (a, a);
-*/
  
 
 endmodule
