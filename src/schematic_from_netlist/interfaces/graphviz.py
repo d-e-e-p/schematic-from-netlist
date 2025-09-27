@@ -12,7 +12,7 @@ class GeomDB:
     """A database for geometric primitives extracted from the graph layout."""
 
     ports: Dict[str, Tuple[float, float]] = field(default_factory=dict)
-    nets: Dict[str, List[Tuple[float, float]]] = field(default_factory=dict)
+    nets: Dict[str, List[Tuple[Tuple[float, float], Tuple[float, float]]]] = field(default_factory=dict)
 
     def write_geom_db_report(self, filepath: str = "data/json/read_json.rpt"):
         os.makedirs(os.path.dirname(filepath), exist_ok=True)
@@ -75,97 +75,246 @@ class Graphviz:
 
     def get_layout_geom(self):
         geom_db = self.build_graphviz_data()
-        # json_parser = ParseJson(json_file)
-        # geom_db = json_parser.parse()
         return geom_db
 
     def build_graphviz_data(self):
         """
-        Draws and saves the graph with a hierarchical layout, grouping partitions
-        into labeled clusters, and saves it as a JSON file.
+        Performs a two-phase layout: local layout for each cluster, then a global layout.
         """
+        # Phase 1: Local layout for each cluster
+        local_geom_dbs = self._perform_local_layout()
+
+        # Phase 2: Global layout of clusters
+        global_geom_db = self._perform_global_layout()
+
+        # Combine local and global geometries
+        final_geom_db = self._combine_geom_dbs(local_geom_dbs, global_geom_db)
+
+        return final_geom_db
+
+    def _perform_local_layout(self):
+        """Performs layout for each cluster individually to determine their size."""
+        local_geom_dbs = {}
+        os.makedirs("data/png", exist_ok=True)
+
+        for cluster_id, cluster in self.db.top_module.clusters.items():
+            A = pgv.AGraph(directed=True, strict=False, rankdir="TB", ratio="auto")
+            self._set_attributes(A)
+
+            instances_in_cluster = cluster.instances
+            inst_names = [inst.name for inst in instances_in_cluster]
+            # print(f"Performing layout for cluster {cluster_id} with {inst_names=}")
+
+            # Add nodes for instances in the cluster, tagging them if they are buffers
+            for inst in instances_in_cluster:
+                A.add_node(inst.name, _is_buffer=str(inst.is_buffer))
+
+            # Add edges for nets internal to the cluster
+            nets_in_cluster = {net for inst in instances_in_cluster for net in inst.get_connected_nets()}
+            for net in nets_in_cluster:
+                if all(pin.instance.partition == cluster_id for pin in net.pins):
+                    pins = list(net.pins)
+                    if len(pins) > 1:
+                        src = pins[0]
+                        for dst in pins[1:]:
+                            A.add_edge(
+                                src.instance.name,
+                                dst.instance.name,
+                                label=net.name,
+                                headlabel=dst.full_name,
+                                taillabel=src.full_name,
+                            )
+                    elif len(pins) == 1:
+                        pin = pins[0]
+                        stub_name = f"stub_{pin.full_name}".replace("/", "_")
+                        A.add_node(stub_name, shape="point", width=0.01, height=0.01)
+                        A.add_edge(
+                            pin.instance.name,
+                            stub_name,
+                            label=net.name,
+                            headlabel=pin.full_name,
+                            taillabel=pin.full_name,
+                        )
+
+            # --- Node size scaling based on graph degree ---
+            min_macro_size = 1.0
+            max_macro_size = 10.0
+            buffer_size = 0.2
+
+            min_degree = 2
+            max_degree = 2
+            # Calculate max_degree from the graph for non-buffer instances
+            degrees = [
+                A.degree(node) for node in A.nodes() if not node.name.startswith("stub_") and node.attr.get("_is_buffer") == "False"
+            ]
+            if degrees:
+                max_degree = max(degrees) if degrees else 2
+
+            def scale_macro_size(degree):
+                if max_degree <= min_degree:
+                    return min_macro_size
+                # Clamp degree to be at least min_degree for scaling
+                degree_to_scale = max(min_degree, degree)
+                size = min_macro_size + (degree_to_scale - min_degree) * (max_macro_size - min_macro_size) / (
+                    max_degree - min_degree
+                )
+                return round(size, 1)
+
+            # Update node attributes (shape and size)
+            for node in A.nodes():
+                if node.name.startswith("stub_"):
+                    continue  # Already handled when added
+
+                is_buffer = node.attr.get("_is_buffer") == "True"
+
+                if is_buffer:
+                    node.attr["shape"] = "circle"
+                    node.attr["width"] = buffer_size
+                    node.attr["height"] = buffer_size
+                else:
+                    node.attr["shape"] = "box"
+                    degree = A.degree(node)
+                    size = scale_macro_size(degree)
+                    node.attr["width"] = size
+                    node.attr["height"] = size
+                node.attr["fixedsize"] = True
+
+            # Layout and extract size
+            A.layout(prog="sfdp")
+            A.draw(f"data/png/local_cluster_{cluster_id}.png", format="png")
+            bb = A.graph_attr["bb"]
+            if bb:
+                xmin, ymin, xmax, ymax = map(float, bb.split(","))
+                cluster.size_float = (xmax - xmin, ymax - ymin)
+
+            local_geom_db = self._extract_geometry(A)
+
+            # Add all instance pins to the geom db
+            for inst in instances_in_cluster:
+                node = A.get_node(inst.name)
+                pos = node.attr["pos"]
+                if pos:
+                    x, y = map(float, pos.split(","))
+                    for pin in inst.pins.values():
+                        if pin.full_name not in local_geom_db.ports:
+                            local_geom_db.ports[pin.full_name] = (x, y)
+
+            local_geom_dbs[cluster_id] = local_geom_db
+        return local_geom_dbs
+
+    def _perform_global_layout(self):
+        """Performs layout on the clusters as blocks."""
         A = pgv.AGraph(directed=True, strict=False, rankdir="TB", ratio="auto")
+        self._set_attributes(A)
 
-        info_text = "run"
-        A.graph_attr["label"] = info_text
-        A.graph_attr["labelloc"] = "t"
-        A.graph_attr["fontsize"] = "20"
+        # Add a node for each cluster
+        for cluster_id, cluster in self.db.top_module.clusters.items():
+            width, height = cluster.size_float if cluster.size_float else (1.0, 1.0)
+            A.add_node(
+                f"cluster_{cluster_id}",
+                label=f"Cluster {cluster_id}",
+                width=width / 72.0,
+                height=height / 72.0,
+                fixedsize=True,
+                shape="box",
+            )
 
-        # --- Node size scaling ---
-        min_macro_size = 1.0
-        max_macro_size = 10.0
-        buffer_size = 0.2
+        # Add edges for inter-cluster nets
+        inter_cluster_nets = [net for net in self.db.nets_by_name.values() if len({pin.instance.partition for pin in net.pins}) > 1]
+        for net in inter_cluster_nets:
+            partitions = list({pin.instance.partition for pin in net.pins})
+            for i in range(len(partitions) - 1):
+                src_partition = partitions[i]
+                dst_partition = partitions[i + 1]
+                src_cluster = f"cluster_{src_partition}"
+                dst_cluster = f"cluster_{dst_partition}"
+                A.add_edge(
+                    src_cluster,
+                    dst_cluster,
+                    label=net.name,
+                    headlabel=f"cluster{dst_partition}/{net.name}",
+                    taillabel=f"cluster{src_partition}/{net.name}",
+                )
 
-        # --- Node degree scaling ---
-        min_degree = 2
-        max_degree = 2
-        for _, inst in self.db.top_module.get_all_instances().items():
-            degree = len(inst.pins.keys())
-            if degree > max_degree:
-                max_degree = degree
+        A.layout(prog="dot")
+        A.draw("data/png/global_layout.png", format="png")
 
-        def scale_macro_size(degree):
-            if max_degree == min_degree:
-                return min_macro_size
-            size = min_macro_size + (degree - min_degree) * (max_macro_size - min_macro_size) / (max_degree - min_degree)
-            # round to one decimal place
-            return round(size, 1)
+        geom_db = self._extract_geometry(A)
 
-        # Group nodes by partition
-        A = pgv.AGraph(directed=True, strict=False, rankdir="TB", ratio="auto")
+        # Store cluster offsets
+        for node in A.nodes():
+            cluster_id = int(node.name.split("_")[1])
+            cluster = self.db.top_module.clusters.get(cluster_id)
+            if cluster:
+                pos = node.attr["pos"]
+                if pos:
+                    x, y = map(float, pos.split(","))
+                    width, height = cluster.size_float if cluster.size_float else (0, 0)
+                    cluster.offset_float = (x - width / 2, y - height / 2)
 
-        info_text = "run"
-        A.graph_attr["label"] = info_text
-        A.graph_attr["labelloc"] = "t"
-        A.graph_attr["fontsize"] = "20"
+        # Add cluster ports to the geometry database from edge label positions
+        for edge in A.edges():
+            head_label = edge.attr.get("headlabel")
+            tail_label = edge.attr.get("taillabel")
+            if head_label and edge.attr.get("lp"):
+                x, y = map(float, edge.attr.get("lp").split(","))
+                geom_db.ports[head_label] = (x, y)
+            if tail_label and edge.attr.get("lp"):
+                x, y = map(float, edge.attr.get("lp").split(","))
+                geom_db.ports[tail_label] = (x, y)
 
-        # create clusters based on number of groups
-        subgraph = {}
-        for block_id in self.db.groups:
-            subgraph_name = f"cluster_{block_id}"
-            A.add_subgraph(name=subgraph_name, label=f"Partition {block_id}", color="lightgrey", style="filled")
-            subgraph[block_id] = A.get_subgraph(subgraph_name)
+        return geom_db
 
-        for _, inst in self.db.top_module.get_all_instances().items():
-            block_id = inst.partition
-            graph = subgraph[block_id]
+    def _combine_geom_dbs(self, local_geom_dbs, global_geom_db):
+        """Combines local and global geometries into a single GeomDB, appending wire segments."""
+        final_geom_db = GeomDB()
 
-            if inst.is_buffer:
-                graph.add_node(inst.name, width=buffer_size, height=buffer_size, fixedsize=True, shape="circle")
+        # Process local geometries first
+        for cluster_id, local_geom_db in local_geom_dbs.items():
+            cluster = self.db.top_module.clusters.get(cluster_id)
+            if cluster:
+                offset_x, offset_y = cluster.offset_float if cluster.offset_float else (0, 0)
+
+                # Add ports, no overwriting concern here as pin names are unique
+                for name, pos in local_geom_db.ports.items():
+                    if pos:  # ensure pos is not None
+                        final_geom_db.ports[name] = (pos[0] + offset_x, pos[1] + offset_y)
+
+                # Add nets, appending points if net already exists
+                for name, segments in local_geom_db.nets.items():
+                    offset_segments = [
+                        ((p1[0] + offset_x, p1[1] + offset_y), (p2[0] + offset_x, p2[1] + offset_y)) for p1, p2 in segments
+                    ]
+                    if name in final_geom_db.nets:
+                        final_geom_db.nets[name].extend(offset_segments)
+                    else:
+                        final_geom_db.nets[name] = offset_segments
+
+        # Process global geometries
+        for name, pos in global_geom_db.ports.items():
+            final_geom_db.ports[name] = pos
+
+        # Add global nets, appending points
+        for name, points in global_geom_db.nets.items():
+            if name in final_geom_db.nets:
+                final_geom_db.nets[name].extend(points)
             else:
-                degree = len(inst.pins.keys())
-                size = scale_macro_size(degree)
-                graph.add_node(inst.name, width=size, height=size, fixedsize=True, shape="box")
-                # printf(f"Node {node_name} has degree {degree} and size {size}")
+                final_geom_db.nets[name] = points
 
-        # Add edges: arrow heads and tail labels swapped see:
-        # see https://gitlab.com/graphviz/graphviz/-/issues/144#note_326549080
-        for name, net in self.db.nets_by_name.items():
-            if 2 <= net.num_conn <= self.db.fanout_threshold:
-                allpins = list(net.connections)
-                for group in self.db.groups:
-                    pins = [pin for pin in allpins if pin.instance.partition == group]
-                    if len(pins) < 2:
-                        continue
-                    src = pins[0]
-                    for dst in pins[1:]:
-                        A.add_edge(src.instance.name, dst.instance.name, label=name, headlabel=dst.full_name, taillabel=src.full_name)
-        print(f"created graph with {len(A.nodes())} nodes, {len(A.edges())} edges")
-        # Set graph attributes for better layout
+        return final_geom_db
 
-        # Graph-level attributes
+    def _set_attributes(self, A):
+        """Sets graph, node, and edge attributes."""
         A.graph_attr.update(
             {
                 "fontsize": "20",
-                "maxiter": "10000",  # Allow more iterations for force-based layouts
-                "overlap": "false",  # Avoid node overlaps, TODO: try out vpsc
-                "pack": "false",  # Enable packing of disconnected components
-                "sep": "+20",  # Extra separation between clusters
-                "splines": "ortho",  # Orthogonal edge routing
+                "maxiter": "10000",
+                "overlap": "false",
+                "pack": "false",
+                "sep": "+20",
+                "splines": "ortho",
             }
         )
-
-        # Node-level attributes
         A.node_attr.update(
             {
                 "style": "filled",
@@ -173,80 +322,63 @@ class Graphviz:
                 "fontsize": "10",
             }
         )
-
-        # Edge-level attributes
         A.edge_attr.update(
             {
                 "fontsize": "8",
-                "arrowhead": "dot",  # Options: 'dot', 'inv', 'normal', 'none', ...
+                "arrowhead": "dot",
                 "arrowtail": "dot",
-                "arrowsize": "0.0",  # Zero-size arrows (basically hidden)
-                "dir": "both",  # Draw arrows at both ends
+                "arrowsize": "0.0",
+                "dir": "both",
             }
         )
 
-        stage = self.db.stage
-
-        def build_fn(tag: str, data_dir: str = "data") -> str:
-            m = re.match(r"^(\w+?)(?:_(\w+))?$", tag)
-            if not m:
-                raise ValueError(f"Invalid tag format: {tag}")
-
-            prefix, ft = m.groups()
-
-            # If there's no explicit prefix (e.g. "png"), use "stage" as the basename
-            if ft is None:
-                ft = prefix
-                prefix = ""
-            else:
-                prefix += "_"
-
-            output_dir = os.path.join(data_dir, ft)
-            os.makedirs(output_dir, exist_ok=True)
-            print(f"{self.db.stage=}")
-            return os.path.join(output_dir, f"{prefix}stage{stage}.{ft}")
-
-        # Layout and draw the graph
-        A.write(build_fn("pre_dot"))
-        A.layout(prog="sfdp", args="")
-        A.write(build_fn("placed_dot"))
-        A.draw(build_fn("png"), format="png")
-        A.draw(build_fn("json"), format="json")
-        print(f"Graph saved to {build_fn('png')}")
+    def _extract_geometry(self, A):
+        """Extracts geometry from the graph."""
+        geom_db = GeomDB()
 
         def parse_edge_pin_positions(edge):
-            """
-            Extract the tail and head pin coordinates from an edge's 'pos' attribute.
-            """
-            pos = edge.attr.get("pos")
-            if not pos:
-                return None
+            pos_string = edge.attr.get("pos")
+            if not pos_string:
+                return None, None, []
 
-            points = pos.split()
-            tail_coord = None
-            head_coord = None
-
+            points = pos_string.split()
+            tail_coord, head_coord = None, None
             wire_points = []
-            for p in points:
-                parts = p.split(",")
-                if parts[0] == "s":  # start
-                    tail_coord = (float(parts[1]), float(parts[2]))
-                elif parts[0] == "e":  # end
-                    head_coord = (float(parts[1]), float(parts[2]))
+
+            # Extract start and end points, and wire points
+            for p_str in points:
+                if p_str.startswith("s,"):
+                    coords = p_str.split(",")[1:]
+                    tail_coord = (float(coords[0]), float(coords[1]))
+                elif p_str.startswith("e,"):
+                    coords = p_str.split(",")[1:]
+                    head_coord = (float(coords[0]), float(coords[1]))
                 else:
-                    wire_points.append((float(parts[0]), float(parts[1])))
+                    coords = p_str.split(",")
+                    wire_points.append((float(coords[0]), float(coords[1])))
 
-            return tail_coord, head_coord, wire_points
+            segments = []
+            if len(wire_points) > 1:
+                pt_start = wire_points[0]
+                for pt_end in wire_points[1:]:
+                    segments.append((pt_start, pt_end))
+                    pt_start = pt_end
 
-        geom_db = GeomDB()
+            return tail_coord, head_coord, segments
+
         for edge in A.edges():
-            tail_coord, head_coord, wire_points = parse_edge_pin_positions(edge)
+            tail_coord, head_coord, wire_segments = parse_edge_pin_positions(edge)
             tail_pin = edge.attr.get("taillabel")
             head_pin = edge.attr.get("headlabel")
             net_name = edge.attr.get("label")
 
-            geom_db.ports[tail_pin] = tail_coord
-            geom_db.ports[head_pin] = head_coord
-            geom_db.nets[net_name] = wire_points
-
+            if tail_pin and tail_coord:
+                geom_db.ports[tail_pin] = tail_coord
+            if head_pin and head_coord:
+                geom_db.ports[head_pin] = head_coord
+            if net_name:
+                if net_name in geom_db.nets:
+                    geom_db.nets[net_name].extend(wire_segments)
+                else:
+                    geom_db.nets[net_name] = wire_segments
         return geom_db

@@ -13,7 +13,6 @@ class NetlistDatabase(NetlistOperationsMixin):
         self.debug: bool = False
         self.geom_db: Optional[object] = None
         self.schematic_db: Optional[object] = None
-        self.groups: list[tuple[int, list[Instance]]] = []
         self.stage: Optional[str] = None
 
         self.top_module: Optional[Module] = None

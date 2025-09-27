@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 from typing import List, Tuple
 
 from schematic_from_netlist.interfaces.netlist_database import Pin
+from schematic_from_netlist.interfaces.netlist_structures import Instance, PinDirection
+
 
 
 class GenSchematicData:
@@ -110,13 +112,12 @@ class GenSchematicData:
     def find_net_shapes(self):
         for name, net in self.db.top_module.get_all_nets().items():
             if name in self.geom_db.nets:
-                points = self.geom_db.nets[name]
-                points = self.scale_and_uniq_points(points)
-                pt_start = points[0]
-                for pt in points[1:]:
-                    pt_end = pt
-                    net.shape.append((pt_start, pt_end))
-                    pt_start = pt_end
+                segments = self.geom_db.nets[name]
+                for seg_start, seg_end in segments:
+                    pt_start = self.scale_point(seg_start)
+                    pt_end = self.scale_point(seg_end)
+                    if pt_start != pt_end:
+                        net.shape.append((pt_start, pt_end))
 
     def route_to_center(self, pt_center, pt_port):
         pass
@@ -242,8 +243,47 @@ class GenSchematicData:
                 flipped_points.append((x, sheet_height - y))
             shape.points = flipped_points
 
+    def scale_and_annotate_clusters(self):
+        clusters = self.db.top_module.clusters
+        
+        # Scale sizes and offsets
+        for cluster in clusters.values():
+            cluster.size = self.scale_point(cluster.size_float)
+            cluster.offset = self.scale_point(cluster.offset_float)
+
+        # Create dummy instances for clusters to own the pins
+        cluster_instances = {}
+        for cluster_id in clusters.keys():
+            inst = Instance(name=f"cluster_{cluster_id}", module_ref="CLUSTER", parent_module=self.db.top_module)
+            cluster_instances[cluster_id] = inst
+
+        # Add cluster pins from geom_db
+        for port_name, pos in self.geom_db.ports.items():
+            m = re.match(r"cluster(\d+)/(.+)", port_name)
+            if m:
+                cluster_id = int(m.group(1))
+                net_name = m.group(2)
+                pin_name = net_name
+                
+                cluster = clusters.get(cluster_id)
+                cluster_inst = cluster_instances.get(cluster_id)
+
+                if cluster and cluster_inst:
+                    net = self.db.find_net(net_name)
+                    pin = Pin(name=pin_name, direction=PinDirection.INOUT, instance=cluster_inst, net=net)
+                    pin.shape = self.scale_point(pos)
+                    cluster.add_pin(pin)
+
+        # Set cluster shapes
+        for cluster in clusters.values():
+            if cluster.offset and cluster.size:
+                offset_x, offset_y = cluster.offset
+                size_x, size_y = cluster.size
+                cluster.shape = (offset_x, offset_y, offset_x + size_x, offset_y + size_y)
+
     def generate_schematic(self):
         self.db.clear_all_shapes()
+        self.scale_and_annotate_clusters()
         self.mark_multi_fanout_buffers()
         self.find_block_bounding_boxes()
         self.find_net_shapes()

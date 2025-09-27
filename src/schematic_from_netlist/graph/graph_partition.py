@@ -39,7 +39,11 @@ class Edge:
     @property
     def attrs(self) -> dict:
         """Return a dictionary of Graphviz attributes, skipping None values."""
-        return {k: v for k, v in {"label": self.name, "color": self.color, "fontsize": self.fontsize, "weight": self.weight}.items() if v is not None}
+        return {
+            k: v
+            for k, v in {"label": self.name, "color": self.color, "fontsize": self.fontsize, "weight": self.weight}.items()
+            if v is not None
+        }
 
 
 class HypergraphPartitioner:
@@ -60,9 +64,8 @@ class HypergraphPartitioner:
         G = nx.Graph()
         for e in range(self.g.numEdges()):
             pins = list(self.g.pins(e))
-            # print(f"{e=} {len(pins)=}")
-            # for pin in pins:
-            #   print(f"  {pin=}  {self.id_to_name[pin]=}")
+            # pinnames = [self.id_to_name[pin] for pin in pins]
+            # print(f"{e=} {len(pins)=} {pinnames=}")
             for u, v in combinations(pins, 2):
                 if G.has_edge(u, v):
                     G[u][v]["weight"] += 1  # accumulate weight
@@ -160,5 +163,7 @@ class HypergraphPartitioner:
         self.k = k
         self.setup_run(ini_file)
         kahypar.partition(self.g, self.context)
+        if self.k > 1:
+            self.evaluate_run()
         partition_dict = {v: self.g.blockID(v) for v in range(self.g.numNodes())}
         return partition_dict

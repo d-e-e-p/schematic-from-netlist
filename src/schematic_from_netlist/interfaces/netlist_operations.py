@@ -2,12 +2,13 @@ import csv
 import json
 import os
 import re
+from collections import defaultdict
 from pprint import pprint
 from typing import Dict, List, Optional
 
 from schematic_from_netlist.graph.graph_partition import Edge, HypergraphData
 
-from .netlist_structures import Instance, Net, Pin, PinDirection
+from .netlist_structures import Cluster, Instance, Net, Pin, PinDirection
 
 
 class NetlistOperationsMixin:
@@ -110,25 +111,19 @@ class NetlistOperationsMixin:
         inst_id_counter = 0
 
         for name, net in self.nets_by_name.items():
-            # print(f"{name} {net.num_conn=}")
-            if net.num_conn > 0 and net.num_conn < self.fanout_threshold:
-                net.id = net_id_counter
-                self.id_by_netname[name] = net_id_counter
-                # print(f"net {name} now has {net.id=}")
-                self.nets_by_id[net_id_counter] = net
-                self.netname_by_id[net_id_counter] = name
-                net_id_counter += 1
-                for pin in net.pins:
-                    instname = pin.instance.name
-                    # if instname in self.id_by_instname:
-                    # print(f"looking at {pin.full_name} with instname {instname=} already has id = {self.id_by_instname[instname]=}")
-                    if instname not in self.id_by_instname:
-                        self.id_by_instname[instname] = inst_id_counter
-                        self.instname_by_id[inst_id_counter] = instname
-                        self.inst_by_id[inst_id_counter] = pin.instance
-                        pin.instance.id = inst_id_counter
-                        # print(f"created id of {pin.full_name} with instname {instname=} has id = {self.id_by_instname[instname]=}")
-                        inst_id_counter += 1
+            net.id = net_id_counter
+            self.id_by_netname[name] = net_id_counter
+            self.nets_by_id[net_id_counter] = net
+            self.netname_by_id[net_id_counter] = name
+            net_id_counter += 1
+            for pin in net.pins:
+                instname = pin.instance.name
+                if instname not in self.id_by_instname:
+                    self.id_by_instname[instname] = inst_id_counter
+                    self.instname_by_id[inst_id_counter] = instname
+                    self.inst_by_id[inst_id_counter] = pin.instance
+                    pin.instance.id = inst_id_counter
+                    inst_id_counter += 1
 
         # ok check we got everyone
         for name, inst in self.inst_by_name.items():
@@ -150,8 +145,6 @@ class NetlistOperationsMixin:
         pprint(f" before buffering: {self.get_design_statistics()}")
 
         if not self.top_module:
-            return
-        if not self.debug:
             return
 
         nets_to_buffer = [net for net in self.nets_by_name.values() if net.num_conn > 2 and net.num_conn < self.fanout_threshold]
@@ -342,27 +335,32 @@ class NetlistOperationsMixin:
 
     def get_design_statistics(self) -> "Dict":
         """Get overall design statistics"""
+
+        instances = [inst for inst in self.inst_by_name.values() if inst.module_ref != "CLUSTER"]
+        nets = self.nets_by_name.values()
+        pins = self.pins_by_name.values()
+
         stats = {
-            "total_instances": len(self.inst_by_name),
-            "total_nets": len(self.nets_by_name),
-            "total_pins": len(self.pins_by_name),
+            "total_instances": len(instances),
+            "total_nets": len(nets),
+            "total_pins": len(pins),
             "modules": len(self.modules),
             "floating_nets": 0,
             "multi_driven_nets": 0,
             "max_fanout": 0,
             "avg_fanout": 0,
         }
-        total_fanout = sum(net.get_fanout() for net in self.nets_by_name.values())
+        total_fanout = sum(net.get_fanout() for net in nets)
 
-        for net in self.nets_by_name.values():
+        for net in nets:
             stats["max_fanout"] = max(stats["max_fanout"], net.get_fanout())
             if net.is_floating():
                 stats["floating_nets"] += 1
             if net.has_multiple_drivers():
                 stats["multi_driven_nets"] += 1
 
-        if self.nets_by_name:
-            stats["avg_fanout"] = total_fanout // len(self.nets_by_name)
+        if nets:
+            stats["avg_fanout"] = total_fanout // len(nets)
         return stats
 
     def build_hypergraph_data(self) -> "HypergraphData":
@@ -376,17 +374,22 @@ class NetlistOperationsMixin:
             connected_instance_ids = sorted(list({pin.instance.id for pin in net.pins}))
             edge_vector.extend(connected_instance_ids)
             index_vector.append(len(edge_vector))
-            # print(f"connecting {net.name=} conn {net.num_conn}: {connected_instance_ids=} {[f'{pin.instance.name}/{pin.name}' for pin in net.pins]=}")
+            # print( f"hyper: {net.name=} conn {net.num_conn}: {connected_instance_ids=} {[f'{pin.instance.name}/{pin.name}' for pin in net.pins]=}")
 
         return HypergraphData(num_nodes, num_edges, index_vector, edge_vector)
 
     def assign_to_groups(self, partitions):
-        for id, part in partitions.items():
-            if inst := self.inst_by_id[id]:
-                inst.partition = part
+        instances_by_partition = defaultdict(list)
+        for inst_id, part_id in partitions.items():
+            if inst := self.inst_by_id.get(inst_id):
+                inst.partition = part_id
+                instances_by_partition[part_id].append(inst)
             else:
                 print(f"warning: instance not found matching {id=}")
-        self.groups = set(partitions.values())
+
+        self.top_module.clusters.clear()
+        for part_id, inst_list in instances_by_partition.items():
+            self.top_module.clusters[part_id] = Cluster(id=part_id, instances=inst_list)
 
     def get_edges_between_nodes(self, nodes):
         inst_list = [self.inst_by_id[id] for id in nodes]

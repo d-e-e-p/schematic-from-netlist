@@ -90,7 +90,7 @@ class Net:
         self.loads.discard(pin)
         self.num_conn -= 1
         pin.net = None
-        print(f"after remove_pin {self.name=} {self.num_conn=}")
+        # print(f"after remove_pin {self.name=} {self.num_conn=}")
 
     def get_fanout(self) -> int:
         """Get the fanout (number of loads) on this net"""
@@ -161,6 +161,25 @@ class Instance:
 
 
 @dataclass
+class Cluster:
+    """Represents a cluster of instances"""
+
+    id: int
+    instances: List[Instance] = field(default_factory=list)
+    size: Tuple[int, int] = ()
+    offset: Tuple[int, int] = ()
+    pins: Dict[str, Pin] = field(default_factory=dict)
+    shape: Tuple[int, int, int, int] = ()
+
+    # Temporary float values used during layout
+    size_float: Tuple[float, float] = ()
+    offset_float: Tuple[float, float] = ()
+
+    def add_pin(self, pin: Pin):
+        self.pins[pin.full_name] = pin
+
+
+@dataclass
 class Module:
     """Represents a module definition"""
 
@@ -170,6 +189,7 @@ class Module:
     nets: Dict[str, Net] = field(default_factory=dict)
     ports: Dict[str, Pin] = field(default_factory=dict)  # Module interface ports
     child_modules: Dict[str, "Module"] = field(default_factory=dict)
+    clusters: Dict[int, Cluster] = field(default_factory=dict)
 
     def __post_init__(self):
         if self.parent_module:

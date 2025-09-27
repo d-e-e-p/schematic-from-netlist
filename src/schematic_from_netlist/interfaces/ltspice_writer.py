@@ -1,4 +1,27 @@
 import os
+from enum import Enum
+
+
+class LineType(Enum):
+    NORMAL = "Normal"
+    WIDE = "WIDE"
+    THIN = "Thin"
+    THICK = "Thick"
+    DASHED = "Dashed"
+    DOT = "Dot"
+    DOT_DASHED = "DotDashed"
+
+
+# kicad only supports 0 to 4
+class LineColor(Enum):
+    WHITE = 0
+    BLACK = 1
+    RED = 2
+    ORANGE = 3
+    YELLOW = 4
+    GREEN = 5
+    CYAN = 6
+    BLUE = 7
 
 
 class LTSpiceWriter:
@@ -14,7 +37,9 @@ class LTSpiceWriter:
         g = self.schematic_db.schematic_grid_size
         return (rect[0] * g, rect[1] * g, rect[2] * g, rect[3] * g)
 
-    def upscale_segments(self, segments: list[tuple[tuple[int, int], tuple[int, int]]]) -> list[tuple[tuple[int, int], tuple[int, int]]]:
+    def upscale_segments(
+        self, segments: list[tuple[tuple[int, int], tuple[int, int]]]
+    ) -> list[tuple[tuple[int, int], tuple[int, int]]]:
         """Scale a list of line segments [((x1,y1),(x2,y2)), ...]."""
         g = self.schematic_db.schematic_grid_size
         return [((x1 * g, y1 * g), (x2 * g, y2 * g)) for (x1, y1), (x2, y2) in segments]
@@ -73,6 +98,15 @@ class LTSpiceWriter:
         out = segments_to_wire(out, self.upscale_segments(net.buffer_patch_points), comment, add_label=False)
 
         return out
+
+    def format_asc_cluster_outline(self, cluster, line_type: LineType = LineType.WIDE, line_color: LineColor = LineColor.RED):
+        """Formats a RECTANGLE line for the cluster outline."""
+        if not cluster.shape:
+            return ""
+
+        x1, y1, x2, y2 = self.upscale_rect(cluster.shape)
+
+        return f"RECTANGLE {line_type.value} {x1} {y1} {x2} {y2} {line_color.value}\n"
 
     def _get_pin_side(self, pt, rect):
         """Expecting NONE, BOTTOM, TOP, LEFT, RIGHT, VBOTTOM, VTOP, VCENTER, VLEFT or VRIGHT"""
@@ -196,6 +230,10 @@ class LTSpiceWriter:
         # Process wires
         for _, net in self.db.top_module.get_all_nets().items():
             asc_content.append(self.format_asc_wire(net))
+
+        # Add cluster outlines
+        for cluster in self.db.top_module.clusters.values():
+            asc_content.append(self.format_asc_cluster_outline(cluster))
 
         with open(asc_path, "w") as f:
             f.write("\n".join(asc_content))
