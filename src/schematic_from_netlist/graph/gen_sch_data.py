@@ -7,7 +7,6 @@ from schematic_from_netlist.interfaces.netlist_database import Pin
 from schematic_from_netlist.interfaces.netlist_structures import Instance, PinDirection
 
 
-
 class GenSchematicData:
     def __init__(self, db):
         self.db = db
@@ -16,25 +15,41 @@ class GenSchematicData:
         self.graph_to_sch_scale = 0.24  # from graphviz to LTspice, about 72/0.24 = 300dpi
         self.schematic_grid_size = 16  # needs to be a multiple of 50 mils on kicad import for wires to connect to pin
         # TODO: many make it equal area to the smallest other macro?
-        self.min_block_size_in_gridlines = 10
-        self.block_moat_size_in_gridlines = 1
+        self.min_block_size_in_gridlines = 1
+        self.min_block_size_min_connections = 3
+        self.block_moat_size_in_gridlines = 0
+
+    def generate_schematic(self):
+        self.db.clear_all_shapes()
+        self.scale_and_annotate_clusters()
+        self.mark_multi_fanout_buffers()
+        self.find_block_bounding_boxes()
+        self.find_net_shapes()
+        self.patch_pins_of_buffers()
+        self.db.remove_multi_fanout_buffers()
+        # self.center_schematic()
+        self.calc_sheet_size()
+        # self.validate_integer_geometry()
+        # self.compare_cluster_bboxes()
+        # self.flip_y_axis()
+        return self
 
     # first some geom helpers
     def scale_rect(self, rect: tuple[float, float, float, float]) -> tuple[int, int, int, int]:
         """Scale a rectangle (x1,y1,x2,y2) from grid units to real units."""
         s = self.graph_to_sch_scale
-        return (round(rect[0] * s), round(rect[1] * s), round(rect[2] * s), round(rect[3] * s))
+        return (int(round(rect[0] * s)), int(round(rect[1] * s)), int(round(rect[2] * s)), int(round(rect[3] * s)))
 
     def scale_points(self, points: list[tuple[float, float]]) -> list[tuple[int, int]]:
         """Scale a list of points [(x,y), ...]."""
         s = self.graph_to_sch_scale
-        return [(round(x * s), round(y * s)) for (x, y) in points]
+        return [(int(round(x * s)), int(round(y * s))) for (x, y) in points]
 
     def scale_point(self, point: tuple[float, float]) -> tuple[int, int]:
         """Scale a single points (x,y)"""
         s = self.graph_to_sch_scale
         x, y = point
-        return (round(x * s), round(y * s))
+        return (int(round(x * s)), int(round(y * s)))
 
     def center_of_points(self, points):
         sum_x = sum(p[0] for p in points)
@@ -82,10 +97,12 @@ class GenSchematicData:
 
             # block_moat_size a bit
             size = self.block_moat_size_in_gridlines
-            x_min -= size
-            x_max += size
-            y_min -= size
-            y_max += size
+
+            if len(pt_list) > self.min_block_size_min_connections:
+                x_min -= size
+                x_max += size
+                y_min -= size
+                y_max += size
 
             rect = (x_min, y_min, x_max, y_max)
 
@@ -162,6 +179,9 @@ class GenSchematicData:
                 for _, pin in inst.pins.items():
                     if pin.shape:
                         points.append(pin.shape)
+                if not points:
+                    print(f"perhaps problem? {inst.name} with {inst.pins.keys()} has no shapes")
+                    continue
                 pt_center = self.center_of_points(points)
 
                 if inst.buffer_original_netname in self.db.nets_by_name:
@@ -172,31 +192,20 @@ class GenSchematicData:
                     print(f"Patched buffer {inst.name} with net {inst.buffer_original_netname=} {net.buffer_patch_points=}")
                 else:
                     print(f"Warning: Net {inst.buffer_original_netname} not found")
+                self.db.top_module.remove_instance(inst)
         # ok now we're ready to remove logical buffers and restore logical connection
-
-    def shift_all_geom_by(self, dx, dy):
-        """
-        for inst_shape in self.inst_shapes:
-            x1, y1, x2, y2 = inst_shape.rect
-            inst_shape.rect = (x1 + dx, y1 + dy, x2 + dx, y2 + dy)
-            for port_shape in inst_shape.port_shapes:
-                port_shape.point = (port_shape.point[0] + dx, port_shape.point[1] + dy)
-
-        for net_shape in self.net_shapes:
-            net_shape.points = [(x + dx, y + dy) for x, y in net_shape.points]
-        """
 
     def calc_sheet_size(self):
         """too concise perhaps?"""
         coords = []
 
         for _, net in self.db.top_module.get_all_nets().items():
-            for x, y in net.shape:
-                coords.extend([x, y])
+            for p1, p2 in net.shape:
+                coords.extend([p1, p2])
 
             if net.buffer_patch_points:
-                for x, y in net.buffer_patch_points:
-                    coords.extend([x, y])
+                for p1, p2 in net.buffer_patch_points:
+                    coords.extend([p1, p2])
 
         padding = 100  # units is in grid at this point
         if coords:
@@ -212,40 +221,39 @@ class GenSchematicData:
         else:
             self.sheet_size = (padding, padding)
 
-    def flip_y_axis(self):
-        """
-        In schematic drawing programs historically the origin is upper-left.
-        This flips all shapes vertically relative to the sheet height.
-        """
-        _, sheet_height = self.sheet_size
+    def compare_cluster_bboxes(self):
+        """Compares the bounding box of instances within a cluster to the cluster's own shape."""
+        print("\n--- Cluster Bounding Box Comparison ---")
+        for cluster_id, cluster in self.db.top_module.clusters.items():
+            if not cluster.instances:
+                continue
 
-        # Flip instance rectangles
-        for shape in self.inst_shapes:
-            x1, y1, x2, y2 = shape.rect
-            # Reflect across horizontal axis at sheet_height
-            y1_flipped = sheet_height - y1
-            y2_flipped = sheet_height - y2
-            # Normalize (y1 should be min, y2 max)
-            y1n, y2n = min(y1_flipped, y2_flipped), max(y1_flipped, y2_flipped)
-            shape.rect = (x1, y1n, x2, y2n)
+            min_x, min_y = 1_000_000, 1_000_000
+            max_x, max_y = -1_000_000, -1_000_000
 
-        for shape in self.inst_shapes:
-            for shape in shape.port_shapes:
-                x, y = shape.point
-                # Reflect across horizontal axis at sheet_height
-                y_flipped = sheet_height - y
-                shape.point = (x, y_flipped)
+            for inst in cluster.instances:
+                if inst.shape:
+                    x1, y1, x2, y2 = inst.shape
+                    min_x = min(min_x, x1)
+                    min_y = min(min_y, y1)
+                    max_x = max(max_x, x2)
+                    max_y = max(max_y, y2)
 
-        # Flip net points
-        for shape in self.net_shapes:
-            flipped_points = []
-            for x, y in shape.points:
-                flipped_points.append((x, sheet_height - y))
-            shape.points = flipped_points
+            if max_x == -1_000_000:  # No instance shapes found in cluster
+                inst_bbox_str = "No instance shapes found"
+            else:
+                inst_bbox_str = f"Instances BBox: [({min_x}, {min_y}), ({max_x}, {max_y})]"
+
+            cluster_shape_str = f"Cluster Shape: {cluster.shape}"
+
+            print(f"Cluster {cluster_id}:")
+            print(f"  {inst_bbox_str}")
+            print(f"  {cluster_shape_str}")
+        print("-------------------------------------\n")
 
     def scale_and_annotate_clusters(self):
         clusters = self.db.top_module.clusters
-        
+
         # Scale sizes and offsets
         for cluster in clusters.values():
             cluster.size = self.scale_point(cluster.size_float)
@@ -264,7 +272,7 @@ class GenSchematicData:
                 cluster_id = int(m.group(1))
                 net_name = m.group(2)
                 pin_name = net_name
-                
+
                 cluster = clusters.get(cluster_id)
                 cluster_inst = cluster_instances.get(cluster_id)
 
@@ -281,14 +289,100 @@ class GenSchematicData:
                 size_x, size_y = cluster.size
                 cluster.shape = (offset_x, offset_y, offset_x + size_x, offset_y + size_y)
 
-    def generate_schematic(self):
-        self.db.clear_all_shapes()
-        self.scale_and_annotate_clusters()
-        self.mark_multi_fanout_buffers()
-        self.find_block_bounding_boxes()
-        self.find_net_shapes()
-        self.patch_pins_of_buffers()
-        self.db.remove_multi_fanout_buffers()
-        self.calc_sheet_size()
-        # self.flip_y_axis()
-        return self
+    def center_schematic(self):
+        """Center the entire schematic around (0,0)."""
+        min_x, min_y = 1_000_000, 1_000_000
+        max_x, max_y = -1_000_000, -1_000_000
+
+        # Find bounding box of all clusters
+        for cluster in self.db.top_module.clusters.values():
+            if cluster.shape:
+                x1, y1, x2, y2 = cluster.shape
+                min_x = min(min_x, x1)
+                min_y = min(min_y, y1)
+                max_x = max(max_x, x2)
+                max_y = max(max_y, y2)
+
+        if max_x == -1_000_000:  # No shapes found
+            return
+
+        # Calculate center and shift amount
+        center_x = (min_x + max_x) // 2
+        center_y = (min_y + max_y) // 2
+        shift_x = -center_x
+        shift_y = -center_y
+
+        print(
+            f"Centering schematic: BBox before=[({min_x}, {min_y}), ({max_x}, {max_y})], Center=({center_x}, {center_y}), Shift=({shift_x}, {shift_y})"
+        )
+
+        # Shift all geometric data
+        self.shift_all_geom_by(shift_x, shift_y)
+
+        # For verification, calculate new bounding box
+        new_min_x, new_min_y = 1_000_000, 1_000_000
+        new_max_x, new_max_y = -1_000_000, -1_000_000
+        for cluster in self.db.top_module.clusters.values():
+            if cluster.shape:
+                x1, y1, x2, y2 = cluster.shape
+                new_min_x = min(new_min_x, x1)
+                new_min_y = min(new_min_y, y1)
+                new_max_x = max(new_max_x, x2)
+                new_max_y = max(new_max_y, y2)
+
+        print(f"Centering schematic: BBox after=[({new_min_x}, {new_min_y}), ({new_max_x}, {new_max_y})]")
+
+    def shift_all_geom_by(self, dx, dy):
+        """Shift all geometric data by a given offset."""
+        # Shift instance shapes
+        for inst in self.db.top_module.get_all_instances().values():
+            if inst.shape:
+                x1, y1, x2, y2 = inst.shape
+                inst.shape = (x1 + dx, y1 + dy, x2 + dx, y2 + dy)
+            for pin in inst.pins.values():
+                if pin.shape:
+                    pin.shape = (pin.shape[0] + dx, pin.shape[1] + dy)
+
+        # Shift net shapes
+        for net in self.db.top_module.get_all_nets().values():
+            net.shape = [((p1[0] + dx, p1[1] + dy), (p2[0] + dx, p2[1] + dy)) for p1, p2 in net.shape]
+            net.buffer_patch_points = [((p1[0] + dx, p1[1] + dy), (p2[0] + dx, p2[1] + dy)) for p1, p2 in net.buffer_patch_points]
+
+        # Shift cluster shapes, pins, and offsets
+        for cluster in self.db.top_module.clusters.values():
+            if cluster.shape:
+                x1, y1, x2, y2 = cluster.shape
+                cluster.shape = (x1 + dx, y1 + dy, x2 + dx, y2 + dy)
+            if cluster.offset:
+                cluster.offset = (cluster.offset[0] + dx, cluster.offset[1] + dy)
+            for pin in cluster.pins.values():
+                if pin.shape:
+                    pin.shape = (pin.shape[0] + dx, pin.shape[1] + dy)
+
+    def validate_integer_geometry(self):
+        """Validate that all geometry data consists of integers."""
+        for inst in self.db.top_module.get_all_instances().values():
+            if inst.shape:
+                assert all(isinstance(v, int) for v in inst.shape), (
+                    f"Instance {inst.name} shape has non-integer values: {inst.shape}"
+                )
+            for pin in inst.pins.values():
+                if pin.shape:
+                    assert all(isinstance(v, int) for v in pin.shape), (
+                        f"Pin {pin.full_name} shape has non-integer values: {pin.shape}"
+                    )
+        for net in self.db.top_module.get_all_nets().values():
+            for p1, p2 in net.shape:
+                assert all(isinstance(v, int) for v in p1), f"Net {net.name} shape has non-integer values: {p1}"
+                assert all(isinstance(v, int) for v in p2), f"Net {net.name} shape has non-integer values: {p2}"
+        for cluster in self.db.top_module.clusters.values():
+            if cluster.shape:
+                assert all(isinstance(v, int) for v in cluster.shape), (
+                    f"Cluster {cluster.id} shape has non-integer values: {cluster.shape}"
+                )
+            for pin in cluster.pins.values():
+                if pin.shape:
+                    assert all(isinstance(v, int) for v in pin.shape), (
+                        f"Cluster pin {pin.full_name} shape has non-integer values: {pin.shape}"
+                    )
+        print("Geometry validation passed: All coordinates are integers.")

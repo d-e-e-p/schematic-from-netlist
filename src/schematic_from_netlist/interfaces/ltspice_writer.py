@@ -25,9 +25,9 @@ class LineColor(Enum):
 
 
 class LTSpiceWriter:
-    def __init__(self, db, schematic_db):
+    def __init__(self, db):
         self.db = db
-        self.schematic_db = schematic_db
+        self.schematic_db = db.schematic_db
         self.module_names = {}
         self.add_comments = False  # kicad can't seem to parse spice with comments
         self.output_dir = "."
@@ -83,8 +83,8 @@ class LTSpiceWriter:
                 out += f"WIRE {pt_start[0]} {pt_start[1]} {pt_end[0]} {pt_end[1]}{comment}\n"
                 if add_label:
                     pt_mid = (
-                        round((pt_start[0] + pt_end[0]) / 2),
-                        round((pt_start[1] + pt_end[1]) / 2),
+                        (pt_start[0] + pt_end[0]) // 2,
+                        (pt_start[1] + pt_end[1]) // 2,
                     )
                     out += f"FLAG {pt_mid[0]} {pt_mid[1]} {net.name}\n"
             return out

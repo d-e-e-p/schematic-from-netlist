@@ -229,6 +229,19 @@ class Module:
         self.instances[inst_name] = instance
         return instance
 
+    def remove_instance(self, inst_name: str) -> Optional[Instance]:
+        """Remove an instance from this module and disconnect its pins."""
+        if inst_name in self.instances:
+            instance = self.instances[inst_name]
+            # Disconnect all pins of the instance from their nets
+            for pin in instance.pins.values():
+                if pin.net:
+                    pin.net.remove_pin(pin)
+            # Remove the instance from the module
+            del self.instances[inst_name]
+            return instance
+        return None
+
     def add_port(self, port_name: str, direction: PinDirection) -> Pin:
         """Add a port to this module"""
         module_inst = Instance(f"__{self.name}__", self.name, self)

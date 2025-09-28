@@ -140,6 +140,7 @@ class Graphviz:
             min_macro_size = 1.0
             max_macro_size = 10.0
             buffer_size = 0.2
+            low_fanout_size = 3.0
 
             min_degree = 2
             max_degree = 2
@@ -151,6 +152,8 @@ class Graphviz:
                 max_degree = max(degrees) if degrees else 2
 
             def scale_macro_size(degree):
+                if degree <= 3:
+                    return low_fanout_size
                 if max_degree <= min_degree:
                     return min_macro_size
                 # Clamp degree to be at least min_degree for scaling
@@ -180,12 +183,15 @@ class Graphviz:
                 node.attr["fixedsize"] = True
 
             # Layout and extract size
-            A.layout(prog="sfdp")
+            os.makedirs("data/dot", exist_ok=True)
+            A.write(f"data/dot/local_cluster_{cluster_id}_pre.dot")
+            A.layout(prog="fdp", args="-y")
+            A.write(f"data/dot/local_cluster_{cluster_id}_post.dot")
             A.draw(f"data/png/local_cluster_{cluster_id}.png", format="png")
             bb = A.graph_attr["bb"]
             if bb:
                 xmin, ymin, xmax, ymax = map(float, bb.split(","))
-                cluster.size_float = (xmax - xmin, ymax - ymin)
+                cluster.size_float = (abs(xmax - xmin), abs(ymax - ymin))
 
             local_geom_db = self._extract_geometry(A)
 
@@ -236,7 +242,10 @@ class Graphviz:
                     taillabel=f"cluster{src_partition}/{net.name}",
                 )
 
+        os.makedirs("data/dot", exist_ok=True)
+        A.write("data/dot/global_layout_pre.dot")
         A.layout(prog="dot")
+        A.write("data/dot/global_layout_post.dot")
         A.draw("data/png/global_layout.png", format="png")
 
         geom_db = self._extract_geometry(A)

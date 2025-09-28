@@ -3,7 +3,7 @@ import os
 
 from schematic_from_netlist.graph.gen_sch_data import GenSchematicData
 from schematic_from_netlist.graph.graph_partition import HypergraphPartitioner
-from schematic_from_netlist.graph.group_maker import GroupMaker
+from schematic_from_netlist.graph.group_maker import SteinerGroupMaker
 from schematic_from_netlist.interfaces.graphviz import Graphviz
 from schematic_from_netlist.interfaces.ltspice_writer import LTSpiceWriter
 from schematic_from_netlist.interfaces.verilog_parser import VerilogParser
@@ -43,17 +43,21 @@ def build_geometry(db):
 
 def generate_schematic(db, output_dir: str):
     """Generate schematic info and produce LTSpice output."""
-    schematic_db = GenSchematicData(db)
-    schematic_db.generate_schematic()
+    db.schematic_db = GenSchematicData(db)
+    db.schematic_db.generate_schematic()
 
-    """
-    group_maker = GroupMaker(db, schematic_db)
-    group_maker.insert_route_guide_buffers()
-    db.dump_to_table("4_after_route_guide_insertion")
-    """
-
-    writer = LTSpiceWriter(db, schematic_db)
+    writer = LTSpiceWriter(db)
     writer.produce_schematic(output_dir)
+
+
+def generate_steiner_buffers(db):
+    pass
+    db.remove_multi_fanout_buffers()
+    db.dump_to_table("4_final_state_after_buffer_removal")
+
+    group_maker = SteinerGroupMaker(db)
+    group_maker.insert_route_guide_buffers()
+    db.dump_to_table("5_after_route_guide_insertion")
 
 
 # ---------------- CLI Entrypoint ---------------- #
@@ -80,6 +84,11 @@ def main():
     partition_hypergraph(db, args.k, args.config)
 
     db.stage = "init"
+    build_geometry(db)
+    generate_schematic(db, args.output_dir)
+
+    db.stage = "pass2"
+    generate_steiner_buffers(db)
     build_geometry(db)
     generate_schematic(db, args.output_dir)
 

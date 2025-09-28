@@ -23,26 +23,26 @@ BLK U18 (b, c);
 BLK U19 (c, a);
 BLK U20 (a, a);
  
-BLK V01 (A, B);
-BLK V02 (B, C);
-BLK V03 (C, A);
-BLK V04 (A, A);
-BLK V05 (A, B);
-BLK V06 (B, C);
-BLK V07 (C, A);
-BLK V08 (A, A);
-BLK V09 (A, B);
-BLK V10 (B, C);
-BLK V11 (C, A);
-BLK V12 (A, A);
-BLK V13 (A, B);
-BLK V14 (B, C);
-BLK V15 (C, A);
-BLK V16 (A, A);
-BLK V17 (A, B);
-BLK V18 (B, C);
-BLK V19 (C, A);
-BLK V20 (A, A);
+BLK V01 (x, y);
+BLK V02 (y, z);
+BLK V03 (z, x);
+BLK V04 (x, x);
+BLK V05 (x, y);
+BLK V06 (y, z);
+BLK V07 (z, x);
+BLK V08 (x, x);
+BLK V09 (x, y);
+BLK V10 (y, z);
+BLK V11 (z, x);
+BLK V12 (x, x);
+BLK V13 (x, y);
+BLK V14 (y, z);
+BLK V15 (z, x);
+BLK V16 (x, x);
+BLK V17 (x, y);
+BLK V18 (y, z);
+BLK V19 (z, x);
+BLK V20 (x, x);
 
 endmodule
 
