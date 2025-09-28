@@ -186,9 +186,13 @@ class Graphviz:
             # Layout and extract size
             os.makedirs("data/dot", exist_ok=True)
             A.write(f"data/dot/local_cluster_{cluster_id}_pre.dot")
-            A.layout(prog="fdp", args="-y")
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", category=RuntimeWarning)
+                A.layout(prog="fdp", args="-y")
             A.write(f"data/dot/local_cluster_{cluster_id}_post.dot")
-            A.draw(f"data/png/local_cluster_{cluster_id}.png", format="png")
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", category=RuntimeWarning)
+                A.draw(f"data/png/local_cluster_{cluster_id}.png", format="png")
             bb = A.graph_attr["bb"]
             if bb:
                 xmin, ymin, xmax, ymax = map(float, bb.split(","))
@@ -245,7 +249,9 @@ class Graphviz:
 
         os.makedirs("data/dot", exist_ok=True)
         A.write("data/dot/global_layout_pre.dot")
-        A.layout(prog="dot")
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=RuntimeWarning)
+            A.layout(prog="dot")
         A.write("data/dot/global_layout_post.dot")
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", category=RuntimeWarning)
