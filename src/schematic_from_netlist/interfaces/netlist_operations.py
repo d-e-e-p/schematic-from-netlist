@@ -1,5 +1,6 @@
 import csv
 import json
+import logging
 import os
 import re
 from collections import defaultdict
@@ -129,7 +130,7 @@ class NetlistOperationsMixin:
         # ok check we got everyone
         for name, inst in self.inst_by_name.items():
             if inst.id == -1:
-                print(f"Inst {name} not assigned an ID")
+                logging.warning(f"Inst {name} not assigned an ID")
                 self.id_by_instname[inst.name] = inst_id_counter
                 self.instname_by_id[inst_id_counter] = inst.name
                 self.inst_by_id[inst_id_counter] = inst
@@ -137,24 +138,24 @@ class NetlistOperationsMixin:
                 inst_id_counter += 1
         for name, net in self.nets_by_name.items():
             if net.id == -1:
-                print(f"Net {name} not assigned an ID")
+                logging.warning(f"Net {name} not assigned an ID")
 
         # pprint(self.id_by_instname)
 
     def buffer_multi_fanout_nets(self):
         """Inserts buffers on nets with fanout > 1"""
-        # print(f" before buffering: {self.get_design_statistics()}")
+        logging.debug(f" before buffering: {self.get_design_statistics()}")
 
         if not self.top_module:
             return
 
         nets_to_buffer = [net for net in self.nets_by_name.values() if net.num_conn > 2 and net.num_conn < self.fanout_threshold]
-        # print(f"instrumentation: Found {len(nets_to_buffer)} nets to buffer.")
+        logging.debug(f"instrumentation: Found {len(nets_to_buffer)} nets to buffer.")
 
         for net in nets_to_buffer:
             original_net_name = net.name
             net.shape = []
-            # print(f"instrumentation: Buffering net {original_net_name} with {net.num_conn} connections.")
+            logging.debug(f"instrumentation: Buffering net {original_net_name} with {net.num_conn} connections.")
             self.buffered_nets_log[original_net_name] = {"old_pins": set(), "buffer_insts": [], "new_nets": []}
 
             log = self.buffered_nets_log[original_net_name]
@@ -173,34 +174,34 @@ class NetlistOperationsMixin:
                 new_net = self.top_module.add_net(new_net_name)
                 new_net.is_buffered_net = True
                 new_net.buffer_original_netname = original_net_name
-                # print(f"instrumentation: created net {new_net.name} derived from {new_net.buffer_original_netname}")
+                logging.debug(f"instrumentation: created net {new_net.name} derived from {new_net.buffer_original_netname}")
 
                 buf_inout_pin = buffer_inst.add_pin(f"IO{i}", PinDirection.INOUT)
                 new_net.add_pin(buf_inout_pin)
 
-                # print(f"instrumentation: Moving pin {pin.full_name} from {net.name} to {new_net.name}")
+                logging.debug(f"instrumentation: Moving pin {pin.full_name} from {net.name} to {new_net.name}")
                 net.remove_pin(pin)
                 new_net.add_pin(pin)
                 log["new_nets"].append(new_net)
 
         self._build_lookup_tables()
-        # print(f" after buffering: {self.get_design_statistics()}")
+        logging.debug(f" after buffering: {self.get_design_statistics()}")
 
     def remove_multi_fanout_buffers(self):
         """Removes all buffers and restores original connectivity."""
         if not self.top_module:
             return
 
-        # print(f" before removing buffers: {self.get_design_statistics()}")
+        logging.debug(f" before removing buffers: {self.get_design_statistics()}")
 
         # Restore original nets from the log
         for original_net_name, log in self.buffered_nets_log.items():
             original_net = self.find_net(original_net_name)
             if not original_net:
-                print(f"instrumentation: Could not find original net {original_net_name} during restore.")
+                logging.warning(f"instrumentation: Could not find original net {original_net_name} during restore.")
                 continue
 
-            # print(f"instrumentation: Restoring pins for {original_net_name}")
+            logging.debug(f"instrumentation: Restoring pins for {original_net_name}")
             for pin in log.get("old_pins", []):
                 if pin.net != original_net:
                     original_net.add_pin(pin)
@@ -218,7 +219,7 @@ class NetlistOperationsMixin:
         for inst_name in instances_to_delete:
             instance = self.top_module.instances.get(inst_name)
             if instance:
-                # print(f"instrumentation: Deleting buffer instance {instance.name}")
+                logging.debug(f"instrumentation: Deleting buffer instance {instance.name}")
                 for pin in instance.pins.values():
                     if pin.net:
                         pin.net.remove_pin(pin)
@@ -226,10 +227,10 @@ class NetlistOperationsMixin:
 
         for net_name in nets_to_delete:
             if net_name in self.top_module.nets:
-                # print(f"instrumentation: Deleting buffer net {net_name}")
+                logging.debug(f"instrumentation: Deleting buffer net {net_name}")
                 # clone wires before delete
                 net = self.top_module.nets[net_name]
-                # print(f"looking for original of {net_name=} =  {net.buffer_original_netname}")
+                logging.debug(f"looking for original of {net_name=} =  {net.buffer_original_netname}")
                 original_net = self.nets_by_name.get(net.buffer_original_netname)
                 original_net.shape.extend(net.shape)
                 del self.top_module.nets[net_name]
@@ -237,7 +238,7 @@ class NetlistOperationsMixin:
         self.buffered_nets_log.clear()
         self._build_lookup_tables()
 
-        # print(f" after removing buffers: {self.get_design_statistics()}")
+        logging.debug(f" after removing buffers: {self.get_design_statistics()}")
 
     def create_buffering_for_groups(self, net, ordering, collections, cluster_id):
         """deal with fanout routing"""
@@ -258,14 +259,15 @@ class NetlistOperationsMixin:
             buffer_name = f"{self.inserted_buf_prefix}{i}{cluster_id}_{original_net_name}"
             buffer_inst = self.top_module.add_instance(buffer_name, "FANOUT_BUFFER")
             buffer_inst.partition = cluster_id
+            buffer_inst.is_buffer = True
             buffer_insts_map[i] = buffer_inst
             log["buffer_insts"].append(buffer_inst)
-            # print(f" connecting {buffer_name=} to collection {collection=}")
+            logging.debug(f" connecting {buffer_name=} to collection {collection=}")
 
             pins_to_buffer = [self.find_pin(pinname) for pinname in collection]
             for j, pin in enumerate(pins_to_buffer):
                 if pin is None:
-                    print(f"instrumentation: WARNING - Could not find pin for name {collection[j]}")
+                    logging.warning(f"instrumentation: WARNING - Could not find pin for name {collection[j]}")
                     continue
                 new_net_name = f"{original_net_name}{self.inserted_net_suffix}{i}_{j}_{cluster_id}"
                 new_net = self.top_module.add_net(new_net_name)
@@ -274,7 +276,7 @@ class NetlistOperationsMixin:
 
                 buf_inout_pin = buffer_inst.add_pin(f"IO{j}", PinDirection.INOUT)
                 new_net.add_pin(buf_inout_pin)
-                # print(f" buffer pin {buf_inout_pin.full_name} in {cluster_id=} now drives {collection=}")
+                logging.debug(f" buffer pin {buf_inout_pin.full_name} in {cluster_id=} now drives {collection=}")
 
                 net.remove_pin(pin)
                 new_net.add_pin(pin)
@@ -296,7 +298,9 @@ class NetlistOperationsMixin:
 
                     chain_net.add_pin(src_pin)
                     chain_net.add_pin(dst_pin)
-                    # print( f"instrumentation: Chaining buffer {src_buffer_inst.name} to {dst_buffer_inst.name} with net {chain_net.name}")
+                    logging.debug(
+                        f"instrumentation: Chaining buffer {src_buffer_inst.name} to {dst_buffer_inst.name} with net {chain_net.name}"
+                    )
 
         self._build_lookup_tables()
         # self.dump_to_table(table_output_dir, f"post_buffering_{original_net_name}", -1)
@@ -310,7 +314,7 @@ class NetlistOperationsMixin:
         filename = os.path.join(output_dir, f"{stage_name}.csv")
         log_filename = os.path.join(output_dir, f"{stage_name}_buffer_log.json")
 
-        # print(f"instrumentation: Dumping netlist DB to {filename}")
+        logging.debug(f"instrumentation: Dumping netlist DB to {filename}")
 
         with open(filename, "w", newline="") as csvfile:
             writer = csv.writer(csvfile)
@@ -376,7 +380,9 @@ class NetlistOperationsMixin:
             connected_instance_ids = sorted(list({pin.instance.id for pin in net.pins}))
             edge_vector.extend(connected_instance_ids)
             index_vector.append(len(edge_vector))
-            # print( f"hyper: {net.name=} conn {net.num_conn}: {connected_instance_ids=} {[f'{pin.instance.name}/{pin.name}' for pin in net.pins]=}")
+            logging.debug(
+                f"hyper: {net.name=} conn {net.num_conn}: {connected_instance_ids=} {[f'{pin.instance.name}/{pin.name}' for pin in net.pins]=}"
+            )
 
         return HypergraphData(num_nodes, num_edges, index_vector, edge_vector)
 
@@ -387,7 +393,7 @@ class NetlistOperationsMixin:
                 inst.partition = part_id
                 instances_by_partition[part_id].append(inst)
             else:
-                print(f"warning: instance not found matching {id=}")
+                logging.warning(f"warning: instance not found matching {id=}")
 
         self.top_module.clusters.clear()
         for part_id, inst_list in instances_by_partition.items():

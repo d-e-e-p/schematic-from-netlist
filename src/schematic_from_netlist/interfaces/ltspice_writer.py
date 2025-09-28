@@ -1,4 +1,5 @@
 import os
+import logging
 from enum import Enum
 
 
@@ -204,7 +205,7 @@ class LTSpiceWriter:
         asy_path = os.path.join(self.output_dir, f"{inst.module_ref_uniq}.asy")
         with open(asy_path, "w") as f:
             f.write(asy)
-        # print(f"Generated symbol file: {asy_path}")
+        logging.debug(f"Generated symbol file: {asy_path}")
 
     def produce_schematic(self, output_dir="data/ltspice"):
         """Generates the .asc schematic and .asy symbol files."""
@@ -237,4 +238,4 @@ class LTSpiceWriter:
 
         with open(asc_path, "w") as f:
             f.write("\n".join(asc_content))
-        print(f"Generated schematic file: {asc_path}")
+        logging.info(f"Generated schematic file: {asc_path}")

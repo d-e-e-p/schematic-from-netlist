@@ -4,3 +4,4 @@ networkx
 pygraphviz
 igraph
 matplotlib
+colorlog

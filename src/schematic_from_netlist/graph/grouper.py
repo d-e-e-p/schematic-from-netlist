@@ -1,6 +1,7 @@
 import math
 import random
 import time
+import logging
 
 import igraph as ig
 import matplotlib.pyplot as plt
@@ -58,7 +59,7 @@ class Grouper:
 
         groups = [[points_to_connect[i] for i in group_idx] for group_idx in groups_indices]
 
-        # print(f"Formed {len(groups)} groups.")
+        logging.debug(f"Formed {len(groups)} groups.")
 
         if len(groups) <= 1:
             return groups, list(range(len(groups)))
@@ -99,7 +100,7 @@ class Grouper:
 
 
 def visualize_groups(name, groups, points_to_connect, obstacles, ordering):
-    print(f"Visualizing endpoint groups for '{name}'.")
+    logging.info(f"Visualizing endpoint groups for '{name}'.")
     fig, ax = plt.subplots(figsize=(12, 9))
 
     if obstacles:
@@ -124,12 +125,12 @@ def visualize_groups(name, groups, points_to_connect, obstacles, ordering):
 
     filename = f"route_{name}_groups.png"
     plt.savefig(filename)
-    print(f"Saved visualization to {filename}")
+    logging.info(f"Saved visualization to {filename}")
     plt.close(fig)
 
 
 def run_test(name, points_to_connect, obstacles, threshold_multiplier=1.5, cost_function="manhattan"):
-    print(f"\n--- Running Test Case: {name} (multiplier: {threshold_multiplier}, cost: {cost_function}) ---")
+    logging.info(f"\n--- Running Test Case: {name} (multiplier: {threshold_multiplier}, cost: {cost_function}) ---")
     grouper = Grouper()
     start_time = time.time()
     groups, ordering = grouper.group_endpoints(
@@ -137,8 +138,8 @@ def run_test(name, points_to_connect, obstacles, threshold_multiplier=1.5, cost_
     )
     ig_time = time.time() - start_time
 
-    print(f"Optimal group ordering (0-indexed): {ordering}")
-    print(f"igraph implementation took {ig_time:.6f} seconds.")
+    logging.info(f"Optimal group ordering (0-indexed): {ordering}")
+    logging.info(f"igraph implementation took {ig_time:.6f} seconds.")
 
     visualize_groups(name, groups, points_to_connect, obstacles, ordering)
 

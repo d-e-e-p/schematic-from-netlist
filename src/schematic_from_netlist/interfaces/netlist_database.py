@@ -1,4 +1,5 @@
 from collections import defaultdict
+import logging
 from typing import Dict, List, Optional, Tuple
 
 from .netlist_operations import NetlistOperationsMixin
@@ -107,11 +108,13 @@ def create_example_netlist():
 
 # Usage examples
 if __name__ == "__main__":
+    # Set up basic logging for standalone script execution
+    logging.basicConfig(level=logging.INFO, format='%(levelname)s:%(name)s:%(message)s')
     # Create example database
     db = create_example_netlist()
 
     # Query examples
-    print("Design Statistics:")
+    logging.info("Design Statistics:")
     stats = db.get_design_statistics()
     for key, value in stats.items():
-        print(f"  {key}: {value}")
+        logging.info(f"  {key}: {value}")

@@ -1,5 +1,7 @@
 import argparse
 import os
+import logging
+import colorlog
 
 from schematic_from_netlist.graph.gen_sch_data import GenSchematicData
 from schematic_from_netlist.graph.graph_partition import HypergraphPartitioner
@@ -78,7 +80,26 @@ def parse_args():
 def main():
     args = parse_args()
 
-    print(f"Processing netlist file: {args.netlist_file}")
+    # Set up logging
+    log_file = 'logs/schematic-from-netlist.log'
+    os.makedirs(os.path.dirname(log_file), exist_ok=True)
+
+    handler = colorlog.StreamHandler()
+    handler.setFormatter(colorlog.ColoredFormatter(
+        '%(log_color)s%(levelname)s:%(name)s:%(message)s'))
+    
+    file_handler = logging.FileHandler(log_file, mode='w')
+    file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(name)s - %(message)s'))
+
+    logger = colorlog.getLogger()
+    logger.addHandler(handler)
+    logger.addHandler(file_handler)
+    logger.setLevel(logging.INFO)
+
+    if args.verbose:
+        logger.setLevel(logging.DEBUG)
+
+    logging.info(f"Processing netlist file: {args.netlist_file}")
 
     db = load_netlist(args.netlist_file, args.debug)
     partition_hypergraph(db, args.k, args.config)
@@ -95,7 +116,7 @@ def main():
     db.remove_multi_fanout_buffers()
     db.dump_to_table("5_final_state_after_buffer_removal")
 
-    print("Run Complete.")
+    logging.info("Run Complete.")
 
 
 if __name__ == "__main__":

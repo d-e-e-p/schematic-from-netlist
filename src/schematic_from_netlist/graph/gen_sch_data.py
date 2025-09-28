@@ -1,3 +1,4 @@
+import logging
 import re
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -70,12 +71,12 @@ class GenSchematicData:
                     pin.shape = self.scale_point(self.geom_db.ports[pin.full_name])
                     instname2shapes[inst.name].append(pin.shape)
                 else:
-                    print(f"missing geom data for {pin.full_name=}")
+                    logging.warning(f"missing geom data for {pin.full_name=}")
 
         # pass 2: found bonding box
         for instname, pt_list in instname2shapes.items():
             if not pt_list:
-                print(f"Warning: Inst {instname} has no geom data")
+                logging.warning(f"Warning: Inst {instname} has no geom data")
                 continue
 
             # TODO: need to grow nicely -- if only 1 port
@@ -180,7 +181,7 @@ class GenSchematicData:
                     if pin.shape:
                         points.append(pin.shape)
                 if not points:
-                    print(f"perhaps problem? {inst.name} with {list(inst.pins.keys())} has no shapes")
+                    logging.warning(f"perhaps problem? {inst.name} with {list(inst.pins.keys())} has no shapes")
                     continue
                 pt_center = self.center_of_points(points)
 
@@ -189,10 +190,11 @@ class GenSchematicData:
                     for pt in points:
                         segment = (pt_center, pt)
                         net.buffer_patch_points.append(segment)
-                    # print(f"Patched buffer {inst.name} with net {inst.buffer_original_netname=} {net.buffer_patch_points=}")
+                    logging.debug(f"Patched buffer {inst.name} with net {inst.buffer_original_netname=} {net.buffer_patch_points=}")
                 else:
-                    print(f"Warning: Net {inst.buffer_original_netname} not found")
+                    logging.warning(f"Warning: Net {inst.buffer_original_netname} not found")
                 self.db.top_module.remove_instance(inst)
+        self.db._build_lookup_tables()
         # ok now we're ready to remove logical buffers and restore logical connection
 
     def calc_sheet_size(self):
@@ -223,7 +225,7 @@ class GenSchematicData:
 
     def compare_cluster_bboxes(self):
         """Compares the bounding box of instances within a cluster to the cluster's own shape."""
-        print("\n--- Cluster Bounding Box Comparison ---")
+        logging.info("\n--- Cluster Bounding Box Comparison ---")
         for cluster_id, cluster in self.db.top_module.clusters.items():
             if not cluster.instances:
                 continue
@@ -246,10 +248,10 @@ class GenSchematicData:
 
             cluster_shape_str = f"Cluster Shape: {cluster.shape}"
 
-            print(f"Cluster {cluster_id}:")
-            print(f"  {inst_bbox_str}")
-            print(f"  {cluster_shape_str}")
-        print("-------------------------------------\n")
+            logging.info(f"Cluster {cluster_id}:")
+            logging.info(f"  {inst_bbox_str}")
+            logging.info(f"  {cluster_shape_str}")
+        logging.info("-------------------------------------\n")
 
     def scale_and_annotate_clusters(self):
         clusters = self.db.top_module.clusters
@@ -312,7 +314,7 @@ class GenSchematicData:
         shift_x = -center_x
         shift_y = -center_y
 
-        print(
+        logging.info(
             f"Centering schematic: BBox before=[({min_x}, {min_y}), ({max_x}, {max_y})], Center=({center_x}, {center_y}), Shift=({shift_x}, {shift_y})"
         )
 
@@ -330,7 +332,7 @@ class GenSchematicData:
                 new_max_x = max(new_max_x, x2)
                 new_max_y = max(new_max_y, y2)
 
-        print(f"Centering schematic: BBox after=[({new_min_x}, {new_min_y}), ({new_max_x}, {new_max_y})]")
+        logging.info(f"Centering schematic: BBox after=[({new_min_x}, {new_min_y}), ({new_max_x}, {new_max_y})]")
 
     def shift_all_geom_by(self, dx, dy):
         """Shift all geometric data by a given offset."""
@@ -385,4 +387,4 @@ class GenSchematicData:
                     assert all(isinstance(v, int) for v in pin.shape), (
                         f"Cluster pin {pin.full_name} shape has non-integer values: {pin.shape}"
                     )
-        print("Geometry validation passed: All coordinates are integers.")
+        logging.info("Geometry validation passed: All coordinates are integers.")

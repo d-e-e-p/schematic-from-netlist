@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import re
 import warnings
@@ -64,7 +65,7 @@ class ParseJson:
             except (KeyError, IndexError, AttributeError, ValueError, TypeError):
                 continue
 
-        print(f"Parsed {len(geom_db.ports)} ports and {len(geom_db.nets)} nets from graph.")
+        logging.info(f"Parsed {len(geom_db.ports)} ports and {len(geom_db.nets)} nets from graph.")
         geom_db.write_geom_db_report()
         return geom_db
 
@@ -104,7 +105,9 @@ class Graphviz:
 
             instances_in_cluster = cluster.instances
             inst_names = [inst.name for inst in instances_in_cluster]
-            # print(f"Performing layout for cluster {cluster_id} with {inst_names=}")
+            buffer_inst_names = [inst.name for inst in instances_in_cluster if inst.is_buffer]
+            logging.info(f"Performing layout for cluster {cluster_id} with {buffer_inst_names=}")
+            logging.info(f"Performing layout for cluster {cluster_id} with {inst_names=}")
 
             # Add nodes for instances in the cluster, tagging them if they are buffers
             for inst in instances_in_cluster:

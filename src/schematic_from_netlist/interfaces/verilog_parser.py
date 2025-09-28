@@ -1,5 +1,6 @@
 import os
 import sys
+import logging
 from optparse import OptionParser
 
 import pyverilog
@@ -99,7 +100,7 @@ class VerilogParser:
         for module in list(self.db.modules.values()):
             for inst in module.instances.values():
                 if inst.module_ref not in self.db.modules:
-                    print(f"Creating stub module for undefined component: {inst.module_ref}")
+                    logging.warning(f"Creating stub module for undefined component: {inst.module_ref}")
                     stub_module = Module(name=inst.module_ref)
                     # Infer ports from the instance's pins
                     for i, pin in enumerate(inst.pins.values()):
@@ -197,10 +198,10 @@ class VerilogParser:
         """List all net connections in the format: net inst/pin1 inst/pin2 ..."""
         connections = self.find_net_connections(ast)
 
-        print("\n=== Net Connections ===")
+        logging.info("\n=== Net Connections ===")
         for net, connected_ports in connections.items():
             if len(connected_ports) > 1:  # Only show nets with multiple connections
-                print(f"{net} {' '.join(connected_ports)}")
+                logging.info(f"{net} {' '.join(connected_ports)}")
 
     def find_net_connections(self, ast):
         """
@@ -268,11 +269,12 @@ def main():
     INFO = "Verilog code parser"
     VERSION = pyverilog.__version__
     USAGE = "Usage: python example_parser.py file ..."
+    logging.basicConfig(level=logging.INFO, format='%(levelname)s:%(name)s:%(message)s')
 
     def showVersion():
-        print(INFO)
-        print(VERSION)
-        print(USAGE)
+        logging.info(INFO)
+        logging.info(VERSION)
+        logging.info(USAGE)
         sys.exit()
 
     optparser = OptionParser()
@@ -308,10 +310,9 @@ def main():
 
 
     db.generate_ids()
-    from pprint import pprint
-
-    pprint(db.id_by_netname)
-    pprint(db.id_by_instname)
+    import pprint
+    logging.debug(pprint.pformat(db.id_by_netname))
+    logging.debug(pprint.pformat(db.id_by_instname))
 
 
 if __name__ == "__main__":

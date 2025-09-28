@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import logging
 from dataclasses import dataclass
 from itertools import combinations
 from typing import Dict, List
@@ -64,8 +65,8 @@ class HypergraphPartitioner:
         G = nx.Graph()
         for e in range(self.g.numEdges()):
             pins = list(self.g.pins(e))
-            # pinnames = [self.id_to_name[pin] for pin in pins]
-            # print(f"{e=} {len(pins)=} {pinnames=}")
+            pinnames = [self.id_to_name[pin] for pin in pins]
+            logging.debug(f"{e=} {len(pins)=} {pinnames=}")
             for u, v in combinations(pins, 2):
                 if G.has_edge(u, v):
                     G[u][v]["weight"] += 1  # accumulate weight
@@ -108,13 +109,13 @@ class HypergraphPartitioner:
 
     def evaluate_run(self):
         self.extract_groups()
-        print("Cut edges:", self.cut_metric())
+        logging.info(f"Cut edges: {self.cut_metric()}")
         partition_dict = {v: self.g.blockID(v) for v in range(self.g.numNodes())}
 
         modularity, avg_cond = self.compute_modularity_and_conductance(partition_dict)
         combined = self.combined_score(modularity, avg_cond)
 
-        print(f"QOR: Modularity: {modularity:.4f} Conductance: {avg_cond:.4f}  combined {combined:.4f}")
+        logging.info(f"QOR: Modularity: {modularity:.4f} Conductance: {avg_cond:.4f}  combined {combined:.4f}")
         return modularity, avg_cond, combined
 
     def extract_groups(self):
@@ -125,7 +126,7 @@ class HypergraphPartitioner:
 
         for group, members in groups.items():
             nodes = [self.id_to_name[v] for v in members]
-            print(f"Group {group}: {nodes}")
+            logging.info(f"Group {group}: {nodes}")
 
         return groups
 
