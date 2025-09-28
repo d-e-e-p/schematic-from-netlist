@@ -58,7 +58,7 @@ class Grouper:
 
         groups = [[points_to_connect[i] for i in group_idx] for group_idx in groups_indices]
 
-        print(f"Formed {len(groups)} groups.")
+        # print(f"Formed {len(groups)} groups.")
 
         if len(groups) <= 1:
             return groups, list(range(len(groups)))
@@ -132,7 +132,9 @@ def run_test(name, points_to_connect, obstacles, threshold_multiplier=1.5, cost_
     print(f"\n--- Running Test Case: {name} (multiplier: {threshold_multiplier}, cost: {cost_function}) ---")
     grouper = Grouper()
     start_time = time.time()
-    groups, ordering = grouper.group_endpoints(points_to_connect, threshold_multiplier=threshold_multiplier, cost_function=cost_function)
+    groups, ordering = grouper.group_endpoints(
+        points_to_connect, threshold_multiplier=threshold_multiplier, cost_function=cost_function
+    )
     ig_time = time.time() - start_time
 
     print(f"Optimal group ordering (0-indexed): {ordering}")
@@ -142,12 +144,38 @@ def run_test(name, points_to_connect, obstacles, threshold_multiplier=1.5, cost_
 
 
 def test_four_clusters():
-    points = [(25, 25), (35, 35), (30, 28), (165, 25), (175, 35), (170, 28), (25, 165), (35, 175), (30, 168), (165, 165), (175, 175), (170, 168)]
+    points = [
+        (25, 25),
+        (35, 35),
+        (30, 28),
+        (165, 25),
+        (175, 35),
+        (170, 28),
+        (25, 165),
+        (35, 175),
+        (30, 168),
+        (165, 165),
+        (175, 175),
+        (170, 168),
+    ]
     run_test("four_clusters", points, [])
 
 
 def test_four_quadrants_as_one():
-    points = [(25, 25), (35, 35), (30, 28), (165, 25), (175, 35), (170, 28), (25, 165), (35, 175), (30, 168), (165, 165), (175, 175), (170, 168)]
+    points = [
+        (25, 25),
+        (35, 35),
+        (30, 28),
+        (165, 25),
+        (175, 35),
+        (170, 28),
+        (25, 165),
+        (35, 175),
+        (30, 168),
+        (165, 165),
+        (175, 175),
+        (170, 168),
+    ]
     run_test("four_quadrants_as_one", points, [], cost_function="log_manhattan", threshold_multiplier=3.0)
 
 
@@ -174,4 +202,3 @@ if __name__ == "__main__":
     test_four_quadrants_as_one()
     test_clustered()
     test_distributed()
-

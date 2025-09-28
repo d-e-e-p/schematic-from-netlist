@@ -204,7 +204,7 @@ class LTSpiceWriter:
         asy_path = os.path.join(self.output_dir, f"{inst.module_ref_uniq}.asy")
         with open(asy_path, "w") as f:
             f.write(asy)
-        print(f"Generated symbol file: {asy_path}")
+        # print(f"Generated symbol file: {asy_path}")
 
     def produce_schematic(self, output_dir="data/ltspice"):
         """Generates the .asc schematic and .asy symbol files."""

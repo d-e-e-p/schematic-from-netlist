@@ -3,7 +3,8 @@ import json
 import os
 import re
 from collections import defaultdict
-from pprint import pprint
+
+# from pprint import pprint
 from typing import Dict, List, Optional
 
 from schematic_from_netlist.graph.graph_partition import Edge, HypergraphData
@@ -138,11 +139,11 @@ class NetlistOperationsMixin:
             if net.id == -1:
                 print(f"Net {name} not assigned an ID")
 
-        pprint(self.id_by_instname)
+        # pprint(self.id_by_instname)
 
     def buffer_multi_fanout_nets(self):
         """Inserts buffers on nets with fanout > 1"""
-        pprint(f" before buffering: {self.get_design_statistics()}")
+        # print(f" before buffering: {self.get_design_statistics()}")
 
         if not self.top_module:
             return
@@ -183,14 +184,14 @@ class NetlistOperationsMixin:
                 log["new_nets"].append(new_net)
 
         self._build_lookup_tables()
-        pprint(f" after buffering: {self.get_design_statistics()}")
+        # print(f" after buffering: {self.get_design_statistics()}")
 
     def remove_multi_fanout_buffers(self):
         """Removes all buffers and restores original connectivity."""
         if not self.top_module:
             return
 
-        pprint(f" before removing buffers: {self.get_design_statistics()}")
+        # print(f" before removing buffers: {self.get_design_statistics()}")
 
         # Restore original nets from the log
         for original_net_name, log in self.buffered_nets_log.items():
@@ -236,7 +237,7 @@ class NetlistOperationsMixin:
         self.buffered_nets_log.clear()
         self._build_lookup_tables()
 
-        pprint(f" after removing buffers: {self.get_design_statistics()}")
+        # print(f" after removing buffers: {self.get_design_statistics()}")
 
     def create_buffering_for_groups(self, net, ordering, collections, cluster_id):
         """deal with fanout routing"""
@@ -273,7 +274,7 @@ class NetlistOperationsMixin:
 
                 buf_inout_pin = buffer_inst.add_pin(f"IO{j}", PinDirection.INOUT)
                 new_net.add_pin(buf_inout_pin)
-                print(f" buffer pin {buf_inout_pin.full_name} in {cluster_id=} now drives {collection=}")
+                # print(f" buffer pin {buf_inout_pin.full_name} in {cluster_id=} now drives {collection=}")
 
                 net.remove_pin(pin)
                 new_net.add_pin(pin)
@@ -295,9 +296,7 @@ class NetlistOperationsMixin:
 
                     chain_net.add_pin(src_pin)
                     chain_net.add_pin(dst_pin)
-                    print(
-                        f"instrumentation: Chaining buffer {src_buffer_inst.name} to {dst_buffer_inst.name} with net {chain_net.name}"
-                    )
+                    # print( f"instrumentation: Chaining buffer {src_buffer_inst.name} to {dst_buffer_inst.name} with net {chain_net.name}")
 
         self._build_lookup_tables()
         # self.dump_to_table(table_output_dir, f"post_buffering_{original_net_name}", -1)

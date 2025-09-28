@@ -180,7 +180,7 @@ class GenSchematicData:
                     if pin.shape:
                         points.append(pin.shape)
                 if not points:
-                    print(f"perhaps problem? {inst.name} with {inst.pins.keys()} has no shapes")
+                    print(f"perhaps problem? {inst.name} with {list(inst.pins.keys())} has no shapes")
                     continue
                 pt_center = self.center_of_points(points)
 
@@ -189,7 +189,7 @@ class GenSchematicData:
                     for pt in points:
                         segment = (pt_center, pt)
                         net.buffer_patch_points.append(segment)
-                    print(f"Patched buffer {inst.name} with net {inst.buffer_original_netname=} {net.buffer_patch_points=}")
+                    # print(f"Patched buffer {inst.name} with net {inst.buffer_original_netname=} {net.buffer_patch_points=}")
                 else:
                     print(f"Warning: Net {inst.buffer_original_netname} not found")
                 self.db.top_module.remove_instance(inst)

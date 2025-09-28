@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import warnings
 from dataclasses import dataclass, field
 from typing import Dict, List, Tuple
 
@@ -103,8 +104,7 @@ class Graphviz:
 
             instances_in_cluster = cluster.instances
             inst_names = [inst.name for inst in instances_in_cluster]
-            print(f"Performing layout for cluster {cluster_id} with {inst_names=}")
-            breakpoint()
+            # print(f"Performing layout for cluster {cluster_id} with {inst_names=}")
 
             # Add nodes for instances in the cluster, tagging them if they are buffers
             for inst in instances_in_cluster:
@@ -247,7 +247,9 @@ class Graphviz:
         A.write("data/dot/global_layout_pre.dot")
         A.layout(prog="dot")
         A.write("data/dot/global_layout_post.dot")
-        A.draw("data/png/global_layout.png", format="png")
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=RuntimeWarning)
+            A.draw("data/png/global_layout.png", format="png")
 
         geom_db = self._extract_geometry(A)
 

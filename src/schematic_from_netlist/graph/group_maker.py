@@ -29,8 +29,7 @@ class SteinerGroupMaker:
         for i, group in enumerate(groups):
             endpoint_names = [endpoint_map[point] for point in group]
             buf_groups.append(endpoint_names)
-            # print(f"Creating group {i}: {group}")
-            print(f"Creating group {i}: {cluster_id=} {endpoint_names=}")
+            # print(f"Creating group {i}: {cluster_id=} {endpoint_names=}")
         self.db.create_buffering_for_groups(net, ordering, buf_groups, cluster_id)
 
     def insert_route_guide_buffers(self):
@@ -42,6 +41,6 @@ class SteinerGroupMaker:
                 if net.shape:
                     for cluster_id, cluster in self.db.top_module.clusters.items():
                         endpoint_map = self.find_target_endpoints(net, cluster_id)
-                        print(f"Grouping net {net.name} in cluster {cluster_id} with endpoints {endpoint_map}")
+                        # print(f"Grouping net {net.name} in cluster {cluster_id} with endpoints {endpoint_map}")
                         groups, ordering = grouper.group_endpoints(list(endpoint_map.keys()))
                         self.create_buffer_groups(net, groups, ordering, endpoint_map, cluster_id)
