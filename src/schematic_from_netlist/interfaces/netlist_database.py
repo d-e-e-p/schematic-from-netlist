@@ -1,7 +1,8 @@
+from collections import defaultdict
 from typing import Dict, List, Optional, Tuple
 
 from .netlist_operations import NetlistOperationsMixin
-from .netlist_structures import Instance, Module, Net, NetType, Pin, PinDirection
+from .netlist_structures import Cluster, Instance, Module, Net, NetType, Pin, PinDirection
 
 
 class NetlistDatabase(NetlistOperationsMixin):
@@ -72,6 +73,14 @@ class NetlistDatabase(NetlistOperationsMixin):
                 traverse_module(child_module)
 
         traverse_module(self.top_module)
+
+        instances_by_partition = defaultdict(list)
+        for _, inst in self.inst_by_name.items():
+            instances_by_partition[inst.partition].append(inst)
+
+        self.top_module.clusters.clear()
+        for part_id, inst_list in instances_by_partition.items():
+            self.top_module.clusters[part_id] = Cluster(id=part_id, instances=inst_list)
 
 
 # Example usage and helper functions

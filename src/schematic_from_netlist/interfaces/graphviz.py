@@ -103,7 +103,8 @@ class Graphviz:
 
             instances_in_cluster = cluster.instances
             inst_names = [inst.name for inst in instances_in_cluster]
-            # print(f"Performing layout for cluster {cluster_id} with {inst_names=}")
+            print(f"Performing layout for cluster {cluster_id} with {inst_names=}")
+            breakpoint()
 
             # Add nodes for instances in the cluster, tagging them if they are buffers
             for inst in instances_in_cluster:
@@ -315,22 +316,23 @@ class Graphviz:
     def _set_attributes(self, A):
         """Sets graph, node, and edge attributes."""
         A.graph_attr.update(
-            {
-                "fontsize": "20",
-                "maxiter": "10000",
-                "overlap": "false",
-                "pack": "false",
-                "sep": "+20",
-                "splines": "ortho",
-            }
+            layout="fdp",
+            K="0.2",
+            maxiter="10000",
+            overlap="false",
+            pack="true",
+            packmode="graph",
+            sep="+2,2",
+            esep="+2,2",
+            epsilon="0.0001",
+            rankdir="tb",
+            ratio="auto",
+            splines="ortho",
         )
-        A.node_attr.update(
-            {
-                "style": "filled",
-                "fillcolor": "white",
-                "fontsize": "10",
-            }
-        )
+
+        A.node_attr.update(fillcolor="white", margin="0,0", width="0.4", height="0.3", fixedsize="true")
+
+        A.edge_attr.update(len="0.3", weight="1.5")
         A.edge_attr.update(
             {
                 "fontsize": "8",
