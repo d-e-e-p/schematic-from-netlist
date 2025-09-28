@@ -15,6 +15,7 @@ class GeomDB:
 
     ports: Dict[str, Tuple[float, float]] = field(default_factory=dict)
     nets: Dict[str, List[Tuple[Tuple[float, float], Tuple[float, float]]]] = field(default_factory=dict)
+    instances: Dict[str, Tuple[float, float, float, float]] = field(default_factory=dict)
 
     def write_geom_db_report(self, filepath: str = "data/json/read_json.rpt"):
         os.makedirs(os.path.dirname(filepath), exist_ok=True)
@@ -28,6 +29,11 @@ class GeomDB:
         for name in sorted(self.nets.keys()):
             pts = self.nets[name]
             out += f" {name:20}: {pts}\n"
+
+        out += "INSTANCES\n"
+        for name in sorted(self.instances.keys()):
+            rect = self.instances[name]
+            out += f" {name:20}: {rect}\n"
 
         with open(filepath, "w") as f:
             f.write(out)
@@ -182,8 +188,8 @@ class Graphviz:
                     node.attr["shape"] = "box"
                     degree = A.degree(node)
                     size = scale_macro_size(degree)
-                    node.attr["width"] = size
-                    node.attr["height"] = size
+                    node.attr["width"] = 0.5
+                    node.attr["height"] = 0.5
                 node.attr["fixedsize"] = True
 
             # Layout and extract size
@@ -311,6 +317,10 @@ class Graphviz:
                     else:
                         final_geom_db.nets[name] = offset_segments
 
+                for name, rect in local_geom_db.instances.items():
+                    xmin, ymin, xmax, ymax = rect
+                    final_geom_db.instances[name] = (xmin + offset_x, ymin + offset_y, xmax + offset_x, ymax + offset_y)
+
         # Process global geometries
         for name, pos in global_geom_db.ports.items():
             final_geom_db.ports[name] = pos
@@ -346,7 +356,7 @@ class Graphviz:
         A.edge_attr.update(len="0.3", weight="1.5")
         A.edge_attr.update(
             {
-                "fontsize": "8",
+                "fontsize": "2",
                 "arrowhead": "dot",
                 "arrowtail": "dot",
                 "arrowsize": "0.0",
@@ -357,6 +367,22 @@ class Graphviz:
     def _extract_geometry(self, A):
         """Extracts geometry from the graph."""
         geom_db = GeomDB()
+
+        for node in A.nodes():
+            if node.name.startswith("stub_") or node.name.startswith("cluster_"):
+                continue
+            pos = node.attr.get("pos")
+            width = node.attr.get("width")
+            height = node.attr.get("height")
+            if pos and width and height:
+                x, y = map(float, pos.split(","))
+                w = float(width) * 72.0
+                h = float(height) * 72.0
+                xmin = x - w / 2
+                ymin = y - h / 2
+                xmax = x + w / 2
+                ymax = y + h / 2
+                geom_db.instances[node.name] = (xmin, ymin, xmax, ymax)
 
         def parse_edge_pin_positions(edge):
             pos_string = edge.attr.get("pos")
@@ -393,11 +419,11 @@ class Graphviz:
             tail_pin = edge.attr.get("taillabel")
             head_pin = edge.attr.get("headlabel")
             net_name = edge.attr.get("label")
-
-            if tail_pin and tail_coord:
-                geom_db.ports[tail_pin] = tail_coord
+            # order is important because for open nets head and tail labels are the same
             if head_pin and head_coord:
                 geom_db.ports[head_pin] = head_coord
+            if tail_pin and tail_coord:
+                geom_db.ports[tail_pin] = tail_coord
             if net_name:
                 if net_name in geom_db.nets:
                     geom_db.nets[net_name].extend(wire_segments)

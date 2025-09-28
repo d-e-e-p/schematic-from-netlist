@@ -418,15 +418,34 @@ class NetlistOperationsMixin:
 
     def clear_all_shapes(self):
         for inst in self.top_module.get_all_instances().values():
-            inst.shape = ()
+            inst.shape = None
 
         for net in self.top_module.get_all_nets().values():
             net.shape.clear()
             net.buffer_patch_points.clear()
 
-        for inst in self.top_module.get_all_instances().values():
-            for pin in inst.pins.values():
-                pin.shape = ()
+        for pin in self.top_module.get_all_pins().values():
+            pin.shape = None
+
+    def geom2shape(self):
+        """Convert all geom objects to shape."""
+        for collection in (
+            self.top_module.get_all_instances().values(),
+            self.top_module.get_all_nets().values(),
+            self.top_module.get_all_pins().values(),
+        ):
+            for obj in collection:
+                obj.geom2shape()
+
+    def shape2geom(self):
+        """Convert all shape objects to geom."""
+        for collection in (
+            self.top_module.get_all_instances().values(),
+            self.top_module.get_all_nets().values(),
+            self.top_module.get_all_pins().values(),
+        ):
+            for obj in collection:
+                obj.shape2geom()
 
     def uniquify_module_names(self):
         """needed to have each ref having different shape"""

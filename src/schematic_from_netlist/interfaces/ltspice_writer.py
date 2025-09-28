@@ -1,5 +1,5 @@
-import os
 import logging
+import os
 from enum import Enum
 
 
@@ -161,7 +161,7 @@ class LTSpiceWriter:
         simp_x, simp_y = (0, 10)
 
         # Add WINDOW definitions
-        font_size = round(10 * self.schematic_db.graph_to_sch_scale)
+        font_size = 1
         asy = ""
         asy += f"WINDOW 0 {ref_x} {ref_y} Left {font_size}\n"  # InstName (Reference)
         asy += f"WINDOW 3 {val_x} {val_y} Left {font_size}\n"  # Value

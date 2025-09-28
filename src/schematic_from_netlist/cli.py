@@ -1,11 +1,13 @@
 import argparse
-import os
 import logging
+import os
+
 import colorlog
 
 from schematic_from_netlist.graph.gen_sch_data import GenSchematicData
 from schematic_from_netlist.graph.graph_partition import HypergraphPartitioner
 from schematic_from_netlist.graph.group_maker import SteinerGroupMaker
+from schematic_from_netlist.graph.layout_optimizer import LayoutOptimizer
 from schematic_from_netlist.interfaces.graphviz import Graphviz
 from schematic_from_netlist.interfaces.ltspice_writer import LTSpiceWriter
 from schematic_from_netlist.interfaces.verilog_parser import VerilogParser
@@ -53,13 +55,18 @@ def generate_schematic(db, output_dir: str):
 
 
 def generate_steiner_buffers(db):
-    pass
     db.remove_multi_fanout_buffers()
     db.dump_to_table("4_final_state_after_buffer_removal")
 
     group_maker = SteinerGroupMaker(db)
     group_maker.insert_route_guide_buffers()
     db.dump_to_table("5_after_route_guide_insertion")
+
+
+def optimize_layout(db):
+    db.shape2geom()
+    optimizer = LayoutOptimizer(db)
+    optimizer.optimize_layout()
 
 
 # ---------------- CLI Entrypoint ---------------- #
@@ -81,15 +88,14 @@ def main():
     args = parse_args()
 
     # Set up logging
-    log_file = 'logs/schematic-from-netlist.log'
+    log_file = "logs/schematic-from-netlist.log"
     os.makedirs(os.path.dirname(log_file), exist_ok=True)
 
     handler = colorlog.StreamHandler()
-    handler.setFormatter(colorlog.ColoredFormatter(
-        '%(log_color)s%(levelname)s:%(name)s:%(message)s'))
-    
-    file_handler = logging.FileHandler(log_file, mode='w')
-    file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(name)s - %(message)s'))
+    handler.setFormatter(colorlog.ColoredFormatter("%(log_color)s%(levelname)s:%(name)s:%(message)s"))
+
+    file_handler = logging.FileHandler(log_file, mode="w")
+    file_handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(name)s - %(message)s"))
 
     logger = colorlog.getLogger()
     logger.addHandler(handler)
@@ -111,6 +117,10 @@ def main():
     db.stage = "pass2"
     generate_steiner_buffers(db)
     build_geometry(db)
+    generate_schematic(db, args.output_dir)
+
+    db.stage = "pass3"
+    optimize_layout(db)
     generate_schematic(db, args.output_dir)
 
     db.remove_multi_fanout_buffers()

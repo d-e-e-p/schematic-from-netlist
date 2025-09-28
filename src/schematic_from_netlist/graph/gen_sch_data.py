@@ -63,52 +63,53 @@ class GenSchematicData:
 
     def find_block_bounding_boxes(self):
         """record inst shape as bounding box covering all pin geom ..."""
-        instname2shapes = defaultdict(list)
+        instname2pinshapes = defaultdict(list)
         # pass 1: record pin shapes
         for _, inst in self.db.top_module.get_all_instances().items():
             for _, pin in inst.pins.items():
                 if pin.full_name in self.geom_db.ports:
                     pin.shape = self.scale_point(self.geom_db.ports[pin.full_name])
-                    instname2shapes[inst.name].append(pin.shape)
+                    instname2pinshapes[inst.name].append(pin.shape)
                 else:
                     logging.warning(f"missing geom data for {pin.full_name=}")
 
-        # pass 2: found bonding box
-        for instname, pt_list in instname2shapes.items():
-            if not pt_list:
-                logging.warning(f"Warning: Inst {instname} has no geom data")
-                continue
+        # pass 2: create instance bounding box
+        for instname, inst in self.db.top_module.get_all_instances().items():
+            if instname in self.geom_db.instances:
+                rect = self.geom_db.instances[instname]
+                inst.shape = self.scale_rect(rect)
+            else:
+                # Fallback to old method if no instance geometry is available
+                pt_list = instname2pinshapes[instname]
+                if not pt_list:
+                    logging.warning(f"Warning: Inst {instname} has no geom data for pins, and no instance geom data.")
+                    continue
 
-            # TODO: need to grow nicely -- if only 1 port
-            # if len(pt_list) == 1:
+                x_min = min(p[0] for p in pt_list)
+                y_min = min(p[1] for p in pt_list)
+                x_max = max(p[0] for p in pt_list)
+                y_max = max(p[1] for p in pt_list)
 
-            x_min = min(p[0] for p in pt_list)
-            y_min = min(p[1] for p in pt_list)
-            x_max = max(p[0] for p in pt_list)
-            y_max = max(p[1] for p in pt_list)
+                # too small -- need to grow
+                size = self.min_block_size_in_gridlines
+                if x_max - x_min < size:
+                    x_min -= size // 2
+                    x_max += size // 2
+                if y_max - y_min < size:
+                    y_min -= size // 2
+                    y_max += size // 2
 
-            # too small -- need to grow
-            size = self.min_block_size_in_gridlines
-            if x_max - x_min < size:
-                x_min -= size // 2
-                x_max += size // 2
-            if y_max - y_min < size:
-                y_min -= size // 2
-                y_max += size // 2
+                # block_moat_size a bit
+                size = self.block_moat_size_in_gridlines
 
-            # block_moat_size a bit
-            size = self.block_moat_size_in_gridlines
+                if len(pt_list) > self.min_block_size_min_connections:
+                    x_min -= size
+                    x_max += size
+                    y_min -= size
+                    y_max += size
 
-            if len(pt_list) > self.min_block_size_min_connections:
-                x_min -= size
-                x_max += size
-                y_min -= size
-                y_max += size
-
-            rect = (x_min, y_min, x_max, y_max)
-
-            inst = self.db.inst_by_name.get(instname)
-            inst.shape = rect
+                rect = (x_min, y_min, x_max, y_max)
+                inst.shape = rect
 
     def scale_and_uniq_points(self, points):
         """

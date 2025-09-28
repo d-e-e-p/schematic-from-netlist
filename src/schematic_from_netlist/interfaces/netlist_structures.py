@@ -290,3 +290,17 @@ class Module:
                 all_nets.update(child.get_all_nets(True))
         return all_nets
 
+    def get_all_pins(self, recursive: bool = True) -> Dict[str, Pin]:
+        """Return all pins in this module (and optionally from all submodules)."""
+        all_pins: Dict[str, Pin] = self.ports.copy()  # start with top-level module ports
+
+        # Add pins from instances
+        for inst in self.instances.values():
+            for pin in inst.pins.values():
+                all_pins[pin.full_name] = pin
+
+        # Recurse into children if requested
+        if recursive:
+            for child in self.child_modules.values():
+                all_pins.update(child.get_all_pins(True))
+        return all_pins
