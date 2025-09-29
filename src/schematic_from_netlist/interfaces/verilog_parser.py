@@ -26,6 +26,12 @@ class VerilogParser:
         self.db = NetlistDatabase()
         self.module_ports = {}
 
+    def _clean_name(self, name):
+        """Strip backslashes from names."""
+        if isinstance(name, str):
+            return name.replace('\\', '')
+        return name
+
     def parse_and_store_in_db(self, filelist, include_path=None, define=None):
         ast, directives = parse(filelist, preprocess_include=include_path, preprocess_define=define)
         self.store_ast_in_db(ast)
@@ -34,7 +40,7 @@ class VerilogParser:
     def get_signal_name(self, signal):
         """Extract signal name from various AST node types"""
         if isinstance(signal, Identifier):
-            return signal.name
+            return self._clean_name(signal.name)
         elif isinstance(signal, Pointer):
             var_name = self.get_signal_name(signal.var)
             ptr_str = self.get_signal_name(signal.ptr)
@@ -67,8 +73,9 @@ class VerilogParser:
         # First pass: Collect module definitions
         for node in ast.description.definitions:
             if isinstance(node, ModuleDef):
-                module = Module(name=node.name)
-                self.db.modules[node.name] = module
+                module_name = self._clean_name(node.name)
+                module = Module(name=module_name)
+                self.db.modules[module_name] = module
                 if not self.db.top_module:
                     self.db.set_top_module(module)
 
@@ -76,9 +83,9 @@ class VerilogParser:
                 if node.portlist:
                     for port in node.portlist.ports:
                         if isinstance(port, Ioport):
-                            port_name = port.first.name
+                            port_name = self._clean_name(port.first.name)
                         else:
-                            port_name = port.name
+                            port_name = self._clean_name(port.name)
                         port_decl = self._find_decl_for_port(node, port_name)
                         direction = PinDirection.INOUT  # Default
                         if isinstance(port_decl, Input):
@@ -93,7 +100,8 @@ class VerilogParser:
         # Second pass: Populate modules with instances, nets, and connections
         for node in ast.description.definitions:
             if isinstance(node, ModuleDef):
-                module = self.db.modules[node.name]
+                module_name = self._clean_name(node.name)
+                module = self.db.modules[module_name]
                 self._populate_module(module, node)
 
         # Third pass: Create stub modules for undefined components
@@ -115,7 +123,7 @@ class VerilogParser:
         for item in module_node.items:
             if isinstance(item, Decl):
                 for decl in item.list:
-                    if hasattr(decl, "name") and decl.name == port_name:
+                    if hasattr(decl, "name") and self._clean_name(decl.name) == port_name:
                         return decl
         return None
 
@@ -125,27 +133,28 @@ class VerilogParser:
             if isinstance(item, Decl):
                 for decl in item.list:
                     if isinstance(decl, Wire):
-                        module.add_net(decl.name, NetType.WIRE)
+                        module.add_net(self._clean_name(decl.name), NetType.WIRE)
                     elif isinstance(decl, Reg):
-                        module.add_net(decl.name, NetType.REG)
+                        module.add_net(self._clean_name(decl.name), NetType.REG)
                     elif isinstance(decl, Supply):
                         if decl.value.value == "0":
-                            module.add_net(decl.name, NetType.SUPPLY0)
+                            module.add_net(self._clean_name(decl.name), NetType.SUPPLY0)
                         else:
-                            module.add_net(decl.name, NetType.SUPPLY1)
+                            module.add_net(self._clean_name(decl.name), NetType.SUPPLY1)
 
         # Process instances
         for item in module_node.items:
             if isinstance(item, InstanceList):
                 for inst in item.instances:
-                    module_ref = self.db.modules.get(inst.module)
+                    module_ref_name = self._clean_name(inst.module)
+                    module_ref = self.db.modules.get(module_ref_name)
                     if inst.array:
                         msb, lsb = self.get_width_range(inst.array)
                         for i in range(lsb, msb + 1):
-                            inst_name = f"{inst.name}[{i}]"
-                            instance = module.add_instance(inst_name, inst.module)
+                            inst_name = f"{self._clean_name(inst.name)}[{i}]"
+                            instance = module.add_instance(inst_name, module_ref_name)
                             for j, port_conn in enumerate(inst.portlist):
-                                port_name = port_conn.portname
+                                port_name = self._clean_name(port_conn.portname)
                                 if not port_name:
                                     if module_ref and j < len(module_ref.ports):
                                         port_name = list(module_ref.ports.keys())[j]
@@ -170,9 +179,11 @@ class VerilogParser:
                                 pin = instance.add_pin(port_name, direction)
                                 instance.connect_pin(port_name, net)
                     else:
-                        instance = module.add_instance(inst.name, inst.module)
+                        inst_name = self._clean_name(inst.name)
+                        module_ref_name = self._clean_name(inst.module)
+                        instance = module.add_instance(inst_name, module_ref_name)
                         for i, port_conn in enumerate(inst.portlist):
-                            port_name = port_conn.portname
+                            port_name = self._clean_name(port_conn.portname)
                             if not port_name:
                                 if module_ref and i < len(module_ref.ports):
                                     port_name = list(module_ref.ports.keys())[i]
@@ -213,13 +224,13 @@ class VerilogParser:
         # First pass: collect module port definitions
         def collect_module_ports(node):
             if isinstance(node, ModuleDef):
-                module_name = node.name
+                module_name = self._clean_name(node.name)
                 ports = []
 
                 if hasattr(node, "portlist") and node.portlist:
                     for port in node.portlist.ports:
                         if hasattr(port, "name"):
-                            ports.append(port.name)
+                            ports.append(self._clean_name(port.name))
 
                 self.module_ports[module_name] = ports
 
@@ -242,8 +253,8 @@ class VerilogParser:
                         traverse_node(child)
 
         def traverse_instance_ports(instance):
-            instance_name = instance.name if instance.name else "unnamed_inst"
-            module_name = instance.module
+            instance_name = self._clean_name(instance.name) if instance.name else "unnamed_inst"
+            module_name = self._clean_name(instance.module)
             is_array_instance = hasattr(instance, "array") and instance.array
 
             expected_ports = self.module_ports.get(module_name, [])
@@ -251,7 +262,7 @@ class VerilogParser:
             if hasattr(instance, "portlist") and instance.portlist:
                 for i, port in enumerate(instance.portlist):
                     if isinstance(port, PortArg):
-                        port_name = port.portname or (expected_ports[i] if i < len(expected_ports) else f"port{i}")
+                        port_name = self._clean_name(port.portname) or (expected_ports[i] if i < len(expected_ports) else f"port{i}")
 
                         if port.argname:
                             net_name = self.get_signal_name(port.argname)

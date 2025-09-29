@@ -2,6 +2,8 @@ import logging
 import os
 from enum import Enum
 
+from .symbol_library import SymbolLibrary
+
 
 class LineType(Enum):
     NORMAL = "Normal"
@@ -31,7 +33,8 @@ class LTSpiceWriter:
         self.schematic_db = db.schematic_db
         self.module_names = {}
         self.add_comments = False  # kicad can't seem to parse spice with comments
-        self.output_dir = "."
+        self.output_dir = "output/ltspice"
+        self.symlib = SymbolLibrary()
 
     def upscale_rect(self, rect: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
         """Scale a rectangle (x1,y1,x2,y2) from grid units to real units."""
@@ -215,7 +218,11 @@ class LTSpiceWriter:
         # first create symbols
         self.db.uniquify_module_names()
         for inst in self.db.top_module.get_all_instances().values():
-            self.generate_symbol_asy(inst)
+            if inst.module_ref in self.symlib.symbols:
+                self.symlib.generate_symbol_asy(inst.module_ref, output_dir)
+                inst.module_ref_uniq = inst.module_ref
+            else:
+                self.generate_symbol_asy(inst)
 
         top_module_name = self.db.top_module.name
         asc_path = os.path.join(output_dir, f"{top_module_name}.asc")

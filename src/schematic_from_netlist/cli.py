@@ -110,21 +110,22 @@ def main():
     db = load_netlist(args.netlist_file, args.debug)
     partition_hypergraph(db, args.k, args.config)
 
-    db.stage = "init"
+    db.stage = "pass0"
     build_geometry(db)
     generate_schematic(db, args.output_dir)
 
-    db.stage = "pass2"
+    db.stage = "pass1"
     generate_steiner_buffers(db)
     build_geometry(db)
     generate_schematic(db, args.output_dir)
 
-    db.stage = "pass3"
+    db.stage = "pass2"
     optimize_layout(db)
-    generate_schematic(db, args.output_dir)
+    writer = LTSpiceWriter(db)
+    writer.produce_schematic(args.output_dir)
 
-    db.remove_multi_fanout_buffers()
-    db.dump_to_table("5_final_state_after_buffer_removal")
+    # db.remove_multi_fanout_buffers()
+    # db.dump_to_table("5_final_state_after_buffer_removal")
 
     logging.info("Run Complete.")
 
