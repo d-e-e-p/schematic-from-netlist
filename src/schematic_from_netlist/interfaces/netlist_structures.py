@@ -45,7 +45,7 @@ class Pin:
             self.geom = None
             return None
         x, y = self.shape
-        self.geom = Point(x, y)
+        self.geom = Point(round(x), round(y))
         return self.geom
 
     def geom2shape(self):

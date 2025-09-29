@@ -5,3 +5,5 @@ pygraphviz
 igraph
 matplotlib
 colorlog
+rtree
+networkx
