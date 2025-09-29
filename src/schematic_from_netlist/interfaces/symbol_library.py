@@ -2,7 +2,10 @@ import os
 
 
 class SymbolLibrary:
-    """Generate LTspice symbol definitions for standard components (res, cap, ind, dio, led)."""
+    """
+    Generate LTspice symbol definitions for standard components (res, cap, ind, dio, led).
+    Seems like ltspice arc parsing in kicad is a bit flaky, so inductor looks weird.
+    """
 
     def __init__(self):
         self.seen = {}
