@@ -92,10 +92,10 @@ def main():
     os.makedirs(os.path.dirname(log_file), exist_ok=True)
 
     handler = colorlog.StreamHandler()
-    handler.setFormatter(colorlog.ColoredFormatter("%(log_color)s%(levelname)s:%(name)s:%(message)s"))
+    handler.setFormatter(colorlog.ColoredFormatter("%(log_color)s%(name)s:%(funcName)s:%(message)s"))
 
     file_handler = logging.FileHandler(log_file, mode="w")
-    file_handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(name)s - %(message)s"))
+    file_handler.setFormatter(logging.Formatter("%(levelname)s - %(funcName)s - %(name)s - %(message)s"))
 
     logger = colorlog.getLogger()
     logger.addHandler(handler)

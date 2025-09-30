@@ -130,7 +130,13 @@ class Net:
         if not self.shape:
             self.geom = None
             return None
-        self.geom = MultiLineString([LineString(seg) for seg in self.shape])
+        # Base geometry
+        lines = [LineString(seg) for seg in self.shape]
+        # Optionally add patch lines
+        lines.extend(LineString(seg) for seg in self.buffer_patch_points)
+
+        # Merge into one MultiLineString
+        self.geom = MultiLineString(lines)
         return self.geom
 
     def geom2shape(self):

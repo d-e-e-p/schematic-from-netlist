@@ -1,5 +1,5 @@
-from collections import defaultdict
 import logging
+from collections import defaultdict
 from typing import Dict, List, Optional, Tuple
 
 from .netlist_operations import NetlistOperationsMixin
@@ -9,7 +9,7 @@ from .netlist_structures import Cluster, Instance, Module, Net, NetType, Pin, Pi
 class NetlistDatabase(NetlistOperationsMixin):
     """Main database class for the hierarchical netlist"""
 
-    def __init__(self, fanout_threshold: int = 55):
+    def __init__(self, fanout_threshold: int = 15):
         self.fanout_threshold = fanout_threshold
 
         self.debug: bool = False
@@ -109,7 +109,7 @@ def create_example_netlist():
 # Usage examples
 if __name__ == "__main__":
     # Set up basic logging for standalone script execution
-    logging.basicConfig(level=logging.INFO, format='%(levelname)s:%(name)s:%(message)s')
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s:%(message)s")
     # Create example database
     db = create_example_netlist()
 

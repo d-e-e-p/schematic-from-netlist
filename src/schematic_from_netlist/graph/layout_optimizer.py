@@ -1,3 +1,4 @@
+import heapq
 import logging as log
 import math
 import os
@@ -10,12 +11,7 @@ from shapely.affinity import rotate, translate
 from shapely.geometry import LineString, MultiLineString, Point, box
 from shapely.ops import linemerge, unary_union
 
-
-def round_point(pt, grid=1.0):
-    """Round shapely Point to nearest grid multiple."""
-    x = round(pt.x / grid) * grid
-    y = round(pt.y / grid) * grid
-    return Point(x, y)
+log.getLogger("matplotlib").setLevel(log.WARNING)
 
 
 class LayoutOptimizer:
@@ -105,29 +101,44 @@ class LayoutOptimizer:
             pin = inst.pins[pin_name]
             old_pin_geom = old_pins[i]
             new_pin_geom = new_pin_geoms[i]
-            pin.geom = new_pin_geom
 
-            if pin.net and pin.net.geom:
+            if pin.net:
+                log.info(
+                    f"  Net {pin.net.name} updated: {pin.net.geom} with new_segment={LineString([old_pin_geom, new_pin_geom])}"
+                )
                 new_segment = LineString([old_pin_geom, new_pin_geom])
-                if hasattr(pin.net.geom, "geoms"):
+                if pin.net.geom and hasattr(pin.net.geom, "geoms"):
                     existing_lines = list(pin.net.geom.geoms)
                 else:
                     existing_lines = []
                 pin.net.geom = MultiLineString(existing_lines + [new_segment])
-                log.info(f"  Net {pin.net.name} updated: {pin.net.geom} with {new_segment=}")  # [line for line in net.geom.geoms]
+
+            pin.geom = new_pin_geom
 
         log.info(f"  Final geom: {inst.geom}, orient: {inst.orient}")
         for name, pin in inst.pins.items():
             log.info(f"  Pin {name}: {pin.geom}")
 
-    def _plot_net_geometry(self, net, geom, stage):
-        """
-        Plots the geometry of a net at a given stage for debugging.
-        """
+    def _plot_net_geometry(self, net, geom, stage, old_geom=None, all_macros=None):
         fig, ax = plt.subplots()
         ax.set_title(f"Net: {net.name} - Stage: {stage}")
+        log.info(f"Plotting net {net.name} - Stage: {stage}")
 
-        # Plot wires
+        if all_macros:
+            for macro in all_macros:
+                if macro and not macro.is_empty:
+                    x, y = macro.exterior.xy
+                    ax.fill(x, y, alpha=0.3, fc="gray", ec="black")
+
+        if old_geom and not old_geom.is_empty:
+            if hasattr(old_geom, "geoms"):
+                for line in old_geom.geoms:
+                    x, y = line.xy
+                    ax.plot(x, y, "k-", alpha=0.3)
+            elif isinstance(old_geom, LineString):
+                x, y = old_geom.xy
+                ax.plot(x, y, "k-", alpha=0.3)
+
         if geom and not geom.is_empty:
             if hasattr(geom, "geoms"):
                 for line in geom.geoms:
@@ -136,351 +147,439 @@ class LayoutOptimizer:
             elif isinstance(geom, LineString):
                 x, y = geom.xy
                 ax.plot(x, y, "b-")
-            breakpoint()
 
-        # Plot pins
         pin_coords = [tuple(p.geom.coords[0]) for p in net.pins]
         if pin_coords:
             x, y = zip(*pin_coords)
             ax.plot(x, y, "ro", markersize=5)
 
         ax.set_aspect("equal", "datalim")
-
-        # Create directory if it doesn't exist
         output_dir = "data/images/beautify_plots"
         os.makedirs(output_dir, exist_ok=True)
-
-        filename = os.path.join(output_dir, f"net_{net.name}_{stage}.png")
+        filename = os.path.join(output_dir, f"net_{net.name.replace('/', '_')}_{stage}.png")
         plt.savefig(filename)
         plt.close(fig)
         log.info(f"  Saved plot: {filename}")
+        if geom and hasattr(geom, "geoms"):
+            log.info(f"  Net {net.name} geom: {[line for line in geom.geoms]}")
 
     def _snap_to_grid(self, geom):
-        """
-        Snaps all coordinates of a geometry to the nearest integer.
-        """
         if geom is None or geom.is_empty:
             return geom
 
         def snap_coords(coords):
             return [(round(x), round(y)) for x, y in coords]
 
+        if isinstance(geom, Point):
+            return Point(snap_coords(geom.coords)[0])
         if isinstance(geom, LineString):
             return LineString(snap_coords(geom.coords))
-        elif isinstance(geom, MultiLineString):
+        if isinstance(geom, MultiLineString):
             return MultiLineString([LineString(snap_coords(line.coords)) for line in geom.geoms])
-        elif isinstance(geom, Point):
-            return Point(snap_coords([geom.coords[0]])[0])
-        else:
-            return geom
+        return geom
 
     def beautify_routes(self):
-        """
-        Main pipeline to beautify all routed nets.
-        """
         log.info("Starting route beautification...")
-        all_macros = [inst.geom for inst in self.db.top_module.get_all_instances().values()]
-        macros_idx = self._build_spatial_index(all_macros)
-        clearance = 1
+        all_macros = {inst.name: inst.geom for inst in self.db.top_module.get_all_instances().values()}
+        clearance = 2.0
+        routed_net_geoms = []
+        epsilon = -1e-9  # A small negative buffer to shrink macros slightly
 
-        for net in self.db.top_module.nets.values():
-            if not net.geom or net.geom.is_empty:
+        # Sort nets by name for deterministic routing order
+        nets_to_route = sorted(self.db.top_module.nets.values(), key=lambda n: n.num_conn)
+        # nets_to_route = [self.db.top_module.nets["Net__U1_PA10_A2_D2_"]]
+
+        for net in nets_to_route:
+            if not net.pins or len(net.pins) < 2:
                 continue
+
             log.info(f"Beautifying net {net.name}")
-            self._plot_net_geometry(net, net.geom, "initial")
+            self._plot_net_geometry(net, net.geom, "initial", all_macros=all_macros.values())
 
-            connected_geom = self._force_connectivity(net, macros_idx, clearance)
-            self._plot_net_geometry(net, connected_geom, "after_connectivity")
-
-            snapped_geom = self._snap_to_grid(connected_geom)
-            log.info(f"  Geom after snapping to grid: {snapped_geom}")
-            self._plot_net_geometry(net, snapped_geom, "after_snapping")
-
-            # Skip stub removal for now
-            cleaned_geom = snapped_geom
-
-            merged_geom = self.merge_collinear_segments(cleaned_geom)
-            log.info(f"  Geom after merging: {merged_geom}")
-            self._plot_net_geometry(net, merged_geom, "after_merge")
-
-            jog_straightened_geom = self.straighten_jogs(merged_geom, macros_idx, clearance)
-            orthogonal_geom = self.convert_diagonals(jog_straightened_geom, all_macros, macros_idx, clearance)
-            final_geom = self.merge_duplicate_or_parallel_wires(orthogonal_geom)
-            aligned_geom = self.align_rows_and_columns(final_geom)
-
-            if isinstance(aligned_geom, LineString):
-                aligned_geom = MultiLineString([aligned_geom])
-
-            # Snap pins to the grid before the final connectivity check
             for pin in net.pins:
                 pin.geom = self._snap_to_grid(pin.geom)
 
-            self._check_connectivity(net, aligned_geom)
-            self._plot_net_geometry(net, aligned_geom, "final")
-            net.geom = aligned_geom
+            # --- Obstacle Calculation ---
+            # Find the macros connected to the current net's pins
+            current_pin_macros = {self._get_pin_macro(p) for p in net.pins if self._get_pin_macro(p)}
 
-        self.resolve_crossings_between_nets(clearance)
+            obstacles = []
+            # Add all other macros, buffered by clearance, as obstacles
+            for macro in all_macros.values():
+                if macro and macro not in current_pin_macros:
+                    obstacles.append(macro.buffer(clearance))
 
-    def _force_connectivity(self, net, macros_idx, clearance):
-        """
-        Ensures all pins in a net are part of the same connected component.
-        """
-        if not net.pins or len(net.pins) <= 1:
-            return net.geom
+            # Add the current net's own macros, but shrunken slightly.
+            # This allows the router to connect to pins on the boundary but not route through the macro.
+            for macro in current_pin_macros:
+                obstacles.append(macro.buffer(epsilon))
+
+            # Add all previously routed nets, buffered by clearance, as obstacles
+            if routed_net_geoms:
+                obstacles.append(unary_union(routed_net_geoms).buffer(clearance))
+
+            obstacle_union = unary_union(obstacles) if obstacles else None
+            # --- End Obstacle Calculation ---
+
+            log.info(f"astar b {net.name}")
+            new_geom = self.reroute_net_with_astar(net, obstacle_union)
+            log.info(f"astar c {net.name}")
+
+            if new_geom and not new_geom.is_empty:
+                merged_geom = self.merge_collinear_segments(new_geom)
+                if isinstance(merged_geom, LineString):
+                    merged_geom = MultiLineString([merged_geom])
+
+                self._plot_net_geometry(net, merged_geom, "after_astar", old_geom=net.geom, all_macros=all_macros.values())
+                self._check_connectivity(net, merged_geom)
+                net.geom = merged_geom
+                routed_net_geoms.append(merged_geom)  # Add to obstacles for the next net
+            else:
+                log.warning(f"  Routing failed for net {net.name}, keeping original geometry.")
+                self._plot_net_geometry(net, net.geom, "final_failed", all_macros=all_macros.values())
+
+    def reroute_net_with_astar(self, net, obstacle_union):
+        pins = list(net.pins)
+        pin_geoms = [p.geom for p in pins]
+        if len(pin_geoms) < 2:
+            return None
+
+        # Build a Minimum Spanning Tree (MST) to define the primary connection topology
+        pin_graph = nx.Graph()
+        for i in range(len(pin_geoms)):
+            for j in range(i + 1, len(pin_geoms)):
+                p1 = pin_geoms[i]
+                p2 = pin_geoms[j]
+                dist = abs(p1.x - p2.x) + abs(p1.y - p2.y)
+                pin_graph.add_edge(i, j, weight=dist)
+        mst = nx.minimum_spanning_tree(pin_graph)
+
+        # --- Pass 1: Route all MST edges independently ---
+        routed_segments = []
+        for u, v in mst.edges():
+            start_pin = pin_geoms[u]
+            end_pin = pin_geoms[v]
+            path = self._astar_path(start_pin, end_pin, obstacle_union)
+            if len(path) > 1:
+                routed_segments.append(LineString(path))
+
+        if not routed_segments:
+            log.warning(f"    Initial A* routing failed for all segments in net {net.name}")
+            return None
+
+        # --- Pass 2: Connect any disconnected sub-trees ---
+        final_route_geom = unary_union(routed_segments)
 
         g = nx.Graph()
-        pin_nodes = {tuple(p.geom.coords[0]): p for p in net.pins}
-        g.add_nodes_from(pin_nodes.keys())
-
-        lines = []
-        if net.geom and hasattr(net.geom, "geoms"):
-            lines = list(net.geom.geoms)
-
+        lines = [final_route_geom] if isinstance(final_route_geom, LineString) else list(final_route_geom.geoms)
         for line in lines:
             for i in range(len(line.coords) - 1):
-                p1 = tuple(line.coords[i])
-                p2 = tuple(line.coords[i + 1])
-                g.add_edge(p1, p2)
+                g.add_edge(line.coords[i], line.coords[i + 1])
 
         components = list(nx.connected_components(g))
-        if len(components) <= 1:
-            return net.geom  # Already connected
 
-        log.warning(f"  Net {net.name} has {len(components)} disconnected components. Forcing connectivity.")
+        if len(components) > 1:
+            log.info(f"    Net {net.name} requires stitching. Found {len(components)} disconnected components.")
+            main_component_geom = unary_union([LineString(list(c)) for c in components[:-1]])
 
-        # Find the largest component (by number of pins)
-        components.sort(key=lambda c: len(c.intersection(pin_nodes.keys())), reverse=True)
-        main_component = components[0]
+            stitch_lines = []
+            last_component_geom = LineString(list(components[-1]))
 
-        new_lines = list(net.geom.geoms)
+            path = self._astar_path_to_geometry(Point(last_component_geom.coords[0]), main_component_geom, obstacle_union)
+            if path:
+                stitch_lines.append(LineString(path))
 
-        for component in components[1:]:
-            # Find a pin in this outlier component
-            outlier_pin_node = None
-            for node in component:
-                if node in pin_nodes:
-                    outlier_pin_node = node
-                    break
+            final_route_geom = unary_union([final_route_geom] + stitch_lines)
 
-            if not outlier_pin_node:
-                # This component has no pins, just routing geometry. It can be discarded.
+        return final_route_geom
+
+    def _astar_path(self, start_point, end_point, obstacle_union):
+        start = (round(start_point.x), round(start_point.y))
+        end = (round(end_point.x), round(end_point.y))
+        log.info(f"  begin A* from {start} to {end}")
+
+        pq = [(0, start, [start], (0, 0))]
+        # Visited needs to store the path to prevent cycles that are longer
+        # but arrive at the same point. Using g_cost for this.
+        visited = {}
+
+        def is_obstacle(p_tuple):
+            if p_tuple == start or p_tuple == end:
+                return False
+            if obstacle_union is None or obstacle_union.is_empty:
+                return False
+            return obstacle_union.contains(Point(p_tuple))
+
+        while pq:
+            f_cost, current, path, direction = heapq.heappop(pq)
+            log.info(f"    Visiting {current} with path {path} and direction {direction}")
+
+            g_cost = len(path) - 1
+
+            # If we have found a better or equal-length path to this node before, skip.
+            if visited.get(current, float("inf")) <= g_cost:
                 continue
+            visited[current] = g_cost
 
-            # Find the nearest node in the main component to this outlier pin
-            min_dist = float("inf")
-            closest_main_node = None
-            for main_node in main_component:
-                dist = Point(outlier_pin_node).distance(Point(main_node))
-                if dist < min_dist:
-                    min_dist = dist
-                    closest_main_node = main_node
+            if current == end:
+                log.info(f"  A* path found from {start} to {end}")
+                return path
 
-            # Create a simple L-shaped route
-            p1 = Point(outlier_pin_node)
-            p2 = Point(closest_main_node)
-            new_lines.append(LineString([p1, Point(p1.x, p2.y)]))
-            new_lines.append(LineString([Point(p1.x, p2.y), p2]))
+            for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
+                new_direction = (dx, dy)
+                neighbor = (current[0] + dx, current[1] + dy)
 
-        return MultiLineString(new_lines)
+                if is_obstacle(neighbor):
+                    continue
+
+                new_g_cost = g_cost + 1
+
+                # Check if the neighbor has been visited with a shorter or equal path
+                if visited.get(neighbor, float("inf")) <= new_g_cost:
+                    continue
+
+                turn_penalty = 5 if direction != (0, 0) and new_direction != direction else 0
+                h_cost = abs(neighbor[0] - end[0]) + abs(neighbor[1] - end[1])
+                new_f_cost = new_g_cost + h_cost + turn_penalty
+
+                new_path = path + [neighbor]
+                heapq.heappush(pq, (new_f_cost, neighbor, new_path, new_direction))
+
+        log.warning(f"  A* failed to find a path from {start} to {end}. Falling back to diagonal.")
+        return [start_point.coords[0], end_point.coords[0]]
+
+    def _astar_path_to_geometry(self, start_point, target_geom, obstacle_union):
+        start = (round(start_point.x), round(start_point.y))
+
+        # Create a set of all points on the target geometry for a quick lookup
+        target_points = set()
+        lines = (
+            [target_geom]
+            if isinstance(target_geom, LineString)
+            else (list(target_geom.geoms) if hasattr(target_geom, "geoms") else [])
+        )
+        for line in lines:
+            for i in range(len(line.coords) - 1):
+                p1 = line.coords[i]
+                p2 = line.coords[i + 1]
+                # Bresenham's line algorithm to get all integer points on the segment
+                x1, y1 = round(p1[0]), round(p1[1])
+                x2, y2 = round(p2[0]), round(p2[1])
+                dx = abs(x2 - x1)
+                sx = 1 if x1 < x2 else -1
+                dy = -abs(y2 - y1)
+                sy = 1 if y1 < y2 else -1
+                err = dx + dy
+                while True:
+                    target_points.add((x1, y1))
+                    if x1 == x2 and y1 == y2:
+                        break
+                    e2 = 2 * err
+                    if e2 >= dy:
+                        err += dy
+                        x1 += sx
+                    if e2 <= dx:
+                        err += dx
+                        y1 += sy
+
+        if not target_points:  # Handle case where target_geom is a Point
+            if isinstance(target_geom, Point):
+                target_points.add((round(target_geom.x), round(target_geom.y)))
+            else:
+                log.warning("A* target geometry is empty or invalid.")
+                return None
+
+        pq = [(0, start, [start], (0, 0))]
+        visited = {}
+
+        def is_obstacle(p_tuple):
+            if p_tuple == start:
+                return False
+            if obstacle_union is None or obstacle_union.is_empty:
+                return False
+            return obstacle_union.contains(Point(p_tuple))
+
+        while pq:
+            f_cost, current, path, direction = heapq.heappop(pq)
+
+            if current in target_points:
+                log.info(f"  A* path found from {start} to target geometry")
+                return path
+
+            g_cost = len(path) - 1
+
+            if visited.get((current, direction), float("inf")) <= g_cost:
+                continue
+            visited[(current, direction)] = g_cost
+
+            # Find the closest point in target_points to estimate heuristic
+            closest_target = min(target_points, key=lambda p: abs(current[0] - p[0]) + abs(current[1] - p[1]))
+
+            for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
+                new_direction = (dx, dy)
+                neighbor = (current[0] + dx, current[1] + dy)
+
+                if is_obstacle(neighbor):
+                    continue
+
+                new_g_cost = g_cost + 1
+                turn_penalty = 5 if direction != (0, 0) and new_direction != direction else 0
+                h_cost = abs(neighbor[0] - closest_target[0]) + abs(neighbor[1] - closest_target[1])
+                new_f_cost = new_g_cost + h_cost + turn_penalty
+
+                new_path = path + [neighbor]
+                heapq.heappush(pq, (new_f_cost, neighbor, new_path, new_direction))
+
+        log.warning(f"  A* failed to find a path from {start} to the target geometry.")
+        return None
+
+    def _decompose_into_segments(self, geom):
+        if geom is None or geom.is_empty:
+            return MultiLineString()
+
+        segments = []
+        lines_to_process = []
+        if isinstance(geom, LineString):
+            lines_to_process = [geom]
+        elif hasattr(geom, "geoms"):
+            lines_to_process = list(geom.geoms)
+
+        for line in lines_to_process:
+            coords = list(line.coords)
+            for i in range(len(coords) - 1):
+                segments.append(LineString([coords[i], coords[i + 1]]))
+
+        return MultiLineString(segments)
+
+    def _astar_path(self, start_point, end_point, obstacle_union):
+        start = (round(start_point.x), round(start_point.y))
+        end = (round(end_point.x), round(end_point.y))
+
+        pq = [(0, start, [start], (0, 0))]
+        visited = {}
+
+        def is_obstacle(p_tuple):
+            if p_tuple == start or p_tuple == end:
+                return False
+            if obstacle_union is None or obstacle_union.is_empty:
+                return False
+            return obstacle_union.contains(Point(p_tuple))
+
+        MAX_EXPANSIONS = 10000
+        expansions = 0
+        while pq:
+            expansions += 1
+            if expansions > MAX_EXPANSIONS:
+                log.warning(f"A* search aborted after {expansions} expansions — likely no path.")
+                break
+            f_cost, current, path, direction = heapq.heappop(pq)
+            log.info(f"    Visiting {current} with path {path} and direction {direction}")
+
+            if current == end:
+                log.info(f"  A* path found from {start} to {end}")
+                return path
+
+            g_cost = len(path) - 1
+
+            if visited.get((current, direction), float("inf")) <= g_cost:
+                continue
+            visited[(current, direction)] = g_cost
+
+            for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
+                new_direction = (dx, dy)
+                neighbor = (current[0] + dx, current[1] + dy)
+
+                if is_obstacle(neighbor):
+                    continue
+
+                new_g_cost = g_cost + 1
+                turn_penalty = 0
+                if direction != (0, 0) and new_direction != direction:
+                    turn_penalty = 5
+
+                h_cost = abs(neighbor[0] - end[0]) + abs(neighbor[1] - end[1])
+                new_f_cost = new_g_cost + h_cost + turn_penalty
+
+                new_path = path + [neighbor]
+                heapq.heappush(pq, (new_f_cost, neighbor, new_path, new_direction))
+
+        log.warning(f"  A* failed to find a path from {start} to {end}. Falling back to diagonal.")
+        return [start_point.coords[0], end_point.coords[0]]
 
     def _check_connectivity(self, net, geom):
-        """
-        Checks if all pins of a net are connected in the given geometry.
-        """
         if not net.pins:
             return True
-
         g = nx.Graph()
+        pin_nodes = {tuple(p.geom.coords[0]) for p in net.pins}
+        g.add_nodes_from(pin_nodes)
+        log.info(f"  Connectivity check PASS for net {net.name} with pins {pin_nodes}")
 
         lines = []
-        if hasattr(geom, "geoms"):
+        if geom and hasattr(geom, "geoms"):
             lines = geom.geoms
         elif isinstance(geom, LineString):
             lines = [geom]
 
         for line in lines:
             for i in range(len(line.coords) - 1):
-                p1 = tuple(line.coords[i])
-                p2 = tuple(line.coords[i + 1])
+                p1, p2 = tuple(line.coords[i]), tuple(line.coords[i + 1])
                 g.add_edge(p1, p2)
 
-        if g.number_of_nodes() == 0:
-            if len(net.pins) > 1:
-                log.warning(f"  Connectivity check FAIL for net {net.name}: No geometry left, but {len(net.pins)} pins exist.")
-                return False
-            return True
-
-        pin_nodes = {tuple(p.geom.coords[0]) for p in net.pins}
-
-        # Check if all pin nodes are in the graph
-        missing_pins = pin_nodes - set(g.nodes())
-        if missing_pins:
-            log.warning(f"  Connectivity check FAIL for net {net.name}: Pins {missing_pins} not in geometry graph.")
-
-        # Find the component containing the first pin
-        first_pin = next(iter(pin_nodes))
-        if first_pin not in g:
-            # Add pins to graph to ensure they are considered
-            g.add_nodes_from(pin_nodes)
-            if first_pin not in g:
-                log.warning(f"  Connectivity check FAIL for net {net.name}: First pin {first_pin} not in geometry graph.")
-                return False
-
-        components = list(nx.connected_components(g))
-
-        pin_component = None
-        for component in components:
-            if first_pin in component:
-                pin_component = component
-                break
-
-        if pin_component is None:
-            log.warning(f"  Connectivity check FAIL for net {net.name}: Could not find component for first pin.")
+        if not nx.is_connected(g):
+            log.warning(f"  Connectivity check FAIL for net {net.name}: Not connected.")
             return False
-
-        # Check if all other pins are in the same component
-        unconnected_pins = pin_nodes - pin_component
-        if unconnected_pins:
-            log.warning(
-                f"  Connectivity check FAIL for net {net.name}: Pins {unconnected_pins} are not connected to the rest of the net."
-            )
-            return False
-
         log.info(f"  Connectivity check PASS for net {net.name}")
         return True
 
-    def remove_loops_and_stubs(self, net, geom):
+    from shapely.geometry import LineString, MultiLineString
+
+    def ensure_multilinestring(self, geom):
         """
-        Remove redundant loops and dangling stubs within a single net.
+        Convert a LineString or MultiLineString to a MultiLineString.
+        Handles GeometryCollections by extracting all LineStrings.
         """
-        pins = {tuple(p.geom.coords[0]) for p in net.pins}
-        G = nx.Graph()
-        G.add_nodes_from(pins)
+        if geom.is_empty:
+            return MultiLineString([])
 
-        lines = []
-        if hasattr(geom, "geoms"):
-            lines = geom.geoms
-        elif isinstance(geom, LineString):
-            lines = [geom]
+        if geom.geom_type == "LineString":
+            return MultiLineString([geom])
 
-        for line in lines:
-            for i in range(len(line.coords) - 1):
-                p1 = tuple(line.coords[i])
-                p2 = tuple(line.coords[i + 1])
-                G.add_edge(p1, p2)
+        elif geom.geom_type == "MultiLineString":
+            return geom
 
-        # Remove stubs
-        stubs_removed = True
-        while stubs_removed:
-            stubs_removed = False
-            nodes_to_remove = []
-            for node in G.nodes():
-                if G.degree(node) == 1 and node not in pins:
-                    nodes_to_remove.append(node)
-            if nodes_to_remove:
-                G.remove_nodes_from(nodes_to_remove)
-                stubs_removed = True
+        elif geom.geom_type == "GeometryCollection":
+            # Extract only the line components
+            lines = [g for g in geom.geoms if g.geom_type in ("LineString", "MultiLineString")]
+            merged = []
+            for g in lines:
+                if g.geom_type == "LineString":
+                    merged.append(g)
+                else:  # MultiLineString
+                    merged.extend(g.geoms)
+            return MultiLineString(merged)
 
-        # Remove loops by finding MST for each connected component
-        new_edges = []
-        for component in nx.connected_components(G):
-            subgraph = G.subgraph(component)
-            mst = nx.minimum_spanning_tree(subgraph)
-            new_edges.extend(mst.edges())
-
-        new_lines = [LineString([u, v]) for u, v in new_edges]
-        return MultiLineString(new_lines) if new_lines else MultiLineString()
+        else:
+            raise TypeError(f"Unsupported geometry type for merge: {geom.geom_type}")
 
     def merge_collinear_segments(self, geom):
-        """
-        Merge consecutive or overlapping collinear wire segments.
-        """
-        if not hasattr(geom, "geoms"):
+        if geom is None or geom.is_empty:
             return geom
-        return linemerge(geom)
+        # First, merge connected lines into the fewest possible objects
+        mls = self.ensure_multilinestring(geom)
+        merged = linemerge(mls)
+        # Then, simplify the geometry to remove redundant collinear points
+        # A tolerance of 0.0 ensures only perfectly collinear points are removed.
+        if hasattr(merged, "simplify"):
+            return merged.simplify(0.0)
+        return merged
 
-    def straighten_jogs(self, geom, macros_idx, clearance):
-        """
-        Simplify small 90° jogs or zig-zags if they can be replaced by a straight line.
-        """
-        # This is a complex operation, so we'll start with a simple placeholder
-        # and build it out in the next steps.
-        return geom
-
-    def convert_diagonals(self, geom, all_macros, macros_idx, clearance):
-        """
-        Replace diagonal segments with equivalent orthogonal L-shaped connections.
-        """
-        if not hasattr(geom, "geoms"):
-            return geom
-
-        new_lines = []
-        for line in geom.geoms:
-            p1 = Point(line.coords[0])
-            p2 = Point(line.coords[1])
-
-            if p1.x == p2.x or p1.y == p2.y:
-                new_lines.append(line)
-                continue
-
-            # Diagonal line
-            l_path1 = LineString([p1, Point(p1.x, p2.y), p2])
-            l_path2 = LineString([p1, Point(p2.x, p1.y), p2])
-
-            is_safe1 = True
-            for i in macros_idx.intersection(l_path1.buffer(clearance).bounds):
-                if all_macros[i].intersects(l_path1.buffer(clearance)):
-                    is_safe1 = False
-                    break
-
-            if is_safe1:
-                new_lines.extend([LineString([p1, Point(p1.x, p2.y)]), LineString([Point(p1.x, p2.y), p2])])
-            else:
-                is_safe2 = True
-                for i in macros_idx.intersection(l_path2.buffer(clearance).bounds):
-                    if all_macros[i].intersects(l_path2.buffer(clearance)):
-                        is_safe2 = False
-                        break
-                if is_safe2:
-                    new_lines.extend([LineString([p1, Point(p2.x, p1.y)]), LineString([Point(p2.x, p1.y), p2])])
-                else:
-                    # Fallback to original diagonal
-                    new_lines.append(line)
-
-        return MultiLineString(new_lines) if new_lines else MultiLineString()
-
-    def fix_t_junctions(self, geom):
-        """
-        Normalize and align all T-junctions.
-        """
-        # Placeholder
-        return geom
-
-    def merge_duplicate_or_parallel_wires(self, geom):
-        """
-        Remove duplicate, overlapping, or near-parallel wire segments within the same net.
-        """
-        # Placeholder
-        return geom
-
-    def align_rows_and_columns(self, geom):
-        """
-        Snap endpoints of wires and pins to shared grid rows/columns for visual alignment.
-        """
-        # Placeholder
-        return geom
-
-    def resolve_crossings_between_nets(self, clearance):
-        """
-        Detect and resolve visual wire crossings between different nets.
-        """
-        # Placeholder
-        pass
+    def _get_pin_macro(self, pin):
+        for inst in self.db.top_module.get_all_instances().values():
+            if pin in inst.pins.values():
+                return inst.geom
+        return None
 
     def _build_spatial_index(self, geoms):
-        """
-        Build an R-tree index for fast intersection/overlap queries.
-        """
         idx = index.Index()
         for i, geom in enumerate(geoms):
             if geom and not geom.is_empty:
@@ -491,7 +590,11 @@ class LayoutOptimizer:
         for inst in self.db.top_module.get_all_instances().values():
             if len(inst.pins) == 2:
                 self.adjust_location(inst)
-        # self.db.geom2shape()
-        # self.beautify_routes()
-        self.db.geom2shape()
         breakpoint()
+        self.beautify_routes()
+
+        # Decompose the final, beautiful routes into simple segments for the writer
+        for net in self.db.top_module.nets.values():
+            net.geom = self._decompose_into_segments(net.geom)
+
+        self.db.geom2shape()

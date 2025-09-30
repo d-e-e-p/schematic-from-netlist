@@ -429,6 +429,7 @@ class NetlistOperationsMixin:
 
     def geom2shape(self):
         """Convert all geom objects to shape."""
+        self.clear_all_shapes()
         for collection in (
             self.top_module.get_all_instances().values(),
             self.top_module.get_all_nets().values(),

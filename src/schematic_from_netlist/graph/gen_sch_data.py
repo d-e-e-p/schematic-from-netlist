@@ -189,6 +189,8 @@ class GenSchematicData:
                 if inst.buffer_original_netname in self.db.nets_by_name:
                     net = self.db.nets_by_name[inst.buffer_original_netname]
                     for pt in points:
+                        if pt == pt_center:
+                            continue
                         segment = (pt_center, pt)
                         net.buffer_patch_points.append(segment)
                     logging.debug(f"Patched buffer {inst.name} with net {inst.buffer_original_netname=} {net.buffer_patch_points=}")
