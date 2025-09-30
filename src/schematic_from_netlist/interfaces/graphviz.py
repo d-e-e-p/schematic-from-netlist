@@ -3,6 +3,7 @@ import logging as log
 import os
 import re
 import warnings
+from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Dict, List, Tuple
 
@@ -95,6 +96,7 @@ class Graphviz:
         self.set_attributes(A)
         self.add_nodes(A, module)
         self.add_edges(A, module)
+        self.add_ranks(A, module)
         self.run_graphviz(A, module)
         self.extract_geometry(A, module)
 
@@ -163,13 +165,59 @@ class Graphviz:
                 attr["height"] = size_node
             A.add_node(inst.name, **attr)
 
+    def add_ranks(self, A, module):
+        # --- ranks based on similarity ---
+        # if there are module instances with same ref name and similar name, put them in the same rank
+
+        # --- Step 1: group instances by ref_name ---
+        ref_groups = defaultdict(list)
+        for name, inst in module.instances.items():
+            if not inst.is_buffer:
+                ref_groups[inst.module_ref].append(name)
+
+        # --- Step 2: for each ref_name group, find common prefixes ---
+        def common_prefix(a, b):
+            """Return common prefix string of a and b."""
+            prefix = os.path.commonprefix([a, b])
+            return prefix
+
+        log.info(f"ref_groups: {ref_groups=}")
+        for ref_name, inst_names in ref_groups.items():
+            if len(inst_names) < 2:
+                continue  # nothing to group
+
+            # Sort to stabilize grouping
+            inst_names.sort()
+
+            # Find all prefixes among instances
+            prefix_groups = defaultdict(list)
+            for i, name1 in enumerate(inst_names):
+                for name2 in inst_names[i + 1 :]:
+                    prefix = common_prefix(name1, name2)
+                    log.info(f"ref_name={ref_name}, name1={name1}, name2={name2}, prefix={prefix}")
+                    if len(prefix) > 0 and prefix not in ("R", "C", "L", "D"):
+                        prefix_groups[prefix].append(name1)
+                        prefix_groups[prefix].append(name2)
+
+            log.info(f"{prefix_groups=}")
+            # --- Step 4: create rank groups ---
+            for prefix, names in prefix_groups.items():
+                unique_names = sorted(set(names))
+                if len(unique_names) < 2:
+                    continue
+
+                sg_name = f"cluster_{prefix}"
+
+                A.add_subgraph(nbunch=unique_names, rank="same", name=sg_name)
+                log.info(f"rank group: ref_name={ref_name}, prefix={prefix}, size={len(unique_names)}")
+
     def run_graphviz(self, A, module):
         # Layout and extract size
         os.makedirs("data/dot", exist_ok=True)
         A.write(f"data/dot/pre_module_{module.name}.dot")
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", category=RuntimeWarning)
-            A.layout(prog="fdp", args="-y")
+            A.layout(prog="dot", args="-y")
         A.write(f"data/dot/post_module_{module.name}.dot")
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", category=RuntimeWarning)
@@ -427,9 +475,12 @@ class Graphviz:
     def set_attributes(self, A):
         """Sets graph, node, and edge attributes."""
         A.graph_attr.update(
-            # layout="dot",
+            layout="dot",
             K="0.2",
             maxiter="10000",
+            mclimit="10",  # allow more time for mincross optimization
+            nslimit="10",  # allow more time for network simplex
+            nslimit1="10",  # same for phase 3 placement
             overlap="vpsc",
             pack="true",
             packmode="graph",
