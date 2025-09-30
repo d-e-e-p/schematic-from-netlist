@@ -10,7 +10,7 @@ from typing import Dict, List, Optional
 
 from schematic_from_netlist.graph.graph_partition import Edge, HypergraphData
 
-from .netlist_structures import Cluster, Instance, Net, Pin, PinDirection
+from .netlist_structures import Cluster, Instance, Module, Net, Pin, PinDirection
 
 
 class NetlistOperationsMixin:
@@ -144,34 +144,41 @@ class NetlistOperationsMixin:
 
     def buffer_multi_fanout_nets(self):
         """Inserts buffers on nets with fanout > 1"""
-        logging.debug(f" before buffering: {self.get_design_statistics()}")
+        logging.info(f" before buffering: {self.get_design_statistics()}")
+        sorted_modules = sorted(self.modules.values(), key=lambda m: m.depth, reverse=True)
+        for module in sorted_modules:
+            if not module.is_leaf:
+                self.buffer_multi_fanout_nets_for_module(module)
 
-        if not self.top_module:
+        self._build_lookup_tables()
+        logging.info(f" after buffering: {self.get_design_statistics()}")
+
+    def buffer_multi_fanout_nets_for_module(self, module):
+        """Inserts buffers on nets with fanout > 1"""
+
+        nets_to_buffer = [net for net in module.nets.values() if net.num_conn > 2 and net.num_conn < self.fanout_threshold]
+        if len(nets_to_buffer) == 0:
             return
 
-        nets_to_buffer = [net for net in self.nets_by_name.values() if net.num_conn > 2 and net.num_conn < self.fanout_threshold]
-        logging.debug(f"instrumentation: Found {len(nets_to_buffer)} nets to buffer.")
+        module_ref = "FANOUT_BUFFER"
+        stub_module = Module(name=module_ref)
+        stub_module.is_leaf = True
 
+        logging.info(f"instrumentation: in {module.name} Found {len(nets_to_buffer)} nets to buffer.")
         for net in nets_to_buffer:
             original_net_name = net.name
             net.shape = []
-            logging.debug(f"instrumentation: Buffering net {original_net_name} with {net.num_conn} connections.")
-            self.buffered_nets_log[original_net_name] = {"old_pins": set(), "buffer_insts": [], "new_nets": []}
-
-            log = self.buffered_nets_log[original_net_name]
-            log["old_pins"] = net.pins.copy()
-
+            logging.debug(f"instrumentation: in {module.name} Buffering net {original_net_name} with {net.num_conn} connections.")
             i = 0
             buffer_name = f"{self.inserted_buf_prefix}{i}_{original_net_name}"
-            buffer_inst = self.top_module.add_instance(buffer_name, "FANOUT_BUFFER")
+            buffer_inst = module.add_instance(buffer_name, stub_module, module_ref)
             buffer_inst.is_buffer = True
             buffer_inst.buffer_original_netname = original_net_name
-            log["buffer_insts"].append(buffer_inst)
 
             pins_to_buffer = list(net.pins)
             for i, pin in enumerate(pins_to_buffer):
                 new_net_name = f"{original_net_name}{self.inserted_net_suffix}{i}"
-                new_net = self.top_module.add_net(new_net_name)
+                new_net = module.add_net(new_net_name)
                 new_net.is_buffered_net = True
                 new_net.buffer_original_netname = original_net_name
                 logging.debug(f"instrumentation: created net {new_net.name} derived from {new_net.buffer_original_netname}")
@@ -182,10 +189,6 @@ class NetlistOperationsMixin:
                 logging.debug(f"instrumentation: Moving pin {pin.full_name} from {net.name} to {new_net.name}")
                 net.remove_pin(pin)
                 new_net.add_pin(pin)
-                log["new_nets"].append(new_net)
-
-        self._build_lookup_tables()
-        logging.debug(f" after buffering: {self.get_design_statistics()}")
 
     def remove_multi_fanout_buffers(self):
         """Removes all buffers and restores original connectivity."""
@@ -308,6 +311,10 @@ class NetlistOperationsMixin:
     def dump_to_table(self, stage_name: str):
         """Dumps the netlist database to a CSV file."""
         # TODO: make this only operate in debug mode
+        current_value = getattr(self, "_table_counter", 0)
+        self._table_counter = current_value + 1
+
+        stage_name = f"{self._table_counter}_{stage_name}"
         output_dir = os.path.join("data", "tables")
         os.makedirs(output_dir, exist_ok=True)
 
@@ -318,15 +325,26 @@ class NetlistOperationsMixin:
 
         with open(filename, "w", newline="") as csvfile:
             writer = csv.writer(csvfile)
-            writer.writerow(["net.name", "net.id", "net.num_conn", "pin.full_name", "pin.instance.name", "pin.instance.id"])
-            sorted_nets = sorted(self.nets_by_name.values(), key=lambda n: n.name)
-            for net in sorted_nets:
-                if not net.pins:
-                    writer.writerow([net.name, net.id, net.num_conn, "", "", ""])
-                else:
-                    sorted_pins = sorted(list(net.pins), key=lambda p: p.full_name)
-                    for pin in sorted_pins:
-                        writer.writerow([net.name, net.id, net.num_conn, pin.full_name, pin.instance.name, pin.instance.id])
+            writer.writerow(
+                ["net.module.name", "net.name", "net.id", "net.num_conn", "pin.full_name", "pin.instance.name", "pin.instance.id"]
+            )
+            # Sort modules by name for consistent output
+            sorted_modules = sorted(self.modules.values(), key=lambda m: m.name)
+
+            for module in sorted_modules:
+                # Optional: write a header for the module
+                # writer.writerow([f"Module: {module.name}", "", "", "", "", "", ""])
+
+                sorted_nets = sorted(module.nets.values(), key=lambda n: n.name)
+                for net in sorted_nets:
+                    if not net.pins:
+                        writer.writerow([module.name, net.name, net.id, net.num_conn, "", "", ""])
+                    else:
+                        sorted_pins = sorted(list(net.pins), key=lambda p: p.full_name)
+                        for pin in sorted_pins:
+                            writer.writerow(
+                                [module.name, net.name, net.id, net.num_conn, pin.full_name, pin.instance.name, pin.instance.id]
+                            )
 
         dump_log = {
             net_name: {
@@ -461,3 +479,60 @@ class NetlistOperationsMixin:
             safe_name = re.sub(r"[^a-zA-Z0-9_]", "_", name)
             inst.module_ref_uniq = safe_name
             seen[inst.module_ref] = counter + 1
+
+    def determine_design_hierarchy(self) -> List[Module]:
+        """
+        Determines the design hierarchy, prints it, and returns a list of modules
+        sorted from bottom to top.
+        """
+        if not self.top_module:
+            print("No top module set.")
+            return []
+
+        # Build parent-child relationships
+        for module in self.modules.values():
+            for instance in module.instances.values():
+                child_module_name = instance.module_ref
+                if child_module_name in self.modules:
+                    child_module = self.modules[child_module_name]
+                    child_module.parent_module = module
+                    module.child_modules[child_module.name] = child_module
+                    logging.debug(f"  {module.name} -> {child_module.name}")
+
+        # Helper to print the hierarchy tree
+        def print_hierarchy(module, prefix=""):
+            print(f"{prefix}- {module.name}")
+            for child in module.child_modules.values():
+                print_hierarchy(child, prefix + "  ")
+
+        print("Design Hierarchy:")
+        print_hierarchy(self.top_module)
+
+        # Sort modules by depth (bottom-up)
+        depth_map = {}
+
+        def get_depth(module):
+            if module.name in depth_map:
+                return depth_map[module.name]
+            if not module.parent_module:
+                depth = 0
+            else:
+                depth = get_depth(module.parent_module) + 1
+            depth_map[module.name] = depth
+            return depth
+
+        for module in self.modules.values():
+            module.depth = get_depth(module)
+
+        sorted_modules = sorted(self.modules.values(), key=lambda m: depth_map[m.name], reverse=True)
+
+        # Find leaf modules by checking instances
+        leaf_modules = []
+        for module in self.modules.values():
+            has_child_modules = any(instance.module_ref in self.modules for instance in module.instances.values())
+            if not has_child_modules:
+                leaf_modules.append(module)
+                module.is_leaf = True
+        print(f"\nLeaf modules: {[module.name for module in leaf_modules]}")
+
+        return sorted_modules

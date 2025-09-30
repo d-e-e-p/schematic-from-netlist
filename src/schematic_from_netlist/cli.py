@@ -23,10 +23,11 @@ def load_netlist(netlist_file: str, debug: bool):
     verilog_parser = VerilogParser()
     db = verilog_parser.parse_and_store_in_db([netlist_file])
     db.debug = debug
-    db.dump_to_table("0_initial_parse")
+    db.dump_to_table("initial_parse")
+    db.determine_design_hierarchy()
 
     db.buffer_multi_fanout_nets()  # Insert fanout buffers
-    db.dump_to_table("1_after_initial_buffering")
+    db.dump_to_table("after_initial_buffering")
 
     return db
 
@@ -39,10 +40,10 @@ def partition_hypergraph(db, k: int, config_file: str):
     db.assign_to_groups(partition)
 
 
-def build_geometry(db):
+def produce_graph(db):
     """Build Graphviz layouts for groups and top-level interconnect."""
     gv = Graphviz(db)
-    db.geom_db = gv.get_layout_geom()
+    gv.generate_layout_figures()
 
 
 def generate_schematic(db, output_dir: str):
@@ -56,11 +57,11 @@ def generate_schematic(db, output_dir: str):
 
 def generate_steiner_buffers(db):
     db.remove_multi_fanout_buffers()
-    db.dump_to_table("4_final_state_after_buffer_removal")
+    db.dump_to_table("final_state_after_buffer_removal")
 
     group_maker = SteinerGroupMaker(db)
     group_maker.insert_route_guide_buffers()
-    db.dump_to_table("5_after_route_guide_insertion")
+    db.dump_to_table("after_route_guide_insertion")
 
 
 def optimize_layout(db):
@@ -92,7 +93,7 @@ def main():
     os.makedirs(os.path.dirname(log_file), exist_ok=True)
 
     handler = colorlog.StreamHandler()
-    handler.setFormatter(colorlog.ColoredFormatter("%(log_color)s%(name)s:%(funcName)s:%(message)s"))
+    handler.setFormatter(colorlog.ColoredFormatter("%(log_color)s%(levelname)s:%(funcName)s:%(message)s"))
 
     file_handler = logging.FileHandler(log_file, mode="w")
     file_handler.setFormatter(logging.Formatter("%(levelname)s - %(funcName)s - %(name)s - %(message)s"))
@@ -108,24 +109,10 @@ def main():
     logging.info(f"Processing netlist file: {args.netlist_file}")
 
     db = load_netlist(args.netlist_file, args.debug)
-    partition_hypergraph(db, args.k, args.config)
+    produce_graph(db)
 
-    db.stage = "pass0"
-    build_geometry(db)
-    generate_schematic(db, args.output_dir)
-
-    db.stage = "pass1"
-    generate_steiner_buffers(db)
-    build_geometry(db)
-    generate_schematic(db, args.output_dir)
-
-    db.stage = "pass2"
-    optimize_layout(db)
-    writer = LTSpiceWriter(db)
-    writer.produce_schematic(args.output_dir)
-
-    # db.remove_multi_fanout_buffers()
-    # db.dump_to_table("5_final_state_after_buffer_removal")
+    db.remove_multi_fanout_buffers()
+    db.dump_to_table("final_state_after_buffer_removal")
 
     logging.info("Run Complete.")
 

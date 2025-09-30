@@ -25,6 +25,24 @@ class NetType(Enum):
 
 
 # -----------------------------
+# Port
+# -----------------------------
+@dataclass
+class Port:
+    """Represents ports on modules"""
+
+    name: str
+    direction: PinDirection
+    module: Module
+    bit_width: int = 1
+    bit_range: Optional[Tuple[int, int]] = None  # (msb, lsb)
+
+    fig: Optional[Tuple[float, float]] = None
+    shape: Optional[Tuple[int, int]] = None
+    geom: Optional[Point] = None
+
+
+# -----------------------------
 # Pin
 # -----------------------------
 @dataclass
@@ -33,10 +51,12 @@ class Pin:
 
     name: str
     direction: PinDirection
-    instance: "Instance"
+    instance: Instance
     net: Optional["Net"] = None
     bit_width: int = 1
     bit_range: Optional[Tuple[int, int]] = None  # (msb, lsb)
+
+    fig: Optional[Tuple[float, float]] = None
     shape: Optional[Tuple[int, int]] = None
     geom: Optional[Point] = None
 
@@ -77,11 +97,13 @@ class Net:
     pins: Set[Pin] = field(default_factory=set)
     id: int = -1
     num_conn: int = 0
-    shape: List[Tuple[Tuple[int, int], Tuple[int, int]]] = field(default_factory=list)
-    geom: Optional[MultiLineString] = None
     is_buffer_wire: bool = False
     buffer_original_netname: Optional[str] = None
     buffer_patch_points: List[Tuple[Tuple[int, int], Tuple[int, int]]] = field(default_factory=list)
+
+    fig: List[Tuple[Tuple[int, int], Tuple[int, int]]] = field(default_factory=list)
+    shape: List[Tuple[Tuple[int, int], Tuple[int, int]]] = field(default_factory=list)
+    geom: Optional[MultiLineString] = None
 
     def __post_init__(self):
         self.full_name = f"{self.module.full_name}.{self.name}"
@@ -162,18 +184,21 @@ class Instance:
     """Represents an instance of a module"""
 
     name: str
+    module: Module
     module_ref: str
     parent_module: Module
     pins: Dict[str, Pin] = field(default_factory=dict)
     parameters: Dict[str, Any] = field(default_factory=dict)
     id: int = -1
     partition: int = -1
-    shape: Optional[Tuple[int, int, int, int]] = None
-    geom: Optional[Polygon] = None
     orient: str = "R0"
     is_buffer: bool = False
     buffer_original_netname: Optional[str] = None
     module_ref_uniq: Optional[str] = None
+
+    fig: Optional[Tuple[float, float, float, float]] = None
+    shape: Optional[Tuple[int, int, int, int]] = None
+    geom: Optional[Polygon] = None
 
     def __post_init__(self):
         self.full_name = f"{self.parent_module.full_name}/{self.name}"
@@ -242,9 +267,14 @@ class Module:
     parent_module: Optional[Module] = None
     instances: Dict[str, Instance] = field(default_factory=dict)
     nets: Dict[str, Net] = field(default_factory=dict)
-    ports: Dict[str, Pin] = field(default_factory=dict)
+    ports: Dict[str, Port] = field(default_factory=dict)
     child_modules: Dict[str, Module] = field(default_factory=dict)
-    clusters: Dict[int, Cluster] = field(default_factory=dict)
+    depth: int = 0
+    is_leaf: bool = False
+
+    fig: Optional[Tuple[float, float, float, float]] = None
+    shape: Optional[Tuple[int, int, int, int]] = None
+    geom: Optional[Polygon] = None
 
     def __post_init__(self):
         self.full_name = f"{self.parent_module.full_name}/{self.name}" if self.parent_module else self.name
@@ -263,8 +293,8 @@ class Module:
     def remove_net(self, net_name: str) -> Optional[Net]:
         return self.nets.pop(net_name, None)
 
-    def add_instance(self, inst_name: str, module_ref: str) -> Instance:
-        instance = Instance(name=inst_name, module_ref=module_ref, parent_module=self)
+    def add_instance(self, inst_name: str, module: Module, module_ref: str) -> Instance:
+        instance = Instance(name=inst_name, module=module, module_ref=module_ref, parent_module=self)
         self.instances[inst_name] = instance
         return instance
 
@@ -276,9 +306,8 @@ class Module:
                     pin.net.remove_pin(pin)
         return instance
 
-    def add_port(self, port_name: str, direction: PinDirection) -> Pin:
-        module_inst = Instance(f"__{self.name}__", self.name, self)
-        port = Pin(port_name, direction, module_inst)
+    def add_port(self, port_name: str, direction: PinDirection) -> Port:
+        port = Port(port_name, direction, self)
         self.ports[port_name] = port
         return port
 
@@ -298,7 +327,7 @@ class Module:
 
     def get_all_pins(self, recursive: bool = True) -> Dict[str, Pin]:
         """Return all pins in this module (and optionally from all submodules)."""
-        all_pins: Dict[str, Pin] = self.ports.copy()  # start with top-level module ports
+        all_pins = {}
 
         # Add pins from instances
         for inst in self.instances.values():

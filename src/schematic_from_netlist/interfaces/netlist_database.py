@@ -75,6 +75,7 @@ class NetlistDatabase(NetlistOperationsMixin):
 
         traverse_module(self.top_module)
 
+        """
         instances_by_partition = defaultdict(list)
         for _, inst in self.inst_by_name.items():
             instances_by_partition[inst.partition].append(inst)
@@ -82,6 +83,7 @@ class NetlistDatabase(NetlistOperationsMixin):
         self.top_module.clusters.clear()
         for part_id, inst_list in instances_by_partition.items():
             self.top_module.clusters[part_id] = Cluster(id=part_id, instances=inst_list)
+        """
 
 
 # Example usage and helper functions

@@ -1,6 +1,6 @@
+import logging
 import os
 import sys
-import logging
 from optparse import OptionParser
 
 import pyverilog
@@ -9,16 +9,8 @@ from pyverilog.vparser.parser import parse
 
 # the next line can be removed after installation
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from schematic_from_netlist.interfaces.netlist_database import (
-    Instance,
-    Module,
-    Net,
-    NetlistDatabase,
-    NetType,
-    Pin,
-    PinDirection,
-)
 from schematic_from_netlist.graph.graph_partition import HypergraphPartitioner
+from schematic_from_netlist.interfaces.netlist_database import Instance, Module, Net, NetlistDatabase, NetType, Pin, PinDirection
 
 
 class VerilogParser:
@@ -29,7 +21,7 @@ class VerilogParser:
     def _clean_name(self, name):
         """Strip backslashes from names."""
         if isinstance(name, str):
-            return name.replace('\\', '')
+            return name.replace("\\", "")
         return name
 
     def parse_and_store_in_db(self, filelist, include_path=None, define=None):
@@ -115,7 +107,7 @@ class VerilogParser:
                         # Create a generic port, direction might be unknown (default to INOUT)
                         stub_module.add_port(f"PIN{i}", PinDirection.INOUT)
                     self.db.modules[inst.module_ref] = stub_module
-        
+
         self.db._build_lookup_tables()
         return self.db
 
@@ -133,14 +125,18 @@ class VerilogParser:
             if isinstance(item, Decl):
                 for decl in item.list:
                     if isinstance(decl, Wire):
-                        module.add_net(self._clean_name(decl.name), NetType.WIRE)
+                        net = module.add_net(self._clean_name(decl.name), NetType.WIRE)
+                        net.module = module
                     elif isinstance(decl, Reg):
-                        module.add_net(self._clean_name(decl.name), NetType.REG)
+                        net = module.add_net(self._clean_name(decl.name), NetType.REG)
+                        net.module = module
                     elif isinstance(decl, Supply):
                         if decl.value.value == "0":
-                            module.add_net(self._clean_name(decl.name), NetType.SUPPLY0)
+                            net = module.add_net(self._clean_name(decl.name), NetType.SUPPLY0)
+                            net.module = module
                         else:
-                            module.add_net(self._clean_name(decl.name), NetType.SUPPLY1)
+                            net = module.add_net(self._clean_name(decl.name), NetType.SUPPLY1)
+                            net.module = module
 
         # Process instances
         for item in module_node.items:
@@ -152,7 +148,8 @@ class VerilogParser:
                         msb, lsb = self.get_width_range(inst.array)
                         for i in range(lsb, msb + 1):
                             inst_name = f"{self._clean_name(inst.name)}[{i}]"
-                            instance = module.add_instance(inst_name, module_ref_name)
+                            inst_module = self.db.modules.get(module_ref_name)
+                            instance = module.add_instance(inst_name, inst_module, module_ref_name)
                             for j, port_conn in enumerate(inst.portlist):
                                 port_name = self._clean_name(port_conn.portname)
                                 if not port_name:
@@ -181,7 +178,11 @@ class VerilogParser:
                     else:
                         inst_name = self._clean_name(inst.name)
                         module_ref_name = self._clean_name(inst.module)
-                        instance = module.add_instance(inst_name, module_ref_name)
+                        inst_module = self.db.modules.get(module_ref_name)
+                        instance = module.add_instance(inst_name, inst_module, module_ref_name)
+                        if module_ref:
+                            module.child_modules[module_ref.name] = module_ref
+                            module_ref.parent = module
                         for i, port_conn in enumerate(inst.portlist):
                             port_name = self._clean_name(port_conn.portname)
                             if not port_name:
@@ -262,7 +263,9 @@ class VerilogParser:
             if hasattr(instance, "portlist") and instance.portlist:
                 for i, port in enumerate(instance.portlist):
                     if isinstance(port, PortArg):
-                        port_name = self._clean_name(port.portname) or (expected_ports[i] if i < len(expected_ports) else f"port{i}")
+                        port_name = self._clean_name(port.portname) or (
+                            expected_ports[i] if i < len(expected_ports) else f"port{i}"
+                        )
 
                         if port.argname:
                             net_name = self.get_signal_name(port.argname)
@@ -280,7 +283,7 @@ def main():
     INFO = "Verilog code parser"
     VERSION = pyverilog.__version__
     USAGE = "Usage: python example_parser.py file ..."
-    logging.basicConfig(level=logging.INFO, format='%(levelname)s:%(name)s:%(message)s')
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s:%(message)s")
 
     def showVersion():
         logging.info(INFO)
@@ -308,8 +311,10 @@ def main():
     parser = VerilogParser()
     db = parser.parse_and_store_in_db(filelist, options.include, options.define)
 
+    db.determine_design_hierarchy()
+
     hypergraph_data = db.build_hypergraph_data()
-    
+
     # Partition the hypergraph
     k = 2  # Number of partitions
     ini_file = "km1_kKaHyPar_sea20.ini"
@@ -319,9 +324,9 @@ def main():
     # Dump the partitioned graph to a JSON file
     partitioner.dump_graph_to_json(k, partition)
 
-
     db.generate_ids()
     import pprint
+
     logging.debug(pprint.pformat(db.id_by_netname))
     logging.debug(pprint.pformat(db.id_by_instname))
 

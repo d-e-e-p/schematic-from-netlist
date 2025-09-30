@@ -1,5 +1,5 @@
 import json
-import logging
+import logging as log
 import os
 import re
 import warnings
@@ -71,7 +71,7 @@ class ParseJson:
             except (KeyError, IndexError, AttributeError, ValueError, TypeError):
                 continue
 
-        logging.info(f"Parsed {len(geom_db.ports)} ports and {len(geom_db.nets)} nets from graph.")
+        log.info(f"Parsed {len(geom_db.ports)} ports and {len(geom_db.nets)} nets from graph.")
         geom_db.write_geom_db_report()
         return geom_db
 
@@ -81,9 +81,99 @@ class Graphviz:
         self.db = db
         self.output_dir = "data/json"
 
-    def get_layout_geom(self):
-        geom_db = self.build_graphviz_data()
-        return geom_db
+    def generate_layout_figures(self):
+        sorted_modules = sorted(self.db.modules.values(), key=lambda m: m.depth, reverse=True)
+        for module in sorted_modules:
+            if not module.is_leaf:
+                self.generate_module_layout(module)
+
+    def generate_module_layout(self, module):
+        log.info(f"Generating layout for module {module.name}")
+        os.makedirs("data/png", exist_ok=True)
+
+        A = pgv.AGraph(directed=True, strict=False, rankdir="TB", ratio="auto")
+        self.set_attributes(A)
+        self.add_nodes(A, module)
+        self.add_edges(A, module)
+        self.run_graphviz(A, module)
+        self.extract_geometry(A, module)
+
+    def add_edges(self, A, module):
+        # Add nodes for instances in the cluster, tagging them if they are buffers
+        add_stubs = False
+        # Add edges for internal nets
+        for net in module.nets.values():
+            pins = list(net.pins)
+            if len(pins) > 1:
+                src = pins[0]
+                for dst in pins[1:]:
+                    A.add_edge(
+                        src.instance.name,
+                        dst.instance.name,
+                        label=net.name,
+                        headlabel=dst.full_name,
+                        taillabel=src.full_name,
+                    )
+            elif len(pins) == 1:
+                if add_stubs:
+                    pin = pins[0]
+                    stub_name = f"stub_{pin.full_name}".replace("/", "_")
+                    A.add_node(stub_name, shape="point", width=0.01, height=0.01)
+                    A.add_edge(
+                        pin.instance.name,
+                        stub_name,
+                        label=net.name,
+                        headlabel=pin.full_name,
+                        taillabel=pin.full_name,
+                    )
+
+    def add_nodes(self, A, module):
+        # --- Node size scaling based on graph degree ---
+        size_min_macro = 0.5
+        size_buffer = 0.2
+        size_factor_per_pin = 0.2  #  ie 200-pin macro will be 20x20
+
+        def scale_macro_size(degree):
+            if degree <= 3:
+                return size_min_macro
+            size_node = size_min_macro * size_factor_per_pin * degree
+            return round(size_node, 1)
+
+        for inst in module.instances.values():
+            attr = {}
+            attr["fixedsize"] = True
+
+            is_leaf = not inst.module or inst.module.is_leaf
+
+            if not is_leaf:
+                fig = inst.module.fig
+                attr["shape"] = "box"
+                attr["width"] = round(fig[0] / 72, 1)
+                attr["height"] = round(fig[1] / 72, 1)
+
+            elif inst.is_buffer:
+                attr["shape"] = "circle"
+                attr["width"] = size_buffer
+                attr["height"] = size_buffer
+            else:
+                attr["shape"] = "box"
+                degree = len(inst.pins)
+                size_node = scale_macro_size(degree)
+                attr["width"] = size_node
+                attr["height"] = size_node
+            A.add_node(inst.name, **attr)
+
+    def run_graphviz(self, A, module):
+        # Layout and extract size
+        os.makedirs("data/dot", exist_ok=True)
+        A.write(f"data/dot/pre_module_{module.name}.dot")
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=RuntimeWarning)
+            A.layout(prog="fdp", args="-y")
+        A.write(f"data/dot/post_module_{module.name}.dot")
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=RuntimeWarning)
+            A.draw(f"data/png/post_module_{module.name}.png", format="png")
 
     def build_graphviz_data(self):
         """
@@ -107,13 +197,13 @@ class Graphviz:
 
         for cluster_id, cluster in self.db.top_module.clusters.items():
             A = pgv.AGraph(directed=True, strict=False, rankdir="TB", ratio="auto")
-            self._set_attributes(A)
+            self.set_attributes(A)
 
             instances_in_cluster = cluster.instances
             inst_names = [inst.name for inst in instances_in_cluster]
             buffer_inst_names = [inst.name for inst in instances_in_cluster if inst.is_buffer]
-            logging.info(f"Performing layout for cluster {cluster_id} with {buffer_inst_names=}")
-            logging.info(f"Performing layout for cluster {cluster_id} with {inst_names=}")
+            log.info(f"Performing layout for cluster {cluster_id} with {buffer_inst_names=}")
+            log.info(f"Performing layout for cluster {cluster_id} with {inst_names=}")
 
             # Add nodes for instances in the cluster, tagging them if they are buffers
             for inst in instances_in_cluster:
@@ -225,7 +315,7 @@ class Graphviz:
     def _perform_global_layout(self):
         """Performs layout on the clusters as blocks."""
         A = pgv.AGraph(directed=True, strict=False, rankdir="TB", ratio="auto")
-        self._set_attributes(A)
+        self.set_attributes(A)
 
         # Add a node for each cluster
         for cluster_id, cluster in self.db.top_module.clusters.items():
@@ -334,13 +424,13 @@ class Graphviz:
 
         return final_geom_db
 
-    def _set_attributes(self, A):
+    def set_attributes(self, A):
         """Sets graph, node, and edge attributes."""
         A.graph_attr.update(
-            layout="fdp",
+            # layout="dot",
             K="0.2",
             maxiter="10000",
-            overlap="false",
+            overlap="vpsc",
             pack="true",
             packmode="graph",
             sep="+2,2",
@@ -365,8 +455,15 @@ class Graphviz:
         )
 
     def _extract_geometry(self, A):
+        pass
+
+    def extract_geometry(self, A, module):
         """Extracts geometry from the graph."""
-        geom_db = GeomDB()
+
+        bb = A.graph_attr["bb"]
+        if bb:
+            xmin, ymin, xmax, ymax = map(float, bb.split(","))
+            module.fig = (abs(xmax - xmin), abs(ymax - ymin))
 
         for node in A.nodes():
             if node.name.startswith("stub_") or node.name.startswith("cluster_"):
@@ -382,7 +479,7 @@ class Graphviz:
                 ymin = y - h / 2
                 xmax = x + w / 2
                 ymax = y + h / 2
-                geom_db.instances[node.name] = (xmin, ymin, xmax, ymax)
+                module.instances[node.name].fig = (xmin, ymin, xmax, ymax)
 
         def parse_edge_pin_positions(edge):
             pos_string = edge.attr.get("pos")
@@ -414,6 +511,7 @@ class Graphviz:
 
             return tail_coord, head_coord, segments
 
+        all_pins = module.get_all_pins(recursive=False)
         for edge in A.edges():
             tail_coord, head_coord, wire_segments = parse_edge_pin_positions(edge)
             tail_pin = edge.attr.get("taillabel")
@@ -421,12 +519,10 @@ class Graphviz:
             net_name = edge.attr.get("label")
             # order is important because for open nets head and tail labels are the same
             if head_pin and head_coord:
-                geom_db.ports[head_pin] = head_coord
+                pin = all_pins.get(head_pin)
+                pin.fig = head_coord
             if tail_pin and tail_coord:
-                geom_db.ports[tail_pin] = tail_coord
+                pin = all_pins.get(tail_pin)
+                pin.fig = tail_coord
             if net_name:
-                if net_name in geom_db.nets:
-                    geom_db.nets[net_name].extend(wire_segments)
-                else:
-                    geom_db.nets[net_name] = wire_segments
-        return geom_db
+                module.nets[net_name].fig.extend(wire_segments)
