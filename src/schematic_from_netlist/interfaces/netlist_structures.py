@@ -287,6 +287,7 @@ class Module:
     busses: Dict[str, Bus] = field(default_factory=dict)
     depth: int = 0
     is_leaf: bool = False
+    is_stub: bool = True
 
     fig: Optional[Tuple[float, float, float, float]] = None
     shape: Optional[Tuple[int, int, int, int]] = None
