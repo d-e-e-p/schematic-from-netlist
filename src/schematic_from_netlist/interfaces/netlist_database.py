@@ -3,7 +3,7 @@ from collections import defaultdict
 from typing import Dict, List, Optional, Tuple
 
 from .netlist_operations import NetlistOperationsMixin
-from .netlist_structures import Cluster, Instance, Module, Net, NetType, Pin, PinDirection
+from .netlist_structures import Bus, Cluster, Instance, Module, Net, NetType, Pin, PinDirection
 
 
 class NetlistDatabase(NetlistOperationsMixin):

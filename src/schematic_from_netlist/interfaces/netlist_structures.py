@@ -25,6 +25,16 @@ class NetType(Enum):
 
 
 # -----------------------------
+# Bus
+# -----------------------------
+@dataclass
+class Bus:
+    name: str = ""
+    bit_width: int = 1
+    bit_range: Optional[Tuple[int, int]] = None  # (msb, lsb)
+
+
+# -----------------------------
 # Port
 # -----------------------------
 @dataclass
@@ -34,8 +44,7 @@ class Port:
     name: str
     direction: PinDirection
     module: Module
-    bit_width: int = 1
-    bit_range: Optional[Tuple[int, int]] = None  # (msb, lsb)
+    bus: Optional[Bus] = None
 
     fig: Optional[Tuple[float, float]] = None
     shape: Optional[Tuple[int, int]] = None
@@ -53,8 +62,7 @@ class Pin:
     direction: PinDirection
     instance: Instance
     net: Optional["Net"] = None
-    bit_width: int = 1
-    bit_range: Optional[Tuple[int, int]] = None  # (msb, lsb)
+    bus: Optional[Bus] = None
 
     fig: Optional[Tuple[float, float]] = None
     shape: Optional[Tuple[int, int]] = None
@@ -92,8 +100,7 @@ class Net:
     name: str
     module: "Module"
     net_type: NetType = NetType.WIRE
-    bit_width: int = 1
-    bit_range: Optional[Tuple[int, int]] = None
+    bus: Optional[Bus] = None
     pins: Set[Pin] = field(default_factory=set)
     id: int = -1
     num_conn: int = 0
@@ -189,6 +196,7 @@ class Instance:
     parent_module: Module
     pins: Dict[str, Pin] = field(default_factory=dict)
     parameters: Dict[str, Any] = field(default_factory=dict)
+    bus: Optional[Bus] = None
     id: int = -1
     partition: int = -1
     orient: str = "R0"
@@ -283,10 +291,12 @@ class Module:
         self,
         net_name: str,
         net_type: NetType = NetType.WIRE,
-        bit_width: int = 1,
-        bit_range: Optional[Tuple[int, int]] = None,
     ) -> Net:
-        net = Net(name=net_name, module=self, net_type=net_type, bit_width=bit_width, bit_range=bit_range)
+        net = Net(
+            name=net_name,
+            module=self,
+            net_type=net_type,
+        )
         self.nets[net_name] = net
         return net
 

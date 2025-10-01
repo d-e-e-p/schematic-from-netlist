@@ -181,7 +181,7 @@ class Graphviz:
             prefix = os.path.commonprefix([a, b])
             return prefix
 
-        log.info(f"ref_groups: {ref_groups=}")
+        log.debug(f"ref_groups: {ref_groups=}")
         for ref_name, inst_names in ref_groups.items():
             if len(inst_names) < 2:
                 continue  # nothing to group
@@ -194,12 +194,12 @@ class Graphviz:
             for i, name1 in enumerate(inst_names):
                 for name2 in inst_names[i + 1 :]:
                     prefix = common_prefix(name1, name2)
-                    log.info(f"ref_name={ref_name}, name1={name1}, name2={name2}, prefix={prefix}")
+                    log.debug(f"ref_name={ref_name}, name1={name1}, name2={name2}, prefix={prefix}")
                     if len(prefix) > 0 and prefix not in ("R", "C", "L", "D"):
                         prefix_groups[prefix].append(name1)
                         prefix_groups[prefix].append(name2)
 
-            log.info(f"{prefix_groups=}")
+            log.debug(f"{prefix_groups=}")
             # --- Step 4: create rank groups ---
             for prefix, names in prefix_groups.items():
                 unique_names = sorted(set(names))
@@ -209,7 +209,7 @@ class Graphviz:
                 sg_name = f"cluster_{prefix}"
 
                 A.add_subgraph(nbunch=unique_names, rank="same", name=sg_name)
-                log.info(f"rank group: ref_name={ref_name}, prefix={prefix}, size={len(unique_names)}")
+                log.debug(f"rank group: ref_name={ref_name}, prefix={prefix}, size={len(unique_names)}")
 
     def run_graphviz(self, A, module):
         # Layout and extract size

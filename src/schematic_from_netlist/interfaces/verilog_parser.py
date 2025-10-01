@@ -7,10 +7,17 @@ import pyverilog
 from pyverilog.vparser.ast import *
 from pyverilog.vparser.parser import parse
 
-# the next line can be removed after installation
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from schematic_from_netlist.graph.graph_partition import HypergraphPartitioner
-from schematic_from_netlist.interfaces.netlist_database import Instance, Module, Net, NetlistDatabase, NetType, Pin, PinDirection
+from schematic_from_netlist.interfaces.netlist_database import (
+    Bus,
+    Instance,
+    Module,
+    Net,
+    NetlistDatabase,
+    NetType,
+    Pin,
+    PinDirection,
+)
 
 
 class VerilogParser:
@@ -124,19 +131,28 @@ class VerilogParser:
         for item in module_node.items:
             if isinstance(item, Decl):
                 for decl in item.list:
-                    if isinstance(decl, Wire):
-                        net = module.add_net(self._clean_name(decl.name), NetType.WIRE)
+                    if isinstance(decl, Wire) or isinstance(decl, Reg) or isinstance(decl, Supply):
+                        net_name = self._clean_name(decl.name)
+                        net_type = NetType.WIRE
+                        if isinstance(decl, Reg):
+                            net_type = NetType.REG
+                        elif isinstance(decl, Supply):
+                            net_type = NetType.SUPPLY0 if decl.value.value == "0" else NetType.SUPPLY1
+
+                        net = module.add_net(net_name, net_type)
                         net.module = module
-                    elif isinstance(decl, Reg):
-                        net = module.add_net(self._clean_name(decl.name), NetType.REG)
-                        net.module = module
-                    elif isinstance(decl, Supply):
-                        if decl.value.value == "0":
-                            net = module.add_net(self._clean_name(decl.name), NetType.SUPPLY0)
-                            net.module = module
-                        else:
-                            net = module.add_net(self._clean_name(decl.name), NetType.SUPPLY1)
-                            net.module = module
+
+                        if hasattr(decl, "width") and decl.width:
+                            msb, lsb = self.get_width_range(decl.width)
+                            if isinstance(msb, int) and isinstance(lsb, int):
+                                bus = Bus(name=net_name, bit_range=(msb, lsb), bit_width=abs(msb - lsb) + 1)
+                                net.bus = bus
+                                # Create individual nets for each bit of the bus
+                                for i in range(min(lsb, msb), max(lsb, msb) + 1):
+                                    bit_net_name = f"{net_name}[{i}]"
+                                    bit_net = module.add_net(bit_net_name, net_type)
+                                    bit_net.module = module
+                                    bit_net.bus = bus
 
         # Process instances
         for item in module_node.items:
@@ -200,11 +216,41 @@ class VerilogParser:
                                 net = module.add_net(net_name)
 
                             direction = PinDirection.INOUT
+                            port_as_net = None
                             if module_ref and port_name in module_ref.ports:
                                 direction = module_ref.ports[port_name].direction
+                                port_as_net = module_ref.nets.get(port_name)
 
-                            pin = instance.add_pin(port_name, direction)
-                            instance.connect_pin(port_name, net)
+                            if (
+                                net
+                                and hasattr(net, "bus")
+                                and net.bus
+                                and port_as_net
+                                and hasattr(port_as_net, "bus")
+                                and port_as_net.bus
+                                and net.bus.bit_width == port_as_net.bus.bit_width
+                            ):
+                                # Bus-to-bus connection
+                                net_msb, net_lsb = net.bus.bit_range
+                                port_msb, port_lsb = port_as_net.bus.bit_range
+
+                                common_indices_min = max(min(net_lsb, net_msb), min(port_lsb, port_msb))
+                                common_indices_max = min(max(net_lsb, net_msb), max(port_lsb, port_msb))
+
+                                for i in range(common_indices_min, common_indices_max + 1):
+                                    bit_net_name = f"{net.name}[{i}]"
+                                    bit_net = module.nets.get(bit_net_name)
+                                    if not bit_net:
+                                        # This should not happen if part 1 is correct
+                                        continue
+
+                                    port_bit_name = f"{port_name}[{i}]"
+                                    pin = instance.add_pin(port_bit_name, direction)
+                                    instance.connect_pin(port_bit_name, bit_net)
+                            else:
+                                # Scalar connection
+                                pin = instance.add_pin(port_name, direction)
+                                instance.connect_pin(port_name, net)
 
     def list_connections(self, ast):
         """List all net connections in the format: net inst/pin1 inst/pin2 ..."""
