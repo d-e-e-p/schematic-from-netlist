@@ -102,7 +102,7 @@ class VerilogReorder:
         if node.kind == pyslang.SyntaxKind.HierarchyInstantiation:
             module_type = self._get_instantiated_type(node)
             instances = self._get_instance_list(node)
-            log.info(f"Found instantiation: {module_type=} {instances=}")
+            log.debug(f"Found instantiation: {module_type=} {instances=}")
 
             for inst_name, port_connections in instances:
                 module_info.instances.append(
@@ -315,7 +315,6 @@ class VerilogReorder:
                 for item in self._get_children(child):
                     if item.kind == pyslang.SyntaxKind.HierarchicalInstance:
                         inst_name = self._get_instance_name(item)
-                        log.info(f"  Found instance: {inst_name}")
                         port_connections = self._get_port_connections(item)
                         if inst_name:
                             instances.append((inst_name, port_connections))
@@ -387,17 +386,16 @@ class SystemVerilogParser:
         os.makedirs(output_dir, exist_ok=True)
         basename = Path(filename).name
         output_file = os.path.join(output_dir, f"reordered_{basename}")
-        log.info(f"Reordered verilog: {output_file}")
 
         # Parse syntax tree and reorder
-        log.info("Step 1: Parsing syntax tree...")
+        log.debug("Step 1: Parsing syntax tree...")
         self.reorderer.parse_syntax_tree(filename)
 
-        log.info("Step 2: Generating reordered file...")
+        log.debug("Step 2: Generating reordered file...")
         reordered_file = self.reorderer.generate_reordered_file(output_file)
 
         # Now compile the reordered file
-        log.info("Step 3: Compiling with pyslang...")
+        log.debug("Step 3: Compiling with pyslang...")
         tree = pyslang.SyntaxTree.fromFile(reordered_file)
         self.compilation = pyslang.Compilation()
         self.compilation.addSyntaxTree(tree)
