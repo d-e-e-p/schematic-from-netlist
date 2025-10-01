@@ -32,6 +32,10 @@ class Bus:
     name: str = ""
     bit_width: int = 1
     bit_range: Optional[Tuple[int, int]] = None  # (msb, lsb)
+    # A dictionary to store references to the individual Bit Nets it contains.
+    # Key: Bit index (e.g., 7, 6, 0)
+    # Value: The single-bit Net object
+    bit_nets: Dict[int, "Net"] = field(default_factory=dict)
 
 
 # -----------------------------
@@ -44,7 +48,7 @@ class Port:
     name: str
     direction: PinDirection
     module: Module
-    bus: Optional[Bus] = None
+    parent_bus: Optional[Bus] = None  # Reference to the full Bus object (Layer 1)
 
     fig: Optional[Tuple[float, float]] = None
     shape: Optional[Tuple[int, int]] = None
@@ -62,7 +66,8 @@ class Pin:
     direction: PinDirection
     instance: Instance
     net: Optional["Net"] = None
-    bus: Optional[Bus] = None
+    parent_bus: Optional[Bus] = None  # Reference to the full Bus object (Layer 1)
+    bit_index: Optional[int] = None  # The specific index within the parent bus (e.g., 3)
 
     fig: Optional[Tuple[float, float]] = None
     shape: Optional[Tuple[int, int]] = None
@@ -100,7 +105,9 @@ class Net:
     name: str
     module: "Module"
     net_type: NetType = NetType.WIRE
-    bus: Optional[Bus] = None
+    parent_bus: Optional[Bus] = None  # Reference to the full Bus object (Layer 1)
+    bit_index: Optional[int] = None  # The specific index within the parent bus (e.g., 3)
+
     pins: Set[Pin] = field(default_factory=set)
     id: int = -1
     num_conn: int = 0
@@ -277,6 +284,7 @@ class Module:
     nets: Dict[str, Net] = field(default_factory=dict)
     ports: Dict[str, Port] = field(default_factory=dict)
     child_modules: Dict[str, Module] = field(default_factory=dict)
+    busses: Dict[str, Bus] = field(default_factory=dict)
     depth: int = 0
     is_leaf: bool = False
 

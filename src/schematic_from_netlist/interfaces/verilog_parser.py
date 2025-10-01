@@ -1,13 +1,10 @@
-import logging
+import logging as log
 import os
+import re
 import sys
-from optparse import OptionParser
 
-import pyverilog
-from pyverilog.vparser.ast import *
-from pyverilog.vparser.parser import parse
+import pyslang
 
-from schematic_from_netlist.graph.graph_partition import HypergraphPartitioner
 from schematic_from_netlist.interfaces.netlist_database import (
     Bus,
     Instance,
@@ -23,358 +20,238 @@ from schematic_from_netlist.interfaces.netlist_database import (
 class VerilogParser:
     def __init__(self):
         self.db = NetlistDatabase()
-        self.module_ports = {}
 
     def _clean_name(self, name):
-        """Strip backslashes from names."""
+        """Strip backslashes and whitespace from names."""
         if isinstance(name, str):
-            return name.replace("\\", "")
+            return name.replace("\\\\", "").strip()
         return name
 
-    def parse_and_store_in_db(self, filelist, include_path=None, define=None):
-        ast, directives = parse(filelist, preprocess_include=include_path, preprocess_define=define)
-        self.store_ast_in_db(ast)
-        return self.db
+    def parse_and_store_in_db(self, filename):
+        """Parse SystemVerilog file and handle diagnostics"""
+        if not os.path.exists(filename):
+            raise IOError(f"File not found: {filename}")
 
-    def get_signal_name(self, signal):
-        """Extract signal name from various AST node types"""
-        if isinstance(signal, Identifier):
-            return self._clean_name(signal.name)
-        elif isinstance(signal, Pointer):
-            var_name = self.get_signal_name(signal.var)
-            ptr_str = self.get_signal_name(signal.ptr)
-            return f"{var_name}[{ptr_str}]"
-        elif isinstance(signal, Partselect):
-            var_name = self.get_signal_name(signal.var)
-            msb = self.get_signal_name(signal.msb) if signal.msb else ""
-            lsb = self.get_signal_name(signal.lsb) if signal.lsb else ""
-            return f"{var_name}[{msb}:{lsb}]"
-        elif isinstance(signal, Concat):
-            parts = [self.get_signal_name(part) for part in signal.list]
-            return "{" + ",".join(parts) + "}"
-        elif isinstance(signal, IntConst):
-            return str(signal.value)
-        else:
-            return str(signal)
+        tree = pyslang.SyntaxTree.fromFile(filename)
 
-    def get_width_range(self, width_obj):
-        """Extract range from Width object"""
-        if hasattr(width_obj, "msb") and hasattr(width_obj, "lsb"):
-            msb = self.get_signal_name(width_obj.msb)
-            lsb = self.get_signal_name(width_obj.lsb)
-            try:
-                return int(msb), int(lsb)
-            except (ValueError, TypeError):
-                return msb, lsb
-        return None, None
+        bag = pyslang.Bag()
+        options = pyslang.CompilationOptions()
+        options.languageVersion = pyslang.LanguageVersion.v1800_2017
+        bag.compilationOptions = options
 
-    def store_ast_in_db(self, ast):
-        # First pass: Collect module definitions
-        for node in ast.description.definitions:
-            if isinstance(node, ModuleDef):
-                module_name = self._clean_name(node.name)
-                module = Module(name=module_name)
-                self.db.modules[module_name] = module
-                if not self.db.top_module:
-                    self.db.set_top_module(module)
+        compilation = pyslang.Compilation(bag)
+        compilation.addSyntaxTree(tree)
 
-                # Collect ports
-                if node.portlist:
-                    for port in node.portlist.ports:
-                        if isinstance(port, Ioport):
-                            port_name = self._clean_name(port.first.name)
-                        else:
-                            port_name = self._clean_name(port.name)
-                        port_decl = self._find_decl_for_port(node, port_name)
-                        direction = PinDirection.INOUT  # Default
-                        if isinstance(port_decl, Input):
-                            direction = PinDirection.INPUT
-                        elif isinstance(port_decl, Output):
-                            direction = PinDirection.OUTPUT
+        all_diags = list(compilation.getAllDiagnostics())
+        has_errors = False
+        for diag in all_diags:
+            if diag.isError():
+                # Ignore UnknownModule errors, as we expect to see stubbed modules
+                if diag.code.name != "UnknownModule":
+                    log.error(f"Pyslang error: {diag.code} {diag.args} at {diag.location}")
+                    has_errors = True
+            else:
+                log.warning(str(diag))
 
-                        module.add_port(port_name, direction)
-                        # Also add as a net
-                        module.add_net(port_name)
+        if has_errors:
+            raise RuntimeError(f"Pyslang parsing failed with errors for {filename}")
 
-        # Second pass: Populate modules with instances, nets, and connections
-        for node in ast.description.definitions:
-            if isinstance(node, ModuleDef):
-                module_name = self._clean_name(node.name)
-                module = self.db.modules[module_name]
-                self._populate_module(module, node)
+        return self.store_in_db(compilation)
 
-        # Third pass: Create stub modules for undefined components
-        for module in list(self.db.modules.values()):
-            for inst in module.instances.values():
-                if inst.module_ref not in self.db.modules:
-                    logging.warning(f"Creating stub module for undefined component: {inst.module_ref}")
-                    stub_module = Module(name=inst.module_ref)
-                    # Infer ports from the instance's pins
-                    for i, pin in enumerate(inst.pins.values()):
-                        # Create a generic port, direction might be unknown (default to INOUT)
-                        stub_module.add_port(f"PIN{i}", PinDirection.INOUT)
-                    self.db.modules[inst.module_ref] = stub_module
-
+    def store_in_db(self, compilation):
+        """Store the compiled design into the netlist database."""
+        self._populate_db_from_compilation(compilation)
+        self.db.determine_design_hierarchy()
         self.db._build_lookup_tables()
         return self.db
 
-    def _find_decl_for_port(self, module_node, port_name):
-        for item in module_node.items:
-            if isinstance(item, Decl):
-                for decl in item.list:
-                    if hasattr(decl, "name") and self._clean_name(decl.name) == port_name:
-                        return decl
-        return None
+    def _populate_db_from_compilation(self, compilation):
+        """Extract all design information and populate the NetlistDatabase."""
+        root = compilation.getRoot()
 
-    def _populate_module(self, module, module_node):
-        # Process declarations (nets)
-        for item in module_node.items:
-            if isinstance(item, Decl):
-                for decl in item.list:
-                    if isinstance(decl, Wire) or isinstance(decl, Reg) or isinstance(decl, Supply):
-                        net_name = self._clean_name(decl.name)
-                        net_type = NetType.WIRE
-                        if isinstance(decl, Reg):
-                            net_type = NetType.REG
-                        elif isinstance(decl, Supply):
-                            net_type = NetType.SUPPLY0 if decl.value.value == "0" else NetType.SUPPLY1
+        for instance in root.topInstances:
+            self._process_instance_recursive(instance, parent_module_db=None, compilation=compilation)
 
-                        net = module.add_net(net_name, net_type)
-                        net.module = module
+        if not self.db.top_module and root.topInstances:
+            top_module_name = self._clean_name(root.topInstances[0].definition.name)
+            if top_module_name in self.db.modules:
+                self.db.set_top_module(self.db.modules[top_module_name])
 
-                        if hasattr(decl, "width") and decl.width:
-                            msb, lsb = self.get_width_range(decl.width)
-                            if isinstance(msb, int) and isinstance(lsb, int):
-                                bus = Bus(name=net_name, bit_range=(msb, lsb), bit_width=abs(msb - lsb) + 1)
-                                net.bus = bus
-                                # Create individual nets for each bit of the bus
-                                for i in range(min(lsb, msb), max(lsb, msb) + 1):
-                                    bit_net_name = f"{net_name}[{i}]"
-                                    bit_net = module.add_net(bit_net_name, net_type)
-                                    bit_net.module = module
-                                    bit_net.bus = bus
-
-        # Process instances
-        for item in module_node.items:
-            if isinstance(item, InstanceList):
-                for inst in item.instances:
-                    module_ref_name = self._clean_name(inst.module)
-                    module_ref = self.db.modules.get(module_ref_name)
-                    if inst.array:
-                        msb, lsb = self.get_width_range(inst.array)
-                        for i in range(lsb, msb + 1):
-                            inst_name = f"{self._clean_name(inst.name)}[{i}]"
-                            inst_module = self.db.modules.get(module_ref_name)
-                            instance = module.add_instance(inst_name, inst_module, module_ref_name)
-                            for j, port_conn in enumerate(inst.portlist):
-                                port_name = self._clean_name(port_conn.portname)
-                                if not port_name:
-                                    if module_ref and j < len(module_ref.ports):
-                                        port_name = list(module_ref.ports.keys())[j]
-                                    else:
-                                        port_name = f"PIN{j}"
-
-                                net_name = self.get_signal_name(port_conn.argname)
-                                if "[" in net_name and "]" in net_name:
-                                    base_name = net_name.split("[")[0]
-                                    connected_net_name = f"{base_name}[{i}]"
-                                else:
-                                    connected_net_name = net_name
-
-                                net = module.nets.get(connected_net_name)
-                                if not net:
-                                    net = module.add_net(connected_net_name)
-
-                                direction = PinDirection.INOUT
-                                if module_ref and port_name in module_ref.ports:
-                                    direction = module_ref.ports[port_name].direction
-
-                                pin = instance.add_pin(port_name, direction)
-                                instance.connect_pin(port_name, net)
-                    else:
-                        inst_name = self._clean_name(inst.name)
-                        module_ref_name = self._clean_name(inst.module)
-                        inst_module = self.db.modules.get(module_ref_name)
-                        instance = module.add_instance(inst_name, inst_module, module_ref_name)
-                        if module_ref:
-                            module.child_modules[module_ref.name] = module_ref
-                            module_ref.parent = module
-                        for i, port_conn in enumerate(inst.portlist):
-                            port_name = self._clean_name(port_conn.portname)
-                            if not port_name:
-                                if module_ref and i < len(module_ref.ports):
-                                    port_name = list(module_ref.ports.keys())[i]
-                                else:
-                                    port_name = f"PIN{i}"
-
-                            if not port_name:
-                                continue
-
-                            net_name = self.get_signal_name(port_conn.argname)
-                            net = module.nets.get(net_name)
-                            if not net:
-                                net = module.add_net(net_name)
-
-                            direction = PinDirection.INOUT
-                            port_as_net = None
-                            if module_ref and port_name in module_ref.ports:
-                                direction = module_ref.ports[port_name].direction
-                                port_as_net = module_ref.nets.get(port_name)
-
-                            if (
-                                net
-                                and hasattr(net, "bus")
-                                and net.bus
-                                and port_as_net
-                                and hasattr(port_as_net, "bus")
-                                and port_as_net.bus
-                                and net.bus.bit_width == port_as_net.bus.bit_width
-                            ):
-                                # Bus-to-bus connection
-                                net_msb, net_lsb = net.bus.bit_range
-                                port_msb, port_lsb = port_as_net.bus.bit_range
-
-                                common_indices_min = max(min(net_lsb, net_msb), min(port_lsb, port_msb))
-                                common_indices_max = min(max(net_lsb, net_msb), max(port_lsb, port_msb))
-
-                                for i in range(common_indices_min, common_indices_max + 1):
-                                    bit_net_name = f"{net.name}[{i}]"
-                                    bit_net = module.nets.get(bit_net_name)
-                                    if not bit_net:
-                                        # This should not happen if part 1 is correct
-                                        continue
-
-                                    port_bit_name = f"{port_name}[{i}]"
-                                    pin = instance.add_pin(port_bit_name, direction)
-                                    instance.connect_pin(port_bit_name, bit_net)
-                            else:
-                                # Scalar connection
-                                pin = instance.add_pin(port_name, direction)
-                                instance.connect_pin(port_name, net)
-
-    def list_connections(self, ast):
-        """List all net connections in the format: net inst/pin1 inst/pin2 ..."""
-        connections = self.find_net_connections(ast)
-
-        logging.info("\n=== Net Connections ===")
-        for net, connected_ports in connections.items():
-            if len(connected_ports) > 1:  # Only show nets with multiple connections
-                logging.info(f"{net} {' '.join(connected_ports)}")
-
-    def find_net_connections(self, ast):
+    def _process_instance_recursive(self, instance, parent_module_db, compilation):
         """
-        Traverse the AST to find net connections between instances and pins
-        Returns a dictionary mapping nets to connected instance/pin pairs
+        Recursively traverse the design hierarchy, dispatching to Pass 1 (declarations)
+        and Pass 2 (connections) helpers.
         """
-        connections = {}
+        definition = instance.definition
+        module_name = self._clean_name(definition.name)
 
-        # First pass: collect module port definitions
-        def collect_module_ports(node):
-            if isinstance(node, ModuleDef):
-                module_name = self._clean_name(node.name)
-                ports = []
+        # Pass 1: Process module declarations if this is the first time we see this module.
+        module_db = self.db.modules.get(module_name)
+        if not module_db:
+            module_db = Module(name=module_name)
+            self.db.modules[module_name] = module_db
+            self._process_module_declarations(module_db, instance)
 
-                if hasattr(node, "portlist") and node.portlist:
-                    for port in node.portlist.ports:
-                        if hasattr(port, "name"):
-                            ports.append(self._clean_name(port.name))
+        # Pass 2: Process instance connections if this instance is instantiated within a parent module.
+        if parent_module_db:
+            inst_name = self._clean_name(instance.name)
+            instance_db = parent_module_db.add_instance(inst_name, module_db, module_name)
+            if module_db:
+                parent_module_db.child_modules[module_db.name] = module_db
+                module_db.parent = parent_module_db
+            self._process_instance_connections(instance_db, instance, parent_module_db, compilation)
 
-                self.module_ports[module_name] = ports
+        # Recurse for sub-instances defined within the current module body.
+        for member in instance.body:
+            if member.kind == pyslang.SymbolKind.Instance:
+                self._process_instance_recursive(member, module_db, compilation)
 
-            if hasattr(node, "children"):
-                for child in node.children():
-                    if child:
-                        collect_module_ports(child)
+    def _process_module_declarations(self, module_db, instance):
+        """
+        PASS 1: Populate the module's busses, nets, and ports from its declarations.
+        """
+        for member in instance.body:
+            if member.kind == pyslang.SymbolKind.Port:
+                self._create_bus_and_nets(module_db, member, is_port=True)
+            elif member.kind in (pyslang.SymbolKind.Variable, pyslang.SymbolKind.Net):
+                self._create_bus_and_nets(module_db, member, is_port=False)
 
-        def traverse_node(node):
-            if isinstance(node, ModuleDef):
-                for child in node.children():
-                    traverse_node(child)
-            elif isinstance(node, InstanceList):
-                for instance in node.instances:
-                    if hasattr(instance, "portlist") and instance.portlist:
-                        traverse_instance_ports(instance)
-            elif hasattr(node, "children"):
-                for child in node.children():
-                    if child:
-                        traverse_node(child)
+    def _create_bus_and_nets(self, module_db, member, is_port=False):
+        """
+        Utility to create a Bus object and its constituent Net objects for a given
+        declaration (port or internal net).
+        """
+        name = self._clean_name(member.name)
+        is_bus = member.type.isPackedArray or member.type.isUnpackedArray
 
-        def traverse_instance_ports(instance):
-            instance_name = self._clean_name(instance.name) if instance.name else "unnamed_inst"
-            module_name = self._clean_name(instance.module)
-            is_array_instance = hasattr(instance, "array") and instance.array
+        parent_bus = None
+        if is_bus:
+            bit_range = member.type.getBitVectorRange()
+            msb, lsb = int(bit_range.left), int(bit_range.right)
+            parent_bus = Bus(name=name, bit_range=(msb, lsb), bit_width=abs(msb - lsb) + 1)
+            module_db.busses[name] = parent_bus
 
-            expected_ports = self.module_ports.get(module_name, [])
+            # Decompose the bus into single-bit nets
+            for i in range(min(lsb, msb), max(lsb, msb) + 1):
+                bit_net_name = f"{name}[{i}]"
+                if bit_net_name not in module_db.nets:
+                    bit_net = module_db.add_net(bit_net_name)
+                    bit_net.module = module_db
+                    bit_net.parent_bus = parent_bus
+                    bit_net.bit_index = i
+                    parent_bus.bit_nets[i] = bit_net
+        else:
+            # It's a scalar wire, create a single net
+            if name not in module_db.nets:
+                net = module_db.add_net(name)
+                net.module = module_db
 
-            if hasattr(instance, "portlist") and instance.portlist:
-                for i, port in enumerate(instance.portlist):
-                    if isinstance(port, PortArg):
-                        port_name = self._clean_name(port.portname) or (
-                            expected_ports[i] if i < len(expected_ports) else f"port{i}"
-                        )
+        if is_port:
+            direction = self._get_pyslang_port_direction(member.direction)
+            port = module_db.add_port(name, direction)
+            port.parent_bus = parent_bus
 
-                        if port.argname:
-                            net_name = self.get_signal_name(port.argname)
-                            connection_str = f"{instance_name}/{port_name}"
-                            if net_name not in connections:
-                                connections[net_name] = []
-                            connections[net_name].append(connection_str)
+    def _process_instance_connections(self, instance_db, instance, parent_module_db, compilation):
+        """
+        PASS 2: Resolve and create pin connections for a given instance.
+        """
+        for conn in instance.portConnections:
+            port_name = self._clean_name(conn.port.name)
+            if not conn.expression:
+                log.warning(f"Skipping port '{port_name}' on instance '{instance_db.name}' with no expression.")
+                continue
 
-        collect_module_ports(ast)
-        traverse_node(ast)
-        return connections
+            # Resolve the net name from the expression
+            net_name = None
+            symbol = conn.expression.getSymbolReference()
+            if symbol:
+                net_name = self._clean_name(symbol.name)
+            elif conn.expression.syntax:
+                net_name = self._clean_name(str(conn.expression.syntax))
+            else:
+                net_name = self._clean_name(str(conn.expression))
+
+            if not net_name:
+                log.warning(f"Could not determine net name for port '{port_name}' on instance '{instance_db.name}'.")
+                continue
+
+            direction = self._get_pyslang_port_direction(conn.port.direction)
+            is_port_bus = conn.port.type.isPackedArray or conn.port.type.isUnpackedArray
+
+            # ... (inside _process_instance_connections)
+            if is_port_bus:
+                port_range = conn.port.type.getBitVectorRange()
+                port_msb, port_lsb = int(port_range.left), int(port_range.right)
+
+                for i in range(abs(port_msb - port_lsb) + 1):
+                    port_bit_index = min(port_lsb, port_msb) + i
+                    bit_port_name = f"{port_name}[{port_bit_index}]"
+
+                    # Determine the target net name
+                    bit_net_name = None
+                    match = re.match(r"(\w+)\[(\d+):(\d+)\]", net_name)
+                    if match: # Slice: .A(B[7:4])
+                        bus_name, msb_str, lsb_str = match.groups()
+                        net_lsb = int(lsb_str)
+                        bit_net_name = f"{bus_name}[{net_lsb + i}]"
+                    else: # Whole bus: .A(B)
+                        bit_net_name = f"{net_name}[{port_bit_index}]"
+
+                    net = parent_module_db.nets.get(bit_net_name)
+                    if not net:
+                        log.warning(f"Net '{bit_net_name}' not found in module '{parent_module_db.name}'. Creating it.")
+                        net = parent_module_db.add_net(bit_net_name)
+                        net.module = parent_module_db
+                    
+                    instance_db.add_pin(bit_port_name, direction)
+                    instance_db.connect_pin(bit_port_name, net)
+            else: # Scalar connection
+                net = parent_module_db.nets.get(net_name)
+                if not net:
+                    log.warning(f"Net '{net_name}' not found in module '{parent_module_db.name}'. Creating it.")
+                    net = parent_module_db.add_net(net_name)
+                    net.module = parent_module_db
+
+                instance_db.add_pin(port_name, direction)
+                instance_db.connect_pin(port_name, net)
+
+
+    def _get_pyslang_port_direction(self, direction):
+        if direction == pyslang.ArgumentDirection.In:
+            return PinDirection.INPUT
+        elif direction == pyslang.ArgumentDirection.Out:
+            return PinDirection.OUTPUT
+        elif direction == pyslang.ArgumentDirection.InOut:
+            return PinDirection.INOUT
+        else:
+            return PinDirection.INOUT
 
 
 def main():
     INFO = "Verilog code parser"
-    VERSION = pyverilog.__version__
-    USAGE = "Usage: python example_parser.py file ..."
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s:%(message)s")
+    VERSION = pyslang.__version__
+    USAGE = "Usage: python verilog_parser.py file ..."
+    log.basicConfig(level=log.INFO, format="%(levelname)s:%(name)s:%(message)s")
 
-    def showVersion():
-        logging.info(INFO)
-        logging.info(VERSION)
-        logging.info(USAGE)
-        sys.exit()
+    if len(sys.argv) != 2:
+        log.error("Please provide a single Verilog file.")
+        log.info(USAGE)
+        sys.exit(1)
 
-    optparser = OptionParser()
-    optparser.add_option("-v", "--version", action="store_true", dest="showversion", default=False, help="Show the version")
-    optparser.add_option("-I", "--include", dest="include", action="append", default=[], help="Include path")
-    optparser.add_option("-D", dest="define", action="append", default=[], help="Macro Definition")
-    (options, args) = optparser.parse_args()
-
-    filelist = args
-    if options.showversion:
-        showVersion()
-
-    for f in filelist:
-        if not os.path.exists(f):
-            raise IOError("file not found: " + f)
-
-    if len(filelist) == 0:
-        showVersion()
+    filename = sys.argv[1]
 
     parser = VerilogParser()
-    db = parser.parse_and_store_in_db(filelist, options.include, options.define)
-
-    db.determine_design_hierarchy()
-
-    hypergraph_data = db.build_hypergraph_data()
-
-    # Partition the hypergraph
-    k = 2  # Number of partitions
-    ini_file = "km1_kKaHyPar_sea20.ini"
-    partitioner = HypergraphPartitioner(hypergraph_data)
-    partition = partitioner.run_partitioning(k, ini_file)
-
-    # Dump the partitioned graph to a JSON file
-    partitioner.dump_graph_to_json(k, partition)
-
-    db.generate_ids()
-    import pprint
-
-    logging.debug(pprint.pformat(db.id_by_netname))
-    logging.debug(pprint.pformat(db.id_by_instname))
+    try:
+        db = parser.parse_and_store_in_db(filename)
+        if db:
+            log.info("Parsing complete.")
+            if db.top_module:
+                log.info(f"Top module: {db.top_module.name}")
+            else:
+                log.warning("Could not determine top module.")
+    except (RuntimeError, IOError) as e:
+        log.error(e)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-pyverilog
+pyslang
 kahypar
 networkx
 pygraphviz
