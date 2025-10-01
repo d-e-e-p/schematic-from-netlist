@@ -163,13 +163,15 @@ class VerilogParser:
 
             # Resolve the net name from the expression
             net_name = None
-            symbol = conn.expression.getSymbolReference()
-            if symbol:
-                net_name = self._clean_name(symbol.name)
-            elif conn.expression.syntax:
+            if conn.expression.syntax:
                 net_name = self._clean_name(str(conn.expression.syntax))
             else:
-                net_name = self._clean_name(str(conn.expression))
+                symbol = conn.expression.getSymbolReference()
+                if symbol:
+                    net_name = self._clean_name(symbol.name)
+                else:
+                    # Last resort
+                    net_name = self._clean_name(str(conn.expression))
 
             if not net_name:
                 log.warning(f"Could not determine net name for port '{port_name}' on instance '{instance_db.name}'.")
