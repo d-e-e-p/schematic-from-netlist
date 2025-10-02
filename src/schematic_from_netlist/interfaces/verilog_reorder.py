@@ -34,10 +34,14 @@ class Instance:
     name: str
     module_ref: str
     pins: Set["Pin"] = field(default_factory=set, compare=False, hash=False)
+    parameters: Set[str] = field(default_factory=set, compare=False, hash=False)
 
     def add_pin(self, name, msb=0, lsb=0):
         pin = Pin(name, msb, lsb)
         self.pins.add(pin)
+
+    def add_parameter(self, param):
+        self.parameters.add(param)
 
 
 @dataclass
@@ -47,6 +51,7 @@ class Module:
     ports: Set[Port] = field(default_factory=set)
     level: int = 0
     is_stub: bool = False
+    parameters: Set[str] = field(default_factory=set)
 
     def add_port(self, name, direction, msb=0, lsb=0):
         port = Port(name, direction, msb, lsb)
@@ -77,7 +82,7 @@ class VerilogReorder:
         self.create_stubs(ast)
         output_filename = f"data/verilog/processed_{self.top_module_name}.v"
         self.write_ast(ast, output_filename)
-        return output_filename
+        return output_filename, self.top_module_name
 
     def create_stubs(self, ast):
         stubs = [module for module in self.modules.values() if module.is_stub]
@@ -89,7 +94,7 @@ class VerilogReorder:
                 else:
                     vport = self.modifier.create_port(port.name, port.direction, width=(port.msb, port.lsb))
                 portlist.append(vport)
-            vmodule = self.modifier.create_module(module_name=module.name, ports=portlist)
+            vmodule = self.modifier.create_module(module_name=module.name, ports=portlist, parameters=module.parameters)
             current_defs = list(ast.description.definitions)
             current_defs.append(vmodule)
             ast.description = vast.Description(tuple(current_defs))
@@ -155,6 +160,7 @@ class VerilogReorder:
                     logging.warning(f"Creating stub module for undefined component: {inst.module_ref}")
                     stub_module = Module(name=inst.module_ref)
                     stub_module.is_stub = True
+                    stub_module.parameters.update(inst.parameters)
                     # Infer ports from the instance's pins
                     for i, pin in enumerate(inst.pins):
                         # Create a generic port, direction might be unknown (default to INOUT)
@@ -180,6 +186,12 @@ class VerilogReorder:
                     inst_name = self._clean_name(inst.name)
                     module_ref_name = self._clean_name(inst.module)
                     instance = module.add_instance(inst_name, module_ref_name)
+                    # --- NEW CODE: PROCESS INSTANCE PARAMETERS ---
+                    if inst.parameterlist:
+                        # 'parameterlist' is a vast.ParamArgList, which contains vast.ParamArg objects
+                        for param_arg in inst.parameterlist:
+                            param_name = self._clean_name(param_arg.paramname)
+                            instance.add_parameter(param_name)
                     for port_arg in inst.portlist:
                         info = self.modifier.extract_portarg_with_width(port_arg, module_node)
                         w = info["connection_width"]

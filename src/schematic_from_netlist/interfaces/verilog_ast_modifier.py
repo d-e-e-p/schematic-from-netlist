@@ -4,6 +4,8 @@ Pyverilog: Adding new modules and instances to AST
 Demonstrates how to programmatically modify Verilog AST
 """
 
+from typing import List
+
 from pyverilog.ast_code_generator.codegen import ASTCodeGenerator
 from pyverilog.vparser.ast import *
 from pyverilog.vparser.parser import parse
@@ -453,7 +455,21 @@ class VerilogModifier:
 
         return self.ast
 
-    def create_module(self, module_name, ports=None, items=None):
+    def create_paramlist_from_strlist(self, param_names: List[str]) -> Paramlist:
+        """
+        Creates a pyverilog Paramlist node from a list of parameter names.
+        Each parameter is assigned a safe default value (IntConst('1')).
+        """
+
+        # Define a safe default value node for the parameter
+        default_value_node = IntConst("1")
+
+        # Use a list comprehension to create the list of vast.Param nodes
+        param_nodes = [Parameter(name=name, value=default_value_node, width=None, signed=None) for name in param_names]
+        paramlist = Paramlist(param_nodes)
+        return paramlist
+
+    def create_module(self, module_name, ports=None, items=None, parameters=None):
         """
         Create a new ModuleDef node
 
@@ -465,7 +481,7 @@ class VerilogModifier:
         Returns:
             ModuleDef node
         """
-        paramlist = Paramlist([], [])  # Empty parameter list
+        paramlist = self.create_paramlist_from_strlist(parameters or [])
         portlist = Portlist(ports or [])
 
         module = ModuleDef(name=module_name, paramlist=paramlist, portlist=portlist, items=items or [])
@@ -1171,4 +1187,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

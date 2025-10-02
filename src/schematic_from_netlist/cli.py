@@ -22,10 +22,10 @@ def load_netlist(netlist_file: str, debug: bool):
         raise FileNotFoundError(f"Netlist file not found: {netlist_file}")
 
     vr = VerilogReorder()
-    processed_file = vr.parse_and_create_stubs(netlist_file)
+    processed_file, top_module = vr.parse_and_create_stubs(netlist_file)
 
     vp = VerilogParser()
-    db = vp.parse_and_store_in_db(processed_file)
+    db = vp.parse_and_store_in_db(processed_file, top_module)
     db.debug = debug
     db.dump_to_table("initial_parse")
     db.determine_design_hierarchy()
