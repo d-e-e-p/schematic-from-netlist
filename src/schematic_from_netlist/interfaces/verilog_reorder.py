@@ -1,430 +1,194 @@
 import logging
 import os
-import re
-from collections import defaultdict, deque
-from pathlib import Path
+import sys
+from dataclasses import dataclass, field
+from optparse import OptionParser
+from typing import Any, Dict, List, Optional, Set, Tuple
 
-import pyslang
+import pyverilog.vparser.ast as vast
+from pyverilog.ast_code_generator.codegen import ASTCodeGenerator
+from pyverilog.vparser.parser import parse
+
+from schematic_from_netlist.interfaces.verilog_ast_modifier import VerilogModifier
 
 log = logging.getLogger(__name__)
 
 
-class ModuleInfo:
-    """Store module information from AST"""
+@dataclass(frozen=True)
+class Port:
+    name: str
+    direction: str
+    msb: int = 0
+    lsb: int = 0
 
-    def __init__(self, name, syntax_node):
-        self.name = name
-        self.syntax_node = syntax_node
-        self.dependencies = set()
-        self.instances = []  # (instance_name, module_type, port_connections)
+
+@dataclass(frozen=True)
+class Pin:
+    name: str
+    msb: int = 0
+    lsb: int = 0
+
+
+@dataclass(frozen=True)
+class Instance:
+    name: str
+    module_ref: str
+    pins: Set["Pin"] = field(default_factory=set, compare=False, hash=False)
+
+    def add_pin(self, name, msb=0, lsb=0):
+        pin = Pin(name, msb, lsb)
+        self.pins.add(pin)
+
+
+@dataclass
+class Module:
+    name: str = ""
+    instances: Set[Instance] = field(default_factory=set)
+    ports: Set[Port] = field(default_factory=set)
+    level: int = 0
+    is_stub: bool = False
+
+    def add_port(self, name, direction, msb=0, lsb=0):
+        port = Port(name, direction, msb, lsb)
+        self.ports.add(port)
+
+    def add_instance(self, name, module_ref):
+        instance = Instance(name, module_ref)
+        self.instances.add(instance)
+        return instance
 
 
 class VerilogReorder:
-    """Reorder modules using pyslang syntax tree (AST) before compilation"""
-
     def __init__(self):
-        self.modules = {}  # module_name -> ModuleInfo
-        self.syntax_tree = None
+        self.modules = {}
+        self.top_module_name = None
+        self.modifier = VerilogModifier("")
 
-    def parse_syntax_tree(self, filename):
-        """Parse file to get syntax tree (no compilation yet)"""
-        log.info(f"Parsing syntax tree from: {filename}")
+    def _clean_name(self, name):
+        """Strip backslashes from names."""
+        if isinstance(name, str):
+            return name.replace("\\", "")
+        return name
 
-        # Parse to syntax tree only (no semantic analysis)
-        self.syntax_tree = pyslang.SyntaxTree.fromFile(filename)
+    def parse_and_create_stubs(self, filename):
+        ast, _ = parse([filename])
+        self.modifier = VerilogModifier(ast)
+        self.walker(ast)
+        self.create_stubs(ast)
+        output_filename = f"data/verilog/processed_{self.top_module_name}.v"
+        self.write_ast(ast, output_filename)
+        return output_filename
 
-        # Check for syntax errors
-        if self.syntax_tree.diagnostics:
-            for diag in self.syntax_tree.diagnostics:
-                if diag.isError():
-                    log.error(f"Syntax error: {diag.code} {diag.args} at {diag.location}")
-                    raise RuntimeError("Syntax errors found")
+    def create_stubs(self, ast):
+        stubs = [module for module in self.modules.values() if module.is_stub]
+        for module in stubs:
+            portlist = []
+            for port in module.ports:
+                if port.msb == 0 and port.lsb == 0:
+                    vport = self.modifier.create_port(port.name, port.direction)
+                else:
+                    vport = self.modifier.create_port(port.name, port.direction, width=(port.msb, port.lsb))
+                portlist.append(vport)
+            vmodule = self.modifier.create_module(module_name=module.name, ports=portlist)
+            current_defs = list(ast.description.definitions)
+            current_defs.append(vmodule)
+            ast.description = vast.Description(tuple(current_defs))
 
-        # Walk the syntax tree to find modules
-        self._walk_syntax_tree(self.syntax_tree.root)
+        return ast
 
-        log.info(f"Found {len(self.modules)} modules")
+    def write_ast(self, ast, filename):
+        codegen = ASTCodeGenerator()
+        rslt = codegen.visit(ast)
+        os.makedirs(os.path.dirname(filename), exist_ok=True)
+        with open(filename, "w") as f:
+            f.write(rslt)
+        log.info(f"Reordered Verilog written to {filename}")
 
-        # Find instantiations in each module
-        for module_name, module_info in self.modules.items():
-            self._find_instantiations(module_info)
-
-    def _walk_syntax_tree(self, node):
-        """Recursively walk syntax tree to find module declarations"""
-        if node is None:
-            return
-
-        # Check if this is a module declaration
-        if node.kind == pyslang.SyntaxKind.ModuleDeclaration:
-            module_name = self._get_module_name(node)
-            log.info(f"found module with {module_name=}")
-            if module_name:
-                self.modules[module_name] = ModuleInfo(module_name, node)
-                log.debug(f"Found module: {module_name}")
-
-        # Recurse through children - handle different node types
-        children = self._get_children(node)
-        for child in children:
-            self._walk_syntax_tree(child)
-
-    def _get_children(self, node):
-        """Get child nodes handling different syntax node types"""
-        # CompilationUnit has 'members' not 'childNodes'
-        if hasattr(node, "members"):
-            return node.members
-        # Most other nodes have childNodes()
-        elif hasattr(node, "childNodes"):
-            return node.childNodes()
-        # Some nodes are iterable directly
-        elif hasattr(node, "__iter__") and not isinstance(node, str):
-            try:
-                return list(node)
-            except:
-                return []
-        return []
-
-    def _get_module_name(self, module_node):
-        """Extract module name from module declaration node"""
-        # Look for ModuleHeader -> NamedBlockClause -> Identifier
-        return module_node.header.name.value
-
-    def _find_instantiations(self, module_info):
-        """Find all instantiations within a module using AST"""
-        log.debug(f"Finding instantiations in module: {module_info.name}")
-        self._walk_for_instances(module_info.syntax_node, module_info)
-
-    def _walk_for_instances(self, node, module_info):
-        """Walk module AST to find HierarchyInstantiation nodes"""
-        if node is None:
-            return
-
-        # Found an instantiation
-        if node.kind == pyslang.SyntaxKind.HierarchyInstantiation:
-            module_type = self._get_instantiated_type(node)
-            instances = self._get_instance_list(node)
-            log.debug(f"Found instantiation: {module_type=} {instances=}")
-
-            for inst_name, port_connections in instances:
-                module_info.instances.append(
-                    {"instance_name": inst_name, "module_type": module_type, "connections": port_connections}
-                )
-                module_info.dependencies.add(module_type)
-                log.debug(f"  Found: {module_type} {inst_name}")
-                log.debug(f"    Ports: {list(port_connections.keys())}")
-
-        # Recurse
-        children = self._get_children(node)
-        for child in children:
-            self._walk_for_instances(child, module_info)
-
-    def _get_instantiated_type(self, hier_inst_node):
-        """
-        Get the module type being instantiated.
-        HierarchyInstantiation nodes often have a `.type` token with .valueText;
-        fallback: search children for NamedType / Identifier.
-        """
-        # Common case: direct token
-        try:
-            t = getattr(hier_inst_node, "type", None)
-            if t:
-                # valueText works on token-like objects
-                return getattr(t, "valueText", getattr(t, "value", None))
-        except Exception:
-            pass
-
-        # Fallback: search children for NamedType / Identifier
-        for child in self._get_children(hier_inst_node):
-            if child.kind == pyslang.SyntaxKind.NamedType:
-                # NamedType -> IdentifierName or QualifiedName etc.
-                for g in self._get_children(child):
-                    if hasattr(g, "valueText"):
-                        return g.valueText
-            # direct identifier token
-            if hasattr(child, "valueText"):
-                return child.valueText
-
-        return None
-
-    def _get_instance_name(self, inst_node):
-        """Get instance name from HierarchicalInstance"""
-        if hasattr(inst_node, "decl") and inst_node.decl:
-            if hasattr(inst_node.decl, "name") and inst_node.decl.name:
-                return inst_node.decl.name.value
-        return None
-
-    def _get_port_connections(self, inst_node):
-        """Extract port connections from instance"""
-        connections = {}
-
-        # Look for SeparatedList
-        children = self._get_children(inst_node)
-        for child in children:
-            if child.kind == pyslang.SyntaxKind.SeparatedList:
-                conn_children = self._get_children(child)
-                for conn_child in conn_children:
-                    if conn_child.kind == pyslang.SyntaxKind.NamedPortConnection:
-                        port_name, signal = self._parse_named_port_connection(conn_child)
-                        if port_name:
-                            connections[port_name] = signal
-
-        return connections
-
-    def _parse_named_port_connection(self, conn_node):
-        """Parse .port_name(signal) connection"""
-        port_name = None
-        signal = None
-
-        # Get port name from 'name' token
-        if hasattr(conn_node, "name") and conn_node.name:
-            port_name = conn_node.name.valueText
-
-        # Get connected signal - simplified, just get text representation
-        children = self._get_children(conn_node)
-        for child in children:
-            # Skip the dot and port name, get the expression
-            if child.kind != pyslang.TokenKind.Dot:
-                # Get source text for the expression
-                signal = self._get_node_text(child)
-                break
-
-        return port_name, signal
-
-    def _get_node_text(self, node):
-        """Get source text from a syntax node"""
-        if node is None:
-            return ""
-        # Get the text span and extract from source
-        return str(node).strip()
-
-    def topological_sort(self):
-        """Sort modules in dependency order (bottom-up)"""
-        in_degree = defaultdict(int)
-        all_modules = set(self.modules.keys())
-
-        # Build reverse dependency graph
-        dependency_graph = defaultdict(set)
-        for module_name, module_info in self.modules.items():
-            for dep in module_info.dependencies:
-                if dep in all_modules:
-                    dependency_graph[dep].add(module_name)
-                    in_degree[module_name] += 1
-
-        # Initialize leaf modules
-        for module in all_modules:
-            if module not in in_degree:
-                in_degree[module] = 0
-
-        # Topological sort (Kahn's algorithm)
-        queue = deque([m for m in all_modules if in_degree[m] == 0])
-        sorted_modules = []
-
-        while queue:
-            module = queue.popleft()
-            sorted_modules.append(module)
-
-            for dependent in dependency_graph[module]:
-                in_degree[dependent] -= 1
-                if in_degree[dependent] == 0:
-                    queue.append(dependent)
-
-        # Check for cycles
-        if len(sorted_modules) != len(all_modules):
-            remaining = all_modules - set(sorted_modules)
-            log.warning(f"Circular dependencies detected: {remaining}")
-            sorted_modules.extend(remaining)
-
-        return sorted_modules
-
-    def find_missing_modules(self):
-        """Find modules that are instantiated but not defined"""
-        defined = set(self.modules.keys())
-        instantiated = set()
-
-        for module_info in self.modules.values():
-            instantiated.update(module_info.dependencies)
-
-        missing = instantiated - defined
-        return missing
-
-    def _sanitize_identifier(self, name):
-        """Sanitize identifier to be valid SystemVerilog using escaped identifiers"""
-        import re
-
-        if not name:
-            return "port_unnamed"
-
-        # Check if name needs escaping (starts with digit or has special chars)
-        needs_escape = (
-            name[0].isdigit()  # Starts with digit
-            or not re.match(r"^[a-zA-Z_][a-zA-Z0-9_$]*", name)  # Contains special chars
-        )
-
-        if needs_escape:
-            return f"\\{name}"
+    def get_signal_name(self, signal):
+        """Extract signal name from various AST node types"""
+        if isinstance(signal, vast.Identifier):
+            return self._clean_name(signal.name)
+        elif isinstance(signal, vast.Pointer):
+            var_name = self.get_signal_name(signal.var)
+            ptr_str = self.get_signal_name(signal.ptr)
+            return f"{var_name}[{ptr_str}]"
+        elif isinstance(signal, vast.Partselect):
+            var_name = self.get_signal_name(signal.var)
+            msb = self.get_signal_name(signal.msb) if signal.msb else ""
+            lsb = self.get_signal_name(signal.lsb) if signal.lsb else ""
+            return f"{var_name}[{msb}:{lsb}]"
+        elif isinstance(signal, vast.Concat):
+            parts = [self.get_signal_name(part) for part in signal.list]
+            return "{" + ",".join(parts) + "}"
+        elif isinstance(signal, vast.IntConst):
+            return str(signal.value)
         else:
-            return name
+            return str(signal)
 
-    def generate_stub_module(self, module_name):
-        """Generate stub module text based on instantiations"""
-        log.info(f"Generating stub for: {module_name}")
+    def walker(self, ast):
+        # First pass: Collect module definitions
+        for node in ast.description.definitions:
+            if isinstance(node, vast.ModuleDef):
+                module_name = self._clean_name(node.name)
+                module = Module(name=module_name)
+                self.modules[module_name] = module
+                if not self.top_module_name:
+                    self.top_module_name = module_name
 
-        # Collect all unique port names
-        all_ports = set()
+                # Collect ports
+                if node.portlist:
+                    for port in node.portlist.ports:
+                        info = self.modifier.extract_port_info(port)
+                        module.add_port(info["name"], info["direction"], info["msb"], info["lsb"])
 
-        for module_info in self.modules.values():
-            for inst in module_info.instances:
-                if inst["module_type"] == module_name:
-                    all_ports.update(inst["connections"].keys())
+        # Second pass: Populate modules with instances, nets, and connections
+        for node in ast.description.definitions:
+            if isinstance(node, vast.ModuleDef):
+                module_name = self._clean_name(node.name)
+                module = self.modules[module_name]
+                self.populate_module(module, node)
 
-        # Generate stub
-        lines = [f"module {module_name} ("]
+        # Third pass: Create stub modules for undefined components
+        for module in list(self.modules.values()):
+            for inst in module.instances:
+                if inst.module_ref not in self.modules:
+                    logging.warning(f"Creating stub module for undefined component: {inst.module_ref}")
+                    stub_module = Module(name=inst.module_ref)
+                    stub_module.is_stub = True
+                    # Infer ports from the instance's pins
+                    for i, pin in enumerate(inst.pins):
+                        # Create a generic port, direction might be unknown (default to INOUT)
 
-        port_list = sorted(all_ports)
-        for i, port in enumerate(port_list):
-            comma = "," if i < len(port_list) - 1 else ""
-            safe_port = self._sanitize_identifier(port)
-            lines.append(f"    input logic {safe_port} {comma}  // Auto-generated stub")
+                        stub_module.add_port(f"{pin.name}", "inout", pin.msb, pin.lsb)
+                    self.modules[inst.module_ref] = stub_module
 
-        lines.append(");")
-        lines.append(f"    // TODO: Implement {module_name}")
-        lines.append("endmodule")
+    def _find_decl_for_port(self, module_node, port_name):
+        for item in module_node.items:
+            if isinstance(item, vast.Decl):
+                for decl in item.list:
+                    if hasattr(decl, "name") and self._clean_name(decl.name) == port_name:
+                        return decl
+        return None
 
-        return "\n".join(lines)
-
-    def _get_node_text_from_tree(self, node):
-        """Return the source text for any syntax node using the stored SyntaxTree."""
-        if node is None:
-            return ""
-        # Some nodes may not have a sourceRange (be defensive)
-        sr = getattr(node, "sourceRange", None)
-        if not sr:
-            return ""
-        sm = self.syntax_tree.sourceManager
-        buf = sr.start.buffer
-        full_text = sm.getSourceText(buf)
-        start = sr.start.offset
-        end = sr.end.offset
-        return full_text[start:end]
-
-    def _get_instance_list(self, hier_inst_node):
-        """Get list of instances from HierarchyInstantiation"""
-        instances = []
-        for child in self._get_children(hier_inst_node):
-            # Usually the list of instances is stored in a SeparatedList
-            if child.kind == pyslang.SyntaxKind.SeparatedList:
-                for item in self._get_children(child):
-                    if item.kind == pyslang.SyntaxKind.HierarchicalInstance:
-                        inst_name = self._get_instance_name(item)
-                        port_connections = self._get_port_connections(item)
-                        if inst_name:
-                            instances.append((inst_name, port_connections))
-        return instances
-
-    def generate_reordered_file(self, output_file):
-        """Generate reordered file with stubs for missing modules"""
-        # Find missing modules
-        missing = self.find_missing_modules()
-
-        # Generate stubs
-        stubs = {}
-        for module_name in missing:
-            stubs[module_name] = self.generate_stub_module(module_name)
-
-        # Sort modules
-        sorted_names = self.topological_sort()
-
-        log.info(f"Module order: {' -> '.join(sorted_names)}")
-
-        # Write output file
-        with open(output_file, "w") as f:
-            f.write("// Auto-reordered SystemVerilog using AST\n")
-            f.write("// Module order: bottom-up (leaves first, top last)\n\n")
-
-            # Write stubs first (they're leaves)
-            if stubs:
-                f.write("// ===== Auto-generated stub modules =====\n\n")
-                for module_name in sorted(stubs.keys()):
-                    f.write(stubs[module_name])
-                    f.write("\n\n")
-
-            # Write existing modules in sorted order
-            f.write("// ===== Reordered existing modules =====\n\n")
-            for module_name in sorted_names:
-                if module_name in self.modules:
-                    module_info = self.modules[module_name]
-                    node = module_info.syntax_node
-
-                    # Extract original module text
-                    sm = self.syntax_tree.sourceManager
-                    sr = node.sourceRange
-                    buf = sr.start.buffer  # get the buffer where the node lives
-
-                    full_text = sm.getSourceText(buf)
-                    start = sr.start.offset
-                    end = sr.end.offset
-
-                    module_text = full_text[start:end]
-
-                    f.write(f"// Module: {module_name}\n")
-                    f.write(module_text)
-                    f.write("\n\n")
-
-        log.info(f"Reordered file written to: {output_file}")
-        return output_file
-
-
-class SystemVerilogParser:
-    """Parser with AST-based reordering"""
-
-    def __init__(self):
-        self.compilation = None
-        self.reorderer = VerilogReorder()
-
-    def reorder_verilog_modules(self, filename):
-        """Parse with automatic AST-based reordering"""
-        output_dir = "data/verilog"
-        os.makedirs(output_dir, exist_ok=True)
-        basename = Path(filename).name
-        output_file = os.path.join(output_dir, f"reordered_{basename}")
-
-        # Parse syntax tree and reorder
-        log.debug("Step 1: Parsing syntax tree...")
-        self.reorderer.parse_syntax_tree(filename)
-
-        log.debug("Step 2: Generating reordered file...")
-        reordered_file = self.reorderer.generate_reordered_file(output_file)
-
-        # Now compile the reordered file
-        log.debug("Step 3: Compiling with pyslang...")
-        tree = pyslang.SyntaxTree.fromFile(reordered_file)
-        self.compilation = pyslang.Compilation()
-        self.compilation.addSyntaxTree(tree)
-
-        # Check diagnostics
-        all_diags = list(self.compilation.getAllDiagnostics())
-        has_errors = False
-        sm = self.compilation.sourceManager
-
-        for diag in all_diags:
-            location = diag.location
-            line_num = sm.getLineNumber(location)
-            col_num = sm.getColumnNumber(location)
-
-            allowed_errors = [
-                "ParameterDoesNotExist",
-                "DuplicatePortConnection",
-            ]
-
-            code_name = str(diag.code).replace("DiagCode(", "").replace(")", "")
-            if code_name in allowed_errors:
-                continue
-
-            if diag.isError():
-                log.error(f"Error at line {line_num}, col {col_num}: {diag.code}")
-            else:
-                log.warning(f"Warning at line {line_num}, col {col_num}: {diag.code}")
-
-        return self.compilation
+    def populate_module(self, module, module_node):
+        # Process instances
+        for item in module_node.items:
+            if isinstance(item, vast.InstanceList):
+                for inst in item.instances:
+                    module_ref_name = self._clean_name(inst.module)
+                    module_ref = self.modules.get(module_ref_name)
+                    inst_name = self._clean_name(inst.name)
+                    module_ref_name = self._clean_name(inst.module)
+                    instance = module.add_instance(inst_name, module_ref_name)
+                    for port_arg in inst.portlist:
+                        info = self.modifier.extract_portarg_with_width(port_arg, module_node)
+                        w = info["connection_width"]
+                        if w == 1:
+                            instance.add_pin(
+                                info["port_name"],
+                            )
+                        else:
+                            instance.add_pin(info["port_name"], (w - 1), 0)
 
 
 # Usage Example
@@ -434,7 +198,7 @@ if __name__ == "__main__":
     # Create test file with top-first order and a missing module
     with open("design.sv", "w") as f:
         f.write("""
-module top(input clk, output [7:0] out);
+module foo(input clk, output [7:0] out);
     wire [7:0] cpu_out;
     wire [7:0] mem_out;
 
@@ -489,19 +253,14 @@ module adder(input [7:0] a, input [7:0] b, output [7:0] sum);
     assign sum = a + b;
 endmodule
 
-module reg_file(input clk, input [7:0] d_in, output reg [7:0] d_out);
-    always @(posedge clk) begin
-        d_out <= d_in;
-    end
-endmodule
 """)
 
     print("=== Using AST-Based Reordering ===\n")
 
-    parser = SystemVerilogParser()
+    parser = VerilogReorder()
     try:
-        compilation = parser.reorder_verilog_modules("design.sv")
-        print("\n Success! Check design_reordered.sv")
+        output_filename = parser.parse_and_create_stubs("design.sv")
+        print("\n Success! Output written to:", output_filename)
     except Exception as e:
         print(f"\n Error: {e}")
         import traceback

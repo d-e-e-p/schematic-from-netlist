@@ -11,7 +11,7 @@ from schematic_from_netlist.graph.layout_optimizer import LayoutOptimizer
 from schematic_from_netlist.interfaces.graphviz import Graphviz
 from schematic_from_netlist.interfaces.ltspice_writer import LTSpiceWriter
 from schematic_from_netlist.interfaces.verilog_parser import VerilogParser
-from schematic_from_netlist.interfaces.verilog_reorder import SystemVerilogParser
+from schematic_from_netlist.interfaces.verilog_reorder import VerilogReorder
 
 # ---------------- Pipeline Stages ---------------- #
 
@@ -21,11 +21,11 @@ def load_netlist(netlist_file: str, debug: bool):
     if not os.path.exists(netlist_file):
         raise FileNotFoundError(f"Netlist file not found: {netlist_file}")
 
-    svp = SystemVerilogParser()
-    comp = svp.reorder_verilog_modules(netlist_file)
+    vr = VerilogReorder()
+    processed_file = vr.parse_and_create_stubs(netlist_file)
 
-    verilog_parser = VerilogParser()
-    db = verilog_parser.store_in_db(comp)
+    vp = VerilogParser()
+    db = vp.parse_and_store_in_db(processed_file)
     db.debug = debug
     db.dump_to_table("initial_parse")
     db.determine_design_hierarchy()
