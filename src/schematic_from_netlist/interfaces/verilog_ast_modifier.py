@@ -4,6 +4,7 @@ Pyverilog: Adding new modules and instances to AST
 Demonstrates how to programmatically modify Verilog AST
 """
 
+import logging as log
 from typing import List
 
 from pyverilog.ast_code_generator.codegen import ASTCodeGenerator
@@ -113,7 +114,6 @@ class VerilogModifier:
                     elif isinstance(ptr, Identifier):
                         msb = ptr.name
                         lsb = ptr.name
-
                     # Range select: signal[7:0] (Partselect)
                     elif hasattr(ptr, "__class__") and "Partselect" in ptr.__class__.__name__:
                         if hasattr(ptr, "msb"):
@@ -126,6 +126,8 @@ class VerilogModifier:
                                 lsb = int(ptr.lsb.value)
                             else:
                                 lsb = str(ptr.lsb)
+                    else:
+                        log.warning(f"Unknown element in verilog: {ptr.show()}")
 
             # Concatenation: {signal1, signal2}
             elif isinstance(argname, Concat):
@@ -142,11 +144,20 @@ class VerilogModifier:
             # Constant value
             elif isinstance(argname, IntConst):
                 signal_name = argname.value
+            elif isinstance(argname, Partselect):
+                if hasattr(argname, "var"):
+                    signal_name = argname.var.name
+                if hasattr(argname, "msb"):
+                    if isinstance(argname.msb, IntConst):
+                        msb = int(argname.msb.value)
+                if hasattr(argname, "lsb"):
+                    if isinstance(argname.lsb, IntConst):
+                        lsb = int(argname.lsb.value)
 
             # Other expressions (unary, binary operations, etc.)
             else:
+                log.warning(f"ignoring element in verilog: {argname.show()}")
                 signal_name = str(argname)
-
         return (port_name, signal_name, msb, lsb)
 
     def get_signal_width_from_module(self, module_def, signal_name):

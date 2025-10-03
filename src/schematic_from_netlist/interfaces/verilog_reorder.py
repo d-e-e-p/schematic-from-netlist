@@ -164,8 +164,8 @@ class VerilogReorder:
                     # Infer ports from the instance's pins
                     for i, pin in enumerate(inst.pins):
                         # Create a generic port, direction might be unknown (default to INOUT)
-
-                        stub_module.add_port(f"{pin.name}", "inout", pin.msb, pin.lsb)
+                        pin_name = pin.name or f"PIN{i}"
+                        stub_module.add_port(f"{pin_name}", "inout", pin.msb, pin.lsb)
                     self.modules[inst.module_ref] = stub_module
 
     def _find_decl_for_port(self, module_node, port_name):
@@ -192,15 +192,14 @@ class VerilogReorder:
                         for param_arg in inst.parameterlist:
                             param_name = self._clean_name(param_arg.paramname)
                             instance.add_parameter(param_name)
-                    for port_arg in inst.portlist:
+                    for i, port_arg in enumerate(inst.portlist):
                         info = self.modifier.extract_portarg_with_width(port_arg, module_node)
+                        port_name = info["port_name"] or f"PIN{i}"
                         w = info["connection_width"]
                         if w == 1:
-                            instance.add_pin(
-                                info["port_name"],
-                            )
+                            instance.add_pin(port_name)
                         else:
-                            instance.add_pin(info["port_name"], (w - 1), 0)
+                            instance.add_pin(port_name, (w - 1), 0)
 
 
 # Usage Example

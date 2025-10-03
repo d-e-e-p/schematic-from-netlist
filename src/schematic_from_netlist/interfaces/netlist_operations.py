@@ -486,7 +486,7 @@ class NetlistOperationsMixin:
         sorted from bottom to top.
         """
         if not self.top_module:
-            print("No top module set.")
+            logging.error("No top module set.")
             return []
 
         # Build parent-child relationships

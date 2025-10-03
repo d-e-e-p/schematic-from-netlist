@@ -1,6 +1,6 @@
 module TOP ( );
-  supply0 VSS;
-  supply1 VDD;
+wire a,b,c;
+wire x,y,z;
   
 BLK U01  (a, b);
 BLK U02  (b, c);
