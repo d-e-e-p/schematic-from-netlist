@@ -4,10 +4,12 @@ Pyverilog: Adding new modules and instances to AST
 Demonstrates how to programmatically modify Verilog AST
 """
 
+import copy
 import logging as log
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+import pyverilog.vparser.ast as vast
 from pyverilog.ast_code_generator.codegen import ASTCodeGenerator
 from pyverilog.vparser.ast import *
 from pyverilog.vparser.parser import parse
@@ -44,9 +46,6 @@ class portArgInfo:
     is_bundle: bool = False
     connections: List["SignalConnectionInfo"] = field(default_factory=list)
     total_connection_width: int = 0
-
-
-
 
 
 class VerilogModifier:
@@ -306,7 +305,9 @@ class VerilogModifier:
         Returns:
             dict with keys: name, direction, msb, lsb, signed
         """
-        port_info = {"name": None, "direction": None, "msb": None, "lsb": None, "signed": False}
+        port_info = {"name": None, "direction": "inout", "msb": None, "lsb": None, "signed": False}
+        if hasattr(port, "name") and port.name:
+            port_info["name"] = port.name
 
         # Get the first child (Input, Output, or Inout)
         if hasattr(port, "first") and port.first:
@@ -348,7 +349,7 @@ class VerilogModifier:
 
     def extract_portarg_with_width(self, port_arg, module_def):
         info = self.extract_portarg_info(port_arg, module_def)
-        log.warning(f"{info=}")
+        log.debug(f"{info=}")
         return info
 
     def extract_portarg_info(self, port_arg, module_def):
@@ -477,16 +478,37 @@ class VerilogModifier:
             module_name: Name of the module
             ports: List of port declarations (Ioport nodes)
             items: List of module items (Decl, InstanceList, etc.)
+            parameters: List of param names or dict of {name: value}
 
         Returns:
             ModuleDef node
         """
-        paramlist = self.create_paramlist_from_strlist(parameters or [])
+        if isinstance(parameters, dict):
+            paramlist = self.create_paramlist_from_dict(parameters)
+        else:
+            paramlist = self.create_paramlist_from_strlist(parameters or [])
+
         portlist = Portlist(ports or [])
-
         module = ModuleDef(name=module_name, paramlist=paramlist, portlist=portlist, items=items or [])
-
         return module
+
+    def create_paramlist_from_dict(self, params: Dict[str, Any]) -> Paramlist:
+        """
+        Creates a pyverilog Paramlist node from a dictionary of parameter names and values.
+        """
+        param_nodes = []
+        for name, value in params.items():
+            value_node = None
+            if isinstance(value, str):
+                # Pyverilog's StringConst handles the quoting
+                value_node = StringConst(value=value)
+            elif isinstance(value, int):
+                value_node = IntConst(str(value))
+            else:
+                value_node = StringConst(value=str(value))
+
+            param_nodes.append(Parameter(name=name, value=value_node, width=None, signed=None))
+        return Paramlist(param_nodes)
 
     def create_instance(self, module_name, inst_name, port_connections, parameters=None):
         """
@@ -657,6 +679,46 @@ class VerilogModifier:
             connection_width=connection_width,
         )
 
+    def substitute_genvar(self, node, substitutions):
+        """
+        Recursively substitutes genvar Identifiers with IntConsts in an AST node.
+        This version manually reconstructs nodes to avoid deepcopy issues.
+        """
+        if isinstance(node, Identifier) and node.name in substitutions:
+            return IntConst(str(substitutions[node.name]))
+
+        if isinstance(node, vast.InstanceList):
+            new_instances = [self.substitute_genvar(inst, substitutions) for inst in node.instances]
+            return vast.InstanceList(node.module, node.parameterlist, new_instances)
+
+        if isinstance(node, vast.Instance):
+            new_portlist = [self.substitute_genvar(p, substitutions) for p in node.portlist]
+            return vast.Instance(node.module, node.name, new_portlist, node.parameterlist)
+
+        if isinstance(node, vast.PortArg):
+            new_argname = self.substitute_genvar(node.argname, substitutions)
+            return vast.PortArg(node.portname, new_argname)
+
+        if isinstance(node, vast.Pointer):
+            new_var = self.substitute_genvar(node.var, substitutions)
+            new_ptr = self.substitute_genvar(node.ptr, substitutions)
+            return vast.Pointer(new_var, new_ptr)
+
+        # Default case for nodes without special handling
+        if hasattr(node, "children"):
+            new_children = []
+            for attr, value in node.children():
+                if isinstance(value, (list, tuple)):
+                    new_list = [self.substitute_genvar(item, substitutions) for item in value]
+                    new_children.append(type(value)(new_list))
+                elif value is not None:
+                    new_children.append(self.substitute_genvar(value, substitutions))
+                else:
+                    new_children.append(None)
+            # This part is problematic, so we avoid it by handling specific types
+            # return type(node)(*new_children)
+
+        return node  # Return the node as is if no substitution is needed
 
 
 def example_create_simple_module():

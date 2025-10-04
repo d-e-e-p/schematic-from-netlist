@@ -280,6 +280,7 @@ class Module:
     ports: Dict[str, Port] = field(default_factory=dict)
     child_modules: Dict[str, Module] = field(default_factory=dict)
     busses: Dict[str, Bus] = field(default_factory=dict)
+    parameters: Dict[str, Any] = field(default_factory=dict)
     depth: int = 0
     is_leaf: bool = False
     is_stub: bool = True

@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 import sys
 from dataclasses import dataclass, field
 from optparse import OptionParser
@@ -10,23 +11,10 @@ from pyverilog.ast_code_generator.codegen import ASTCodeGenerator
 from pyverilog.vparser.parser import parse
 
 from schematic_from_netlist.interfaces.netlist_database import NetlistDatabase
-from schematic_from_netlist.interfaces.netlist_structures import (
-    Bus,
-    Instance,
-    Module,
-    Net,
-    NetType,
-    Pin,
-    PinDirection,
-    Port,
-)
-from schematic_from_netlist.interfaces.verilog_ast_modifier import (
-    VerilogModifier,
-    portArgInfo,
-)
+from schematic_from_netlist.interfaces.netlist_structures import Bus, Instance, Module, Net, NetType, Pin, PinDirection, Port
+from schematic_from_netlist.interfaces.verilog_ast_modifier import VerilogModifier, portArgInfo
 
 log = logging.getLogger(__name__)
-
 
 
 class VerilogParser:
@@ -54,61 +42,28 @@ class VerilogParser:
     # --------------------------------------------------------------------------
 
     def walker(self, ast):
-        # First pass: Collect module definitions
-        for node in ast.description.definitions:
-            if isinstance(node, vast.ModuleDef):
-                self.walk_add_module(node)
-
-        # Second pass: Populate modules with instances etc
+        # First pass: Create all module objects and populate their ports and nets.
         for node in ast.description.definitions:
             if isinstance(node, vast.ModuleDef):
                 module_name = self._clean_name(node.name)
+                if module_name not in self.db.modules:
+                    self.db.modules[module_name] = Module(name=module_name)
+                if not self.db.top_module:
+                    self.db.top_module = self.db.modules[module_name]
+
                 module = self.db.modules[module_name]
-                self.walk_populate_module(module, node)
+                self.walk_populate_ports_and_nets(module, node)
 
-    def create_ast_stubs(self, ast):
-        stubs = [module for module in self.db.modules.values() if module.is_stub]
-        for module in stubs:
-            portlist = []
-            for port in module.ports.values():
-                if not port.bus:
-                    vport = self.modifier.create_port(port.name, port.direction.value)
-                else:
-                    vport = self.modifier.create_port(
-                        port.name, port.direction.value, width=(port.bus.msb, port.bus.lsb)
-                    )
-                portlist.append(vport)
-            # Assuming parameters are stored somehow, not fully implemented in stub creation yet
-            vmodule = self.modifier.create_module(module_name=module.name, ports=portlist, parameters=[])
-            current_defs = list(ast.description.definitions)
-            current_defs.append(vmodule)
-            ast.description = vast.Description(tuple(current_defs))
-        return ast
+        # Second pass: Populate the modules with instances in reverse order.
+        for node in reversed(ast.description.definitions):
+            if isinstance(node, vast.ModuleDef):
+                module_name = self._clean_name(node.name)
+                module = self.db.modules[module_name]
+                self.walk_populate_instances(module, node)
 
-    def write_ast(self, ast, filename):
-        codegen = ASTCodeGenerator()
-        rslt = codegen.visit(ast)
-        os.makedirs(os.path.dirname(filename), exist_ok=True)
-        with open(filename, "w") as f:
-            f.write(rslt)
-        log.info(f"Reordered Verilog written to {filename}")
-
-    # --------------------------------------------------------------------------
-    # Walker & Population Methods
-    # --------------------------------------------------------------------------
-
-    def walk_add_module(self, node):
-        module_name = self._clean_name(node.name)
-        module = self.db.modules.get(module_name)
-        if not module:
-            module = Module(name=module_name)
-            self.db.modules[module_name] = module
-
+    def walk_populate_ports_and_nets(self, module, node):
+        """Populates an existing Module object with its ports and nets from the AST."""
         module.is_stub = False
-
-        if not self.db.top_module:
-            self.db.top_module = module
-
         module.ports.clear()
         module.nets.clear()
         module.busses.clear()
@@ -117,7 +72,7 @@ class VerilogParser:
             for port in node.portlist.ports:
                 info = self.modifier.extract_port_info(port)
                 name, direction_str, msb, lsb = info["name"], info["direction"], info["msb"], info["lsb"]
-                direction = PinDirection(direction_str)
+                direction = PinDirection(direction_str) if direction_str else PinDirection.INOUT
                 port_obj = module.add_port(name, direction)
 
                 if msb is not None:
@@ -132,12 +87,14 @@ class VerilogParser:
                 else:
                     module.add_net(name)
 
-    def walk_populate_module(self, module, module_node):
-        for item in module_node.items:
+        for item in node.items:
             if isinstance(item, vast.Decl):
                 for decl in item.list:
                     if isinstance(decl, vast.Wire):
                         self.pop_add_net(decl, module)
+
+    def walk_populate_instances(self, module, module_node):
+        """Populates an existing Module object with its instances from the AST."""
         for item in module_node.items:
             if isinstance(item, vast.InstanceList):
                 for inst in item.instances:
@@ -147,28 +104,72 @@ class VerilogParser:
                 for statement in item.items:
                     self.pop_add_generate(statement, module, module_node)
         for item in module_node.items:
-            if not isinstance(
-                item, (vast.Decl, vast.InstanceList, vast.GenerateStatement, vast.Assign)
-            ):
+            if not isinstance(item, (vast.Decl, vast.InstanceList, vast.GenerateStatement, vast.Assign)):
                 log.warning(f"Parser skipping AST node: {type(item)}")
+
+    def write_ast(self, ast, filename):
+        codegen = ASTCodeGenerator()
+        rslt = codegen.visit(ast)
+        os.makedirs(os.path.dirname(filename), exist_ok=True)
+        with open(filename, "w") as f:
+            f.write(rslt)
+        log.info(f"Reordered Verilog written to {filename}")
+
+    def create_ast_stubs(self, ast):
+        stubs = [module for module in self.db.modules.values() if module.is_stub]
+        for module in stubs:
+            portlist = []
+            for port in module.ports.values():
+                port_name = self._escape_name(port.name)
+                if not port.bus:
+                    vport = self.modifier.create_port(port_name, port.direction.value)
+                else:
+                    vport = self.modifier.create_port(port_name, port.direction.value, width=(port.bus.msb, port.bus.lsb))
+                portlist.append(vport)
+
+            vmodule = self.modifier.create_module(module_name=module.name, ports=portlist, parameters=module.parameters)
+            current_defs = list(ast.description.definitions)
+            current_defs.append(vmodule)
+            ast.description = vast.Description(tuple(current_defs))
+        return ast
 
     def pop_add_instance(self, vinst, module, module_node):
         module_ref_name = self._clean_name(vinst.module)
         module_ref = self.db.modules.get(module_ref_name)
+
         if not module_ref:
+            # This case should ideally not happen if all modules are pre-created
             module_ref = self.pop_create_stub_module(module_ref_name, vinst, module_node)
+
+        # If the module we are instantiating has not been populated yet, do it now.
+        if module_ref.is_stub:
+            # Find the AST node for the module_ref and populate it
+            ref_node = next(
+                (
+                    n
+                    for n in self.modifier.ast.description.definitions
+                    if isinstance(n, vast.ModuleDef) and self._clean_name(n.name) == module_ref_name
+                ),
+                None,
+            )
+            if ref_node:
+                self.walk_populate_ports_and_nets(module_ref, ref_node)
+            else:
+                # It's a true stub (missing definition), so we just use the stub object
+                pass
 
         inst = module.add_instance(vinst.name, module=module_ref, module_ref=module_ref.name)
 
         if vinst.parameterlist:
             for param_arg in vinst.parameterlist:
                 param_name = self._clean_name(param_arg.paramname)
-                inst.parameters[param_name] = "PARAM_VALUE"  # Placeholder
+                param_value = self._get_param_value(param_arg.argname)
+                inst.parameters[param_name] = param_value
 
         for i, port_arg in enumerate(vinst.portlist):
             info = self.modifier.extract_portarg_with_width(port_arg, module_node)
             port_info = None
-            port_name = info.port_name
+            port_name = self._clean_name(info.port_name)
 
             if port_name:
                 port_info = module_ref.ports.get(port_name)
@@ -186,8 +187,8 @@ class VerilogParser:
 
             mapping = self._get_bit_mapping(info, port_info)
             for port_pin, signal_pin in mapping:
+                pin_name = self._clean_name(port_pin)
                 net_name = signal_pin
-                # Map constants to VDD/GND
                 if "1'b0" in signal_pin:
                     net_name = "GND"
                 elif "1'b1" in signal_pin:
@@ -195,13 +196,16 @@ class VerilogParser:
 
                 net = module.nets.get(net_name)
                 if not net:
+                    if net_name is None:
+                        log.error(f"Attempted to create a net with a None name for port '{pin_name}' on instance '{inst.name}'")
+                        continue
                     net = module.add_net(net_name)
                     if net_name == "GND":
                         net.net_type = NetType.SUPPLY0
                     elif net_name == "VDD":
                         net.net_type = NetType.SUPPLY1
 
-                pin = inst.pins.get(port_pin)
+                pin = inst.pins.get(pin_name)
                 if pin:
                     net.add_pin(pin)
                 else:
@@ -221,8 +225,39 @@ class VerilogParser:
         else:
             module.add_net(name)
 
-    def pop_add_generate(self, statement, module, node):
-        log.info(f"Found generate statement: {statement.show()}")
+    def pop_add_generate(self, statement, module, module_node):
+        """Handles Verilog generate blocks, focusing on for-loops."""
+        if isinstance(statement, vast.ForStatement):
+            try:
+                # Correctly parse for-loop syntax: for (pre; cond; post)
+                loop_var = statement.pre.left.var.name
+                start = int(statement.pre.right.var.value)
+                # Assuming condition is simple 'less than'
+                end = int(statement.cond.right.value)
+                # Assuming step is 'i = i + 1' by checking the post statement
+                step = 1
+
+                log.info(f"Unrolling generate for-loop: var={loop_var}, from {start} to {end - 1}")
+
+                for i in range(start, end, step):
+                    substitutions = {loop_var: i}
+                    block = statement.statement
+                    block_name = block.scope
+
+                    for block_item in block.statements:
+                        concrete_item = self.modifier.substitute_genvar(block_item, substitutions)
+                        if isinstance(concrete_item, vast.InstanceList):
+                            for inst in concrete_item.instances:
+                                # Prepend the generate block name to the instance name
+                                original_name = inst.name
+                                inst.name = f"{block_name}[{i}]/{original_name}"
+                                self.pop_add_instance(inst, module, module_node)
+
+            except Exception as e:
+                log.error(f"Failed to parse generate for-loop: {e}")
+                log.warning(f"Skipping complex generate block: {statement.show()}")
+        else:
+            log.warning(f"Unsupported generate construct of type {type(statement)} found. Skipping.")
 
     def pop_create_stub_module(self, module_ref_name, vinst, module_node):
         module_ref = Module(name=module_ref_name)
@@ -232,10 +267,13 @@ class VerilogParser:
         if vinst.parameterlist:
             for param_arg in vinst.parameterlist:
                 param_name = self._clean_name(param_arg.paramname)
-                # Parameters are not fully handled for stubs yet
+                param_value = self._get_param_value(param_arg.argname)
+                module_ref.parameters[param_name] = param_value
+
         for i, port_arg in enumerate(vinst.portlist):
             info = self.modifier.extract_portarg_with_width(port_arg, module_node)
             port_name = info.port_name or f"p{i}"
+            port_name = self._clean_name(port_name)
             port = module_ref.add_port(port_name, PinDirection.INOUT)
             if info.total_connection_width > 1:
                 msb, lsb = info.total_connection_width - 1, 0
@@ -253,25 +291,22 @@ class VerilogParser:
             return name.replace("\\", "")
         return name
 
-    def get_signal_name(self, signal):
-        if isinstance(signal, vast.Identifier):
-            return self._clean_name(signal.name)
-        elif isinstance(signal, vast.Pointer):
-            var_name = self.get_signal_name(signal.var)
-            ptr_str = self.get_signal_name(signal.ptr)
-            return f"{var_name}[{ptr_str}]"
-        elif isinstance(signal, vast.Partselect):
-            var_name = self.get_signal_name(signal.var)
-            msb = self.get_signal_name(signal.msb) if signal.msb else ""
-            lsb = self.get_signal_name(signal.lsb) if signal.lsb else ""
-            return f"{var_name}[{msb}:{lsb}]"
-        elif isinstance(signal, vast.Concat):
-            parts = [self.get_signal_name(part) for part in signal.list]
-            return "{" + ",".join(parts) + "}"
-        elif isinstance(signal, vast.IntConst):
-            return str(signal.value)
+    def _escape_name(self, name):
+        if isinstance(name, str):
+            # if name has special chars, add a backslash to front
+            if re.search(r"[^a-zA-Z0-9_]", name):
+                name = f"\\{name}"
+        return name
+
+    def _get_param_value(self, argname):
+        if isinstance(argname, vast.StringConst):
+            return argname.value.strip('"')  # Remove the quotes
+        elif isinstance(argname, vast.IntConst):
+            return argname.value
+        elif isinstance(argname, vast.Identifier):
+            return argname.name
         else:
-            return str(signal)
+            return self.get_signal_name(argname)
 
     def _get_bit_mapping(self, info: "portArgInfo", port_info: "Port") -> List[Tuple[str, str]]:
         port_name = info.port_name
@@ -312,8 +347,6 @@ class VerilogParser:
                     port_pins.append(f"{port_name}[{i}]")
 
         return list(zip(port_pins, signal_bits))
-
-
 
 
 # Usage Example
