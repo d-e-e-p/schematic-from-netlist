@@ -5,11 +5,21 @@ Demonstrates how to programmatically modify Verilog AST
 """
 
 import logging as log
-from typing import List
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from pyverilog.ast_code_generator.codegen import ASTCodeGenerator
 from pyverilog.vparser.ast import *
 from pyverilog.vparser.parser import parse
+
+
+@dataclass
+class portInfo:
+    name: str
+    direction: str = field(default="inout")
+    msb: int = field(default=0)
+    lsb: int = field(default=0)
+    signed: bool = field(default=False)
 
 
 class VerilogModifier:
@@ -201,6 +211,9 @@ class VerilogModifier:
         return (None, None, None)
 
     def extract_portarg_with_width(self, port_arg, module_def):
+        return self.extract_portarg_with_width_helper(port_arg, module_def)
+
+    def extract_portarg_with_width_helper(self, port_arg, module_def):
         """
         Extract PortArg info AND the declared width of the connected signal
 

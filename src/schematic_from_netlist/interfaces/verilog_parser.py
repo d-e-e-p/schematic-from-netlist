@@ -35,7 +35,7 @@ class mBus:
 @dataclass(frozen=True)
 class mNet:
     name: str
-    bus: Optional[mBus] = None
+    bus: Optional[mBus] = field(default=None, compare=False, hash=False)
 
 
 @dataclass(frozen=True)
@@ -90,7 +90,8 @@ class mModule:
         self.ports.add(port)
 
     def add_net(self, name, bus=None):
-        pass
+        net = mNet(name, bus)
+        self.nets.add(net)
 
     def add_inst(self, name, module_ref):
         inst = mInst(name, module_ref)
@@ -183,7 +184,6 @@ class VerilogParser:
         if node.portlist:
             for port in node.portlist.ports:
                 info = self.modifier.extract_port_info(port)
-                print(info)
                 (name, direction, msb, lsb) = info["name"], info["direction"], info["msb"], info["lsb"]
                 if msb is None:
                     module.add_port(name, direction)
@@ -220,9 +220,18 @@ class VerilogParser:
                 info["signal_width"],
                 info["connection_width"],
             )
-            if not port_name:
+            if hasattr(port_arg, "portname") and port_arg.portname:
+                port_name = port_arg.portname
+            else:
                 # not using .A(B) notation, so count ports on module
                 port_name = self.get_port_name_from_module_port_position(module, i, select_msb, select_lsb)
+            if select_msb is not None and select_lsb is not None:
+                if select_msb == select_lsb:
+                    print(f"Adding connection {inst.name}/{port_name} -> {signal_name}[{select_msb}]")
+                else:
+                    print(f"Adding connection {inst.name}/{port_name} -> {signal_name}[{select_msb}:{select_lsb}]")
+            else:
+                print(f"Adding connection {inst.name}/{port_name} -> {signal_name}")
             # inst.connect_pin(port_name, signal_name)
 
     def pop_create_stub_module(self, module_ref_name, vinst, module_node):
@@ -250,7 +259,9 @@ class VerilogParser:
                 info["signal_width"],
                 info["connection_width"],
             )
-            if not port_name:
+            if hasattr(port_arg, "portname") and port_arg.portname:
+                port_name = port_arg.portname
+            else:
                 # stub module...so just make up name
                 port_name = f"PIN{i}"
 
