@@ -115,11 +115,9 @@ class VerilogParser:
         self.modifier = VerilogModifier("")
         self.db = NetlistDatabase()
 
-    def _clean_name(self, name):
-        """Strip backslashes from names."""
-        if isinstance(name, str):
-            return name.replace("\\", "")
-        return name
+    # --------------------------------------------------------------------------
+    # Main Public API
+    # --------------------------------------------------------------------------
 
     def parse_and_store(self, filename):
         ast, _ = parse([filename])
@@ -129,6 +127,23 @@ class VerilogParser:
         output_filename = f"data/verilog/processed_{self.top_module_name}.v"
         self.write_ast(ast, output_filename)
         return self.db
+
+    # --------------------------------------------------------------------------
+    # Core Processing Methods
+    # --------------------------------------------------------------------------
+
+    def walker(self, ast):
+        # First pass: Collect module definitions
+        for node in ast.description.definitions:
+            if isinstance(node, vast.ModuleDef):
+                self.walk_add_module(node)
+
+        # Second pass: Populate modules with instances etc
+        for node in ast.description.definitions:
+            if isinstance(node, vast.ModuleDef):
+                module_name = self._clean_name(node.name)
+                module = self.modules[module_name]
+                self.walk_populate_module(module, node)
 
     def create_ast_stubs(self, ast):
         stubs = [module for module in self.modules.values() if module.is_stub]
@@ -155,26 +170,9 @@ class VerilogParser:
             f.write(rslt)
         log.info(f"Reordered Verilog written to {filename}")
 
-    def get_signal_name(self, signal):
-        """Extract signal name from various AST node types"""
-        if isinstance(signal, vast.Identifier):
-            return self._clean_name(signal.name)
-        elif isinstance(signal, vast.Pointer):
-            var_name = self.get_signal_name(signal.var)
-            ptr_str = self.get_signal_name(signal.ptr)
-            return f"{var_name}[{ptr_str}]"
-        elif isinstance(signal, vast.Partselect):
-            var_name = self.get_signal_name(signal.var)
-            msb = self.get_signal_name(signal.msb) if signal.msb else ""
-            lsb = self.get_signal_name(signal.lsb) if signal.lsb else ""
-            return f"{var_name}[{msb}:{lsb}]"
-        elif isinstance(signal, vast.Concat):
-            parts = [self.get_signal_name(part) for part in signal.list]
-            return "{" + ",".join(parts) + "}"
-        elif isinstance(signal, vast.IntConst):
-            return str(signal.value)
-        else:
-            return str(signal)
+    # --------------------------------------------------------------------------
+    # Walker & Population Methods
+    # --------------------------------------------------------------------------
 
     def walk_add_module(self, node):
         module_name = self._clean_name(node.name)
@@ -205,8 +203,148 @@ class VerilogParser:
                     module.add_port(name, direction, msb=int(msb), lsb=int(lsb))
                     module.add_bus(name, msb=int(msb), lsb=int(lsb))
 
-    def get_port_name_from_module_port_position(self, module, position, select_msb, select_lsb):
-        return "foo"
+    def walk_populate_module(self, module, module_node):
+        # Process nets, instances and pins in that order.
+        # Nets come first because we need to make sure all busses have been elaborated before adding pins
+        for item in module_node.items:
+            if isinstance(item, vast.Decl):
+                for decl in item.list:
+                    if isinstance(decl, vast.Wire):
+                        self.pop_add_net(decl, module)
+        # ok, all bus/nets are in place...
+        for item in module_node.items:
+            if isinstance(item, vast.InstanceList):
+                for inst in item.instances:
+                    self.pop_add_instance(inst, module, module_node)
+        for item in module_node.items:
+            if isinstance(item, vast.GenerateStatement):
+                for statement in item.items:
+                    self.pop_add_generate(statement, module, module_node)
+
+        for item in module_node.items:
+            if isinstance(item, vast.Decl) or isinstance(item, vast.InstanceList) or isinstance(item, vast.GenerateStatement):
+                pass
+            else:
+                print(f"parser skipping: {type(item)} : {item.show()}")
+
+    def pop_add_instance(self, vinst, module, module_node):
+        module_ref_name = self._clean_name(vinst.module)
+        if module_ref_name not in self.modules:
+            self.pop_create_stub_module(module_ref_name, vinst, module_node)
+
+        module_ref = self.modules[module_ref_name]
+        inst = module.add_inst(vinst.name, module_ref)
+
+        if vinst.parameterlist:
+            for param_arg in vinst.parameterlist:
+                param_name = self._clean_name(param_arg.paramname)
+                inst.add_parameter(param_name)
+
+        for i, port_arg in enumerate(vinst.portlist):
+            info = self.modifier.extract_portarg_with_width(port_arg, module_node)
+
+            port_info = None
+            port_name = info.port_name
+
+            if port_name:
+                # Named port connection
+                port_info = next((p for p in module_ref.ports if p.name == port_name), None)
+            else:
+                # Positional port connection
+                if i < len(module_ref.ports):
+                    port_info = module_ref.ports[i]
+                    info.port_name = port_info.name
+                else:
+                    log.error(
+                        f"Positional connection index {i} is out of bounds for module '{module_ref.name}' "
+                        f"(has {len(module_ref.ports)} ports). Skipping connection for instance '{inst.name}'."
+                    )
+                    continue
+
+            if not port_info:
+                log.error(f"Port '{port_name}' not found in module '{module_ref.name}' for instance '{inst.name}'")
+                continue
+
+            # Get the bit-level mapping and print the connections
+            mapping = self._get_bit_mapping(info, port_info)
+            for port_pin, signal_pin in mapping:
+                print(f"Adding connection {inst.name}/{port_pin} -> {signal_pin}")
+
+    def pop_add_net(self, decl, module):
+        name = self._clean_name(decl.name)
+        if decl.width:
+            msb = int(decl.width.msb.value)
+            lsb = int(decl.width.lsb.value)
+            module.add_bus(name, lsb=lsb, msb=msb)
+        else:
+            module.add_net(name)
+
+    def pop_add_generate(self, statement, module, node):
+        log.info(f"Found generate statement: {statement.show()}")
+
+    def pop_create_stub_module(self, module_ref_name, vinst, module_node):
+        # module_ref = self.modules.get(module_ref_name)
+        inst_name = self._clean_name(vinst.name)
+        module_ref_name = self._clean_name(vinst.module)
+        module_ref = mModule(name=module_ref_name)
+        module_ref.is_stub = True
+        self.modules[module_ref_name] = module_ref
+        if vinst.parameterlist:
+            # 'parameterlist' is a vast.ParamArgList, which contains vast.ParamArg objects
+            for param_arg in vinst.parameterlist:
+                param_name = self._clean_name(param_arg.paramname)
+                module_ref.add_parameter(param_name)
+        for i, port_arg in enumerate(vinst.portlist):
+            info = self.modifier.extract_portarg_with_width(port_arg, module_node)
+
+            port_name = info.port_name
+            if not port_name:
+                # For positional stubs, we must create ports in order.
+                # The real names will be resolved when the actual module is parsed.
+                if i < len(module_ref.ports):
+                    port_name = module_ref.ports[i].name
+                else:
+                    # Create a placeholder name
+                    port_name = f"p{i}"
+                info.port_name = port_name
+
+            if info.total_connection_width <= 1:
+                module_ref.add_port(port_name, "inout")
+            else:
+                (msb, lsb) = (info.total_connection_width - 1, 0)
+                module_ref.add_port(port_name, direction="inout", msb=msb, lsb=lsb)
+                module_ref.add_bus(port_name, msb=msb, lsb=lsb)
+
+    # --------------------------------------------------------------------------
+    # Helper Methods
+    # --------------------------------------------------------------------------
+
+    def _clean_name(self, name):
+        """Strip backslashes from names."""
+        if isinstance(name, str):
+            return name.replace("\\", "")
+        return name
+
+    def get_signal_name(self, signal):
+        """Extract signal name from various AST node types"""
+        if isinstance(signal, vast.Identifier):
+            return self._clean_name(signal.name)
+        elif isinstance(signal, vast.Pointer):
+            var_name = self.get_signal_name(signal.var)
+            ptr_str = self.get_signal_name(signal.ptr)
+            return f"{var_name}[{ptr_str}]"
+        elif isinstance(signal, vast.Partselect):
+            var_name = self.get_signal_name(signal.var)
+            msb = self.get_signal_name(signal.msb) if signal.msb else ""
+            lsb = self.get_signal_name(signal.lsb) if signal.lsb else ""
+            return f"{var_name}[{msb}:{lsb}]"
+        elif isinstance(signal, vast.Concat):
+            parts = [self.get_signal_name(part) for part in signal.list]
+            return "{" + ",".join(parts) + "}"
+        elif isinstance(signal, vast.IntConst):
+            return str(signal.value)
+        else:
+            return str(signal)
 
     def _get_bit_mapping(self, info: "portArgInfo", port_info: "mPort") -> List[Tuple[str, str]]:
         """
@@ -271,131 +409,9 @@ class VerilogParser:
         # The first signal bit (from the leftmost Verilog element) maps to the first port pin (MSB)
         return list(zip(port_pins, signal_bits))
 
-    def pop_add_instance(self, vinst, module, module_node):
-        module_ref_name = self._clean_name(vinst.module)
-        if module_ref_name not in self.modules:
-            self.pop_create_stub_module(module_ref_name, vinst, module_node)
+    def get_port_name_from_module_port_position(self, module, position, select_msb, select_lsb):
+        return "foo"
 
-        module_ref = self.modules[module_ref_name]
-        inst = module.add_inst(vinst.name, module_ref)
-
-        if vinst.parameterlist:
-            for param_arg in vinst.parameterlist:
-                param_name = self._clean_name(param_arg.paramname)
-                inst.add_parameter(param_name)
-
-        for i, port_arg in enumerate(vinst.portlist):
-            info = self.modifier.extract_portarg_with_width(port_arg, module_node)
-
-            port_info = None
-            port_name = info.port_name
-
-            if port_name:
-                # Named port connection
-                port_info = next((p for p in module_ref.ports if p.name == port_name), None)
-            else:
-                # Positional port connection
-                if i < len(module_ref.ports):
-                    port_info = module_ref.ports[i]
-                    info.port_name = port_info.name
-                else:
-                    log.error(
-                        f"Positional connection index {i} is out of bounds for module '{module_ref.name}' "
-                        f"(has {len(module_ref.ports)} ports). Skipping connection for instance '{inst.name}'."
-                    )
-                    continue
-
-            if not port_info:
-                log.error(f"Port '{port_name}' not found in module '{module_ref.name}' for instance '{inst.name}'")
-                continue
-
-            # Get the bit-level mapping and print the connections
-            mapping = self._get_bit_mapping(info, port_info)
-            for port_pin, signal_pin in mapping:
-                print(f"Adding connection {inst.name}/{port_pin} -> {signal_pin}")
-
-
-    def pop_create_stub_module(self, module_ref_name, vinst, module_node):
-        # module_ref = self.modules.get(module_ref_name)
-        inst_name = self._clean_name(vinst.name)
-        module_ref_name = self._clean_name(vinst.module)
-        module_ref = mModule(name=module_ref_name)
-        module_ref.is_stub = True
-        self.modules[module_ref_name] = module_ref
-        if vinst.parameterlist:
-            # 'parameterlist' is a vast.ParamArgList, which contains vast.ParamArg objects
-            for param_arg in vinst.parameterlist:
-                param_name = self._clean_name(param_arg.paramname)
-                module_ref.add_parameter(param_name)
-        for i, port_arg in enumerate(vinst.portlist):
-            info = self.modifier.extract_portarg_with_width(port_arg, module_node)
-
-            port_name = info.port_name
-            if not port_name:
-                # For positional stubs, we must create ports in order.
-                # The real names will be resolved when the actual module is parsed.
-                if i < len(module_ref.ports):
-                    port_name = module_ref.ports[i].name
-                else:
-                    # Create a placeholder name
-                    port_name = f"p{i}"
-                info.port_name = port_name
-
-            if info.total_connection_width <= 1:
-                module_ref.add_port(port_name, "inout")
-            else:
-                (msb, lsb) = (info.total_connection_width - 1, 0)
-                module_ref.add_port(port_name, direction="inout", msb=msb, lsb=lsb)
-                module_ref.add_bus(port_name, msb=msb, lsb=lsb)
-
-    def pop_add_net(self, decl, module):
-        name = self._clean_name(decl.name)
-        if decl.width:
-            msb = int(decl.width.msb.value)
-            lsb = int(decl.width.lsb.value)
-            module.add_bus(name, lsb=lsb, msb=msb)
-        else:
-            module.add_net(name)
-
-    def pop_add_generate(self, statement, module, node):
-        log.info(f"Found generate statement: {statement.show()}")
-
-    def walker(self, ast):
-        # First pass: Collect module definitions
-        for node in ast.description.definitions:
-            if isinstance(node, vast.ModuleDef):
-                self.walk_add_module(node)
-
-        # Second pass: Populate modules with instances etc
-        for node in ast.description.definitions:
-            if isinstance(node, vast.ModuleDef):
-                module_name = self._clean_name(node.name)
-                module = self.modules[module_name]
-                self.walk_populate_module(module, node)
-
-    def walk_populate_module(self, module, module_node):
-        # Process nets, instances and pins in that order.
-        # Nets come first because we need to make sure all busses have been elaborated before adding pins
-        for item in module_node.items:
-            if isinstance(item, vast.Decl):
-                for decl in item.list:
-                    if isinstance(decl, vast.Wire):
-                        self.pop_add_net(decl, module)
-        # ok, all bus/nets are in place...
-        for item in module_node.items:
-            if isinstance(item, vast.InstanceList):
-                for inst in item.instances:
-                    self.pop_add_instance(inst, module, module_node)
-        for item in module_node.items:
-            if isinstance(item, vast.GenerateStatement):
-                for statement in item.items:
-                    self.pop_add_generate(statement, module, module_node)
-
-        for item in module_node.items:
-            if isinstance(item, vast.Decl) or isinstance(item, vast.InstanceList) or isinstance(item, vast.GenerateStatement):
-                pass
-            else:
-                print(f"parser skipping: {type(item)} : {item.show()}")
 
 
 # Usage Example

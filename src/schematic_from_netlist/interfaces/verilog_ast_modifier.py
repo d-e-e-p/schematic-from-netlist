@@ -56,6 +56,246 @@ class VerilogModifier:
         self.ast = ast
         self.codegen = ASTCodeGenerator()
 
+    # --------------------------------------------------------------------------
+    # High-Level Public API
+    # --------------------------------------------------------------------------
+
+    def add_module(self, module_def):
+        """
+        Add a new module definition to the AST
+
+        Args:
+            module_def: ModuleDef node to add
+        """
+        if not self.ast.description:
+            # Create description if it doesn't exist
+            self.ast.description = Description([module_def])
+        else:
+            # Add to existing definitions
+            current_defs = list(self.ast.description.definitions)
+            current_defs.append(module_def)
+            # Replace with new tuple
+            self.ast.description = Description(tuple(current_defs))
+
+        return self.ast
+
+    def add_instance_to_module(self, module_def, module_name, inst_name, port_connections, parameters=None):
+        """
+        Add an instance to an existing ModuleDef
+
+        Args:
+            module_def: ModuleDef node to modify
+            module_name: Name of the module to instantiate
+            inst_name: Name of the instance
+            port_connections: Dict of {port_name: signal_name}
+            parameters: Dict of {param_name: value} (optional)
+
+        Returns:
+            Modified ModuleDef
+        """
+        # Create the instance
+        instance = self.create_instance(module_name, inst_name, port_connections, parameters)
+
+        # Add to module items
+        if module_def.items:
+            current_items = list(module_def.items)
+            current_items.append(instance)
+            module_def.items = tuple(current_items)
+        else:
+            module_def.items = (instance,)
+
+        return module_def
+
+    def add_port_to_module(self, module_def, port_name, direction, msb=None, lsb=None, signed=False):
+        """
+        Add a port to an existing ModuleDef
+
+        Args:
+            module_def: ModuleDef node to modify
+            port_name: Name of the port
+            direction: 'input', 'output', or 'inout'
+            msb: Most significant bit (None for single bit)
+            lsb: Least significant bit (None for single bit)
+            signed: Whether the port is signed
+
+        Returns:
+            Modified ModuleDef
+        """
+        # Create width specification if needed
+        if msb is not None and lsb is not None:
+            width = (msb, lsb)
+        else:
+            width = None
+
+        # Create new port
+        new_port = self.create_port(port_name, direction, width, signed)
+
+        # Add to existing portlist
+        if module_def.portlist and module_def.portlist.ports:
+            current_ports = list(module_def.portlist.ports)
+            current_ports.append(new_port)
+            module_def.portlist.ports = tuple(current_ports)
+        else:
+            module_def.portlist = Portlist([new_port])
+
+        return module_def
+
+    def add_item_to_module(self, module_name, item):
+        """
+        Add an item (wire, reg, instance, etc.) to an existing module
+
+        Args:
+            module_name: Name of the module to modify
+            item: AST node to add (Decl, InstanceList, etc.)
+        """
+        for definition in self.ast.description.definitions:
+            if isinstance(definition, ModuleDef) and definition.name == module_name:
+                # Add item to module
+                current_items = list(definition.items)
+                current_items.append(item)
+                definition.items = tuple(current_items)
+                return True
+        return False
+
+    def populate_module(self, module_obj, module_def_node):
+        """
+        Populate a module object with instances, nets, and connections from AST
+        This is useful for building an internal representation from parsed Verilog
+
+        Args:
+            module_obj: Your custom module object/dict to populate
+            module_def_node: ModuleDef AST node from pyverilog
+        """
+        # Extract and store ports
+        if hasattr(module_obj, "ports") or isinstance(module_obj, dict):
+            ports = []
+            if module_def_node.portlist and module_def_node.portlist.ports:
+                for port in module_def_node.portlist.ports:
+                    port_info = self.extract_port_info(port)
+                    ports.append(port_info)
+
+            if isinstance(module_obj, dict):
+                module_obj["ports"] = ports
+            else:
+                module_obj.ports = ports
+
+        # Extract and store instances
+        instances = self.extract_instances_from_module(module_def_node)
+        if isinstance(module_obj, dict):
+            module_obj["instances"] = instances
+        else:
+            module_obj.instances = instances
+
+        # Extract nets/wires
+        nets = []
+        regs = []
+        if module_def_node.items:
+            for item in module_def_node.items:
+                if isinstance(item, Decl):
+                    for decl_item in item.list:
+                        if isinstance(decl_item, Wire):
+                            net_info = {
+                                "name": decl_item.name,
+                                "type": "wire",
+                                "signed": decl_item.signed if hasattr(decl_item, "signed") else False,
+                            }
+                            if decl_item.width:
+                                if isinstance(decl_item.width.msb, IntConst):
+                                    net_info["msb"] = int(decl_item.width.msb.value)
+                                if isinstance(decl_item.width.lsb, IntConst):
+                                    net_info["lsb"] = int(decl_item.width.lsb.value)
+                            nets.append(net_info)
+
+                        elif isinstance(decl_item, Reg):
+                            reg_info = {
+                                "name": decl_item.name,
+                                "type": "reg",
+                                "signed": decl_item.signed if hasattr(decl_item, "signed") else False,
+                            }
+                            if decl_item.width:
+                                if isinstance(decl_item.width.msb, IntConst):
+                                    reg_info["msb"] = int(decl_item.width.msb.value)
+                                if isinstance(decl_item.width.lsb, IntConst):
+                                    reg_info["lsb"] = int(decl_item.width.lsb.value)
+                            regs.append(reg_info)
+
+        if isinstance(module_obj, dict):
+            module_obj["nets"] = nets
+            module_obj["regs"] = regs
+        else:
+            module_obj.nets = nets
+            module_obj.regs = regs
+
+        return module_obj
+
+    def generate_code(self):
+        """Generate Verilog code from AST"""
+        return self.codegen.visit(self.ast)
+
+    # --------------------------------------------------------------------------
+    # AST Extraction Methods
+    # --------------------------------------------------------------------------
+
+    def extract_instances_from_module(self, module_def):
+        """
+        Extract all instances from a ModuleDef
+
+        Args:
+            module_def: ModuleDef node
+
+        Returns:
+            List of dicts with instance information
+        """
+        instances = []
+
+        if not module_def.items:
+            return instances
+
+        for item in module_def.items:
+            if isinstance(item, InstanceList):
+                # InstanceList contains module name, parameters, and list of instances
+                module_name = item.module
+
+                for inst in item.instances:
+                    inst_info = {
+                        "module_name": module_name,
+                        "instance_name": inst.name,
+                        "ports": {},
+                        "port_details": [],  # Detailed info including bit selects
+                        "parameters": {},
+                    }
+
+                    # Extract port connections using the new method
+                    if inst.portlist:
+                        for port_arg in inst.portlist:
+                            if isinstance(port_arg, PortArg):
+                                port_name, signal_name, msb, lsb = self.extract_portarg_info(port_arg)
+
+                                # Store simple mapping
+                                if port_name and signal_name:
+                                    inst_info["ports"][port_name] = signal_name
+
+                                # Store detailed info
+                                inst_info["port_details"].append({"port": port_name, "signal": signal_name, "msb": msb, "lsb": lsb})
+
+                    # Extract parameters
+                    if inst.parameterlist:
+                        for param_arg in inst.parameterlist:
+                            if isinstance(param_arg, ParamArg):
+                                param_name = param_arg.paramname
+                                if param_arg.argname:
+                                    if isinstance(param_arg.argname, IntConst):
+                                        param_value = param_arg.argname.value
+                                    elif isinstance(param_arg.argname, Identifier):
+                                        param_value = param_arg.argname.name
+                                    else:
+                                        param_value = str(param_arg.argname)
+                                    inst_info["parameters"][param_name] = param_value
+
+                    instances.append(inst_info)
+
+        return instances
+
     def extract_port_info(self, port):
         """
         Extract port information from an Ioport node
@@ -105,6 +345,11 @@ class VerilogModifier:
                 port_info["lsb"] = None
 
         return port_info
+
+    def extract_portarg_with_width(self, port_arg, module_def):
+        info = self.extract_portarg_info(port_arg, module_def)
+        log.warning(f"{info=}")
+        return info
 
     def extract_portarg_info(self, port_arg, module_def):
         """
@@ -180,50 +425,6 @@ class VerilogModifier:
         info.connections, info.total_connection_width = process_arg(argname)
         return info
 
-    def _get_select_from_ptr(self, ptr_node):
-        """Helper to extract MSB and LSB from various pointer-like nodes."""
-        msb, lsb = None, None
-        if isinstance(ptr_node, IntConst):
-            msb = int(ptr_node.value)
-            lsb = int(ptr_node.value)
-        elif isinstance(ptr_node, Identifier):
-            msb = ptr_node.name
-            lsb = ptr_node.name
-        elif hasattr(ptr_node, "__class__") and "Partselect" in ptr_node.__class__.__name__:
-            if hasattr(ptr_node, "msb"):
-                msb = int(ptr_node.msb.value) if isinstance(ptr_node.msb, IntConst) else str(ptr_node.msb)
-            if hasattr(ptr_node, "lsb"):
-                lsb = int(ptr_node.lsb.value) if isinstance(ptr_node.lsb, IntConst) else str(ptr_node.lsb)
-        return msb, lsb
-
-    def _create_connection_info(self, signal_name, select_msb, select_lsb, module_def):
-        """Helper to create a SignalConnectionInfo object and calculate widths."""
-        signal_msb, signal_lsb, signal_type = self.get_signal_width_from_module(module_def, signal_name)
-
-        if signal_msb is not None and signal_lsb is not None:
-            signal_width = abs(signal_msb - signal_lsb) + 1
-        else:
-            signal_width = 1
-
-        if select_msb is not None and select_lsb is not None:
-            if isinstance(select_msb, int) and isinstance(select_lsb, int):
-                connection_width = abs(select_msb - select_lsb) + 1
-            else:
-                connection_width = 1  # Assume 1 for dynamic widths for now
-        else:
-            connection_width = signal_width
-
-        return SignalConnectionInfo(
-            signal_name=signal_name,
-            select_msb=select_msb,
-            select_lsb=select_lsb,
-            signal_msb=signal_msb,
-            signal_lsb=signal_lsb,
-            signal_type=signal_type,
-            signal_width=signal_width,
-            connection_width=connection_width,
-        )
-
     def get_signal_width_from_module(self, module_def, signal_name):
         """
         Get the declared width of a signal (wire/reg/port) in a module
@@ -264,235 +465,9 @@ class VerilogModifier:
 
         return (None, None, None)
 
-    def extract_portarg_with_width(self, port_arg, module_def):
-        info = self.extract_portarg_info(port_arg, module_def)
-        log.warning(f"{info=}")
-        return info
-
-    def add_port_to_module(self, module_def, port_name, direction, msb=None, lsb=None, signed=False):
-        """
-        Add a port to an existing ModuleDef
-
-        Args:
-            module_def: ModuleDef node to modify
-            port_name: Name of the port
-            direction: 'input', 'output', or 'inout'
-            msb: Most significant bit (None for single bit)
-            lsb: Least significant bit (None for single bit)
-            signed: Whether the port is signed
-
-        Returns:
-            Modified ModuleDef
-        """
-        # Create width specification if needed
-        if msb is not None and lsb is not None:
-            width = (msb, lsb)
-        else:
-            width = None
-
-        # Create new port
-        new_port = self.create_port(port_name, direction, width, signed)
-
-        # Add to existing portlist
-        if module_def.portlist and module_def.portlist.ports:
-            current_ports = list(module_def.portlist.ports)
-            current_ports.append(new_port)
-            module_def.portlist.ports = tuple(current_ports)
-        else:
-            module_def.portlist = Portlist([new_port])
-
-        return module_def
-
-    def extract_instances_from_module(self, module_def):
-        """
-        Extract all instances from a ModuleDef
-
-        Args:
-            module_def: ModuleDef node
-
-        Returns:
-            List of dicts with instance information
-        """
-        instances = []
-
-        if not module_def.items:
-            return instances
-
-        for item in module_def.items:
-            if isinstance(item, InstanceList):
-                # InstanceList contains module name, parameters, and list of instances
-                module_name = item.module
-
-                for inst in item.instances:
-                    inst_info = {
-                        "module_name": module_name,
-                        "instance_name": inst.name,
-                        "ports": {},
-                        "port_details": [],  # Detailed info including bit selects
-                        "parameters": {},
-                    }
-
-                    # Extract port connections using the new method
-                    if inst.portlist:
-                        for port_arg in inst.portlist:
-                            if isinstance(port_arg, PortArg):
-                                port_name, signal_name, msb, lsb = self.extract_portarg_info(port_arg)
-
-                                # Store simple mapping
-                                if port_name and signal_name:
-                                    inst_info["ports"][port_name] = signal_name
-
-                                # Store detailed info
-                                inst_info["port_details"].append({"port": port_name, "signal": signal_name, "msb": msb, "lsb": lsb})
-
-                    # Extract parameters
-                    if inst.parameterlist:
-                        for param_arg in inst.parameterlist:
-                            if isinstance(param_arg, ParamArg):
-                                param_name = param_arg.paramname
-                                if param_arg.argname:
-                                    if isinstance(param_arg.argname, IntConst):
-                                        param_value = param_arg.argname.value
-                                    elif isinstance(param_arg.argname, Identifier):
-                                        param_value = param_arg.argname.name
-                                    else:
-                                        param_value = str(param_arg.argname)
-                                    inst_info["parameters"][param_name] = param_value
-
-                    instances.append(inst_info)
-
-        return instances
-
-    def add_instance_to_module(self, module_def, module_name, inst_name, port_connections, parameters=None):
-        """
-        Add an instance to an existing ModuleDef
-
-        Args:
-            module_def: ModuleDef node to modify
-            module_name: Name of the module to instantiate
-            inst_name: Name of the instance
-            port_connections: Dict of {port_name: signal_name}
-            parameters: Dict of {param_name: value} (optional)
-
-        Returns:
-            Modified ModuleDef
-        """
-        # Create the instance
-        instance = self.create_instance(module_name, inst_name, port_connections, parameters)
-
-        # Add to module items
-        if module_def.items:
-            current_items = list(module_def.items)
-            current_items.append(instance)
-            module_def.items = tuple(current_items)
-        else:
-            module_def.items = (instance,)
-
-        return module_def
-
-    def populate_module(self, module_obj, module_def_node):
-        """
-        Populate a module object with instances, nets, and connections from AST
-        This is useful for building an internal representation from parsed Verilog
-
-        Args:
-            module_obj: Your custom module object/dict to populate
-            module_def_node: ModuleDef AST node from pyverilog
-        """
-        # Extract and store ports
-        if hasattr(module_obj, "ports") or isinstance(module_obj, dict):
-            ports = []
-            if module_def_node.portlist and module_def_node.portlist.ports:
-                for port in module_def_node.portlist.ports:
-                    port_info = self.extract_port_info(port)
-                    ports.append(port_info)
-
-            if isinstance(module_obj, dict):
-                module_obj["ports"] = ports
-            else:
-                module_obj.ports = ports
-
-        # Extract and store instances
-        instances = self.extract_instances_from_module(module_def_node)
-        if isinstance(module_obj, dict):
-            module_obj["instances"] = instances
-        else:
-            module_obj.instances = instances
-
-        # Extract nets/wires
-        nets = []
-        regs = []
-        if module_def_node.items:
-            for item in module_def_node.items:
-                if isinstance(item, Decl):
-                    for decl_item in item.list:
-                        if isinstance(decl_item, Wire):
-                            net_info = {
-                                "name": decl_item.name,
-                                "type": "wire",
-                                "signed": decl_item.signed if hasattr(decl_item, "signed") else False,
-                            }
-                            if decl_item.width:
-                                if isinstance(decl_item.width.msb, IntConst):
-                                    net_info["msb"] = int(decl_item.width.msb.value)
-                                if isinstance(decl_item.width.lsb, IntConst):
-                                    net_info["lsb"] = int(decl_item.width.lsb.value)
-                            nets.append(net_info)
-
-                        elif isinstance(decl_item, Reg):
-                            reg_info = {
-                                "name": decl_item.name,
-                                "type": "reg",
-                                "signed": decl_item.signed if hasattr(decl_item, "signed") else False,
-                            }
-                            if decl_item.width:
-                                if isinstance(decl_item.width.msb, IntConst):
-                                    reg_info["msb"] = int(decl_item.width.msb.value)
-                                if isinstance(decl_item.width.lsb, IntConst):
-                                    reg_info["lsb"] = int(decl_item.width.lsb.value)
-                            regs.append(reg_info)
-
-        if isinstance(module_obj, dict):
-            module_obj["nets"] = nets
-            module_obj["regs"] = regs
-        else:
-            module_obj.nets = nets
-            module_obj.regs = regs
-
-        return module_obj
-
-    def add_module(self, module_def):
-        """
-        Add a new module definition to the AST
-
-        Args:
-            module_def: ModuleDef node to add
-        """
-        if not self.ast.description:
-            # Create description if it doesn't exist
-            self.ast.description = Description([module_def])
-        else:
-            # Add to existing definitions
-            current_defs = list(self.ast.description.definitions)
-            current_defs.append(module_def)
-            # Replace with new tuple
-            self.ast.description = Description(tuple(current_defs))
-
-        return self.ast
-
-    def create_paramlist_from_strlist(self, param_names: List[str]) -> Paramlist:
-        """
-        Creates a pyverilog Paramlist node from a list of parameter names.
-        Each parameter is assigned a safe default value (IntConst('1')).
-        """
-
-        # Define a safe default value node for the parameter
-        default_value_node = IntConst("1")
-
-        # Use a list comprehension to create the list of vast.Param nodes
-        param_nodes = [Parameter(name=name, value=default_value_node, width=None, signed=None) for name in param_names]
-        paramlist = Paramlist(param_nodes)
-        return paramlist
+    # --------------------------------------------------------------------------
+    # AST Creation Methods
+    # --------------------------------------------------------------------------
 
     def create_module(self, module_name, ports=None, items=None, parameters=None):
         """
@@ -512,6 +487,39 @@ class VerilogModifier:
         module = ModuleDef(name=module_name, paramlist=paramlist, portlist=portlist, items=items or [])
 
         return module
+
+    def create_instance(self, module_name, inst_name, port_connections, parameters=None):
+        """
+        Create a module instance
+
+        Args:
+            module_name: Name of the module to instantiate
+            inst_name: Name of the instance
+            port_connections: Dict of {port_name: signal_name} or list of PortArg
+            parameters: Dict of {param_name: value} or list of ParamArg
+
+        Returns:
+            InstanceList node
+        """
+        # Create parameter list
+        param_list = []
+        if parameters:
+            if isinstance(parameters, dict):
+                for name, value in parameters.items():
+                    param_list.append(ParamArg(paramname=name, argname=Identifier(value)))
+            else:
+                param_list = parameters
+
+        # Create port connections
+        if isinstance(port_connections, dict):
+            port_args = [PortArg(portname=port, argname=Identifier(signal)) for port, signal in port_connections.items()]
+        else:
+            port_args = port_connections
+
+        # Create instance
+        instance = Instance(module=module_name, name=inst_name, portlist=port_args, parameterlist=param_list)
+
+        return InstanceList(module_name, param_list, [instance])
 
     def create_port(self, port_name, port_type="input", width=None, signed=False):
         """
@@ -587,59 +595,68 @@ class VerilogModifier:
         reg = Reg(name=reg_name, width=width_node, signed=signed)
         return Decl([reg])
 
-    def create_instance(self, module_name, inst_name, port_connections, parameters=None):
+    def create_paramlist_from_strlist(self, param_names: List[str]) -> Paramlist:
         """
-        Create a module instance
-
-        Args:
-            module_name: Name of the module to instantiate
-            inst_name: Name of the instance
-            port_connections: Dict of {port_name: signal_name} or list of PortArg
-            parameters: Dict of {param_name: value} or list of ParamArg
-
-        Returns:
-            InstanceList node
+        Creates a pyverilog Paramlist node from a list of parameter names.
+        Each parameter is assigned a safe default value (IntConst('1')).
         """
-        # Create parameter list
-        param_list = []
-        if parameters:
-            if isinstance(parameters, dict):
-                for name, value in parameters.items():
-                    param_list.append(ParamArg(paramname=name, argname=Identifier(value)))
-            else:
-                param_list = parameters
 
-        # Create port connections
-        if isinstance(port_connections, dict):
-            port_args = [PortArg(portname=port, argname=Identifier(signal)) for port, signal in port_connections.items()]
+        # Define a safe default value node for the parameter
+        default_value_node = IntConst("1")
+
+        # Use a list comprehension to create the list of vast.Param nodes
+        param_nodes = [Parameter(name=name, value=default_value_node, width=None, signed=None) for name in param_names]
+        paramlist = Paramlist(param_nodes)
+        return paramlist
+
+    # --------------------------------------------------------------------------
+    # Private Helper Methods
+    # --------------------------------------------------------------------------
+
+    def _get_select_from_ptr(self, ptr_node):
+        """Helper to extract MSB and LSB from various pointer-like nodes."""
+        msb, lsb = None, None
+        if isinstance(ptr_node, IntConst):
+            msb = int(ptr_node.value)
+            lsb = int(ptr_node.value)
+        elif isinstance(ptr_node, Identifier):
+            msb = ptr_node.name
+            lsb = ptr_node.name
+        elif hasattr(ptr_node, "__class__") and "Partselect" in ptr_node.__class__.__name__:
+            if hasattr(ptr_node, "msb"):
+                msb = int(ptr_node.msb.value) if isinstance(ptr_node.msb, IntConst) else str(ptr_node.msb)
+            if hasattr(ptr_node, "lsb"):
+                lsb = int(ptr_node.lsb.value) if isinstance(ptr_node.lsb, IntConst) else str(ptr_node.lsb)
+        return msb, lsb
+
+    def _create_connection_info(self, signal_name, select_msb, select_lsb, module_def):
+        """Helper to create a SignalConnectionInfo object and calculate widths."""
+        signal_msb, signal_lsb, signal_type = self.get_signal_width_from_module(module_def, signal_name)
+
+        if signal_msb is not None and signal_lsb is not None:
+            signal_width = abs(signal_msb - signal_lsb) + 1
         else:
-            port_args = port_connections
+            signal_width = 1
 
-        # Create instance
-        instance = Instance(module=module_name, name=inst_name, portlist=port_args, parameterlist=param_list)
+        if select_msb is not None and select_lsb is not None:
+            if isinstance(select_msb, int) and isinstance(select_lsb, int):
+                connection_width = abs(select_msb - select_lsb) + 1
+            else:
+                connection_width = 1  # Assume 1 for dynamic widths for now
+        else:
+            connection_width = signal_width
 
-        return InstanceList(module_name, param_list, [instance])
+        return SignalConnectionInfo(
+            signal_name=signal_name,
+            select_msb=select_msb,
+            select_lsb=select_lsb,
+            signal_msb=signal_msb,
+            signal_lsb=signal_lsb,
+            signal_type=signal_type,
+            signal_width=signal_width,
+            connection_width=connection_width,
+        )
 
-    def add_item_to_module(self, module_name, item):
-        """
-        Add an item (wire, reg, instance, etc.) to an existing module
-
-        Args:
-            module_name: Name of the module to modify
-            item: AST node to add (Decl, InstanceList, etc.)
-        """
-        for definition in self.ast.description.definitions:
-            if isinstance(definition, ModuleDef) and definition.name == module_name:
-                # Add item to module
-                current_items = list(definition.items)
-                current_items.append(item)
-                definition.items = tuple(current_items)
-                return True
-        return False
-
-    def generate_code(self):
-        """Generate Verilog code from AST"""
-        return self.codegen.visit(self.ast)
 
 
 def example_create_simple_module():
