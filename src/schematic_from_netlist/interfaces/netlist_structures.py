@@ -30,12 +30,8 @@ class NetType(Enum):
 @dataclass
 class Bus:
     name: str = ""
-    bit_width: int = 1
-    bit_range: Optional[Tuple[int, int]] = None  # (msb, lsb)
-    # A dictionary to store references to the individual Bit Nets it contains.
-    # Key: Bit index (e.g., 7, 6, 0)
-    # Value: The single-bit Net object
-    bit_nets: Dict[int, "Net"] = field(default_factory=dict)
+    msb: Optional[int] = None
+    lsb: Optional[int] = None
 
 
 # -----------------------------
@@ -48,7 +44,7 @@ class Port:
     name: str
     direction: PinDirection
     module: Module
-    parent_bus: Optional[Bus] = None  # Reference to the full Bus object (Layer 1)
+    bus: Optional[Bus] = None  # Reference to the full Bus object (Layer 1)
 
     fig: Optional[Tuple[float, float]] = None
     shape: Optional[Tuple[int, int]] = None
@@ -66,7 +62,7 @@ class Pin:
     direction: PinDirection
     instance: Instance
     net: Optional["Net"] = None
-    parent_bus: Optional[Bus] = None  # Reference to the full Bus object (Layer 1)
+    bus: Optional[Bus] = None  # Reference to the full Bus object (Layer 1)
     bit_index: Optional[int] = None  # The specific index within the parent bus (e.g., 3)
 
     fig: Optional[Tuple[float, float]] = None
@@ -105,8 +101,7 @@ class Net:
     name: str
     module: "Module"
     net_type: NetType = NetType.WIRE
-    parent_bus: Optional[Bus] = None  # Reference to the full Bus object (Layer 1)
-    bit_index: Optional[int] = None  # The specific index within the parent bus (e.g., 3)
+    bus: Optional[Bus] = field(default=None)
 
     pins: Set[Pin] = field(default_factory=set)
     id: int = -1
@@ -315,6 +310,16 @@ class Module:
     def add_instance(self, inst_name: str, module: Module, module_ref: str) -> Instance:
         instance = Instance(name=inst_name, module=module, module_ref=module_ref, parent_module=self)
         self.instances[inst_name] = instance
+
+        # Automatically create pins for the instance based on the module's ports
+        for port in module.ports.values():
+            if port.bus:
+                for i in range(port.bus.lsb, port.bus.msb + 1):
+                    pin_name = f"{port.name}[{i}]"
+                    instance.add_pin(pin_name, port.direction)
+            else:
+                instance.add_pin(port.name, port.direction)
+
         return instance
 
     def remove_instance(self, inst_name: str) -> Optional[Instance]:
