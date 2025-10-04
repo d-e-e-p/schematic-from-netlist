@@ -92,7 +92,7 @@ class Graphviz:
         log.info(f"Generating layout for module {module.name}")
         os.makedirs("data/png", exist_ok=True)
 
-        A = pgv.AGraph(directed=True, strict=False, rankdir="TB", ratio="auto")
+        A = pgv.AGraph(directed=True, strict=False, ratio="auto")
         self.set_attributes(A)
         self.add_nodes(A, module)
         self.add_edges(A, module)
@@ -105,6 +105,8 @@ class Graphviz:
         add_stubs = False
         # Add edges for internal nets
         for net in module.nets.values():
+            # if net.name.startswith("GND") or net.name.startswith("_3V3") or net.name.startswith("VBUS"):
+            #    continue
             pins = list(net.pins)
             if len(pins) > 1:
                 src = pins[0]
@@ -214,14 +216,14 @@ class Graphviz:
     def run_graphviz(self, A, module):
         # Layout and extract size
         os.makedirs("data/dot", exist_ok=True)
-        A.write(f"data/dot/pre_module_{module.name}.dot")
+        A.write(f"data/dot/pre_{module.name}.dot")
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", category=RuntimeWarning)
             A.layout(prog="dot", args="-y")
-        A.write(f"data/dot/post_module_{module.name}.dot")
+        A.write(f"data/dot/post_{module.name}.dot")
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", category=RuntimeWarning)
-            A.draw(f"data/png/post_module_{module.name}.png", format="png")
+            A.draw(f"data/png/post_{module.name}.png", format="png")
 
     def build_graphviz_data(self):
         """
@@ -475,19 +477,21 @@ class Graphviz:
     def set_attributes(self, A):
         """Sets graph, node, and edge attributes."""
         A.graph_attr.update(
-            layout="dot",
             K="0.2",
-            maxiter="10000",
-            mclimit="10",  # allow more time for mincross optimization
-            nslimit="10",  # allow more time for network simplex
-            nslimit1="10",  # same for phase 3 placement
+            maxiter="50000",
+            mclimit="9999",  # allow more time for mincross optimization
+            nslimit="9999",  # allow more time for network simplex
+            nslimit1="9999",  # same for phase 3 placement
             overlap="vpsc",
             pack="true",
             packmode="graph",
-            sep="+2,2",
+            # sep="+2,2",
+            sep="+20,20",
             esep="+2,2",
-            epsilon="0.0001",
-            rankdir="tb",
+            epsilon="1e-7",
+            rankdir="LR",
+            start="rand",  # better escape from local minima
+            mode="hier",  # hierarchical bias
             ratio="auto",
             splines="ortho",
         )
