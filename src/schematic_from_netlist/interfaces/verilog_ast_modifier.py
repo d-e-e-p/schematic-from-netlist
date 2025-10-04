@@ -22,6 +22,33 @@ class portInfo:
     signed: bool = field(default=False)
 
 
+@dataclass
+class SignalConnectionInfo:
+    """Represents a single signal part of a connection."""
+
+    signal_name: Optional[str] = None
+    select_msb: Optional[int] = None
+    select_lsb: Optional[int] = None
+    signal_msb: Optional[int] = None
+    signal_lsb: Optional[int] = None
+    signal_type: Optional[str] = None
+    signal_width: int = 1
+    connection_width: int = 1
+
+
+@dataclass
+class portArgInfo:
+    """Represents a port argument, which can be a single signal or a bundle."""
+
+    port_name: Optional[str] = None
+    is_bundle: bool = False
+    connections: List["SignalConnectionInfo"] = field(default_factory=list)
+    total_connection_width: int = 0
+
+
+
+
+
 class VerilogModifier:
     """Helper class to modify Verilog AST"""
 
@@ -79,96 +106,123 @@ class VerilogModifier:
 
         return port_info
 
-    def extract_portarg_info(self, port_arg):
+    def extract_portarg_info(self, port_arg, module_def):
         """
         Extract information from a PortArg node (port connection in an instance)
 
         Args:
             port_arg: PortArg node from an instance's portlist
+            module_def: The module definition containing the instance for context
 
         Returns:
-            tuple: (port_name, signal_name, msb, lsb) where msb/lsb are for bit selects
-                   in the connection itself (e.g., signal[7:0]), NOT the signal's declared width
+            portArgInfo object fully populated
         """
-        port_name = None
-        signal_name = None
-        msb = None
-        lsb = None
+        port_name = port_arg.portname if hasattr(port_arg, "portname") else None
+        argname = port_arg.argname if hasattr(port_arg, "argname") else None
 
-        # Get port name
-        if hasattr(port_arg, "portname") and port_arg.portname:
-            port_name = port_arg.portname
+        info = portArgInfo(port_name=port_name)
 
-        # Get connected signal/expression
-        if hasattr(port_arg, "argname") and port_arg.argname:
-            argname = port_arg.argname
+        if argname is None:
+            return info
 
-            # Simple identifier (most common case)
-            if isinstance(argname, Identifier):
-                signal_name = argname.name
+        # This internal function handles recursion for nested concatenations
+        def process_arg(arg_node):
+            connections = []
+            total_width = 0
+
+            # Simple identifier
+            if isinstance(arg_node, Identifier):
+                conn = self._create_connection_info(arg_node.name, None, None, module_def)
+                connections.append(conn)
+                total_width = conn.connection_width
 
             # Pointer (bit or part select)
-            elif isinstance(argname, Pointer):
-                # Pointer has .var (the signal) and .ptr (the index/range)
-                if hasattr(argname, "var") and isinstance(argname.var, Identifier):
-                    signal_name = argname.var.name
+            elif isinstance(arg_node, Pointer):
+                signal_name = arg_node.var.name if hasattr(arg_node, "var") else None
+                msb, lsb = self._get_select_from_ptr(arg_node.ptr)
+                conn = self._create_connection_info(signal_name, msb, lsb, module_def)
+                connections.append(conn)
+                total_width = conn.connection_width
 
-                # Check if it's a bit select or range select
-                if hasattr(argname, "ptr"):
-                    ptr = argname.ptr
-
-                    # Single bit select: signal[5]
-                    if isinstance(ptr, IntConst):
-                        msb = int(ptr.value)
-                        lsb = int(ptr.value)
-                    elif isinstance(ptr, Identifier):
-                        msb = ptr.name
-                        lsb = ptr.name
-                    # Range select: signal[7:0] (Partselect)
-                    elif hasattr(ptr, "__class__") and "Partselect" in ptr.__class__.__name__:
-                        if hasattr(ptr, "msb"):
-                            if isinstance(ptr.msb, IntConst):
-                                msb = int(ptr.msb.value)
-                            else:
-                                msb = str(ptr.msb)
-                        if hasattr(ptr, "lsb"):
-                            if isinstance(ptr.lsb, IntConst):
-                                lsb = int(ptr.lsb.value)
-                            else:
-                                lsb = str(ptr.lsb)
-                    else:
-                        log.warning(f"Unknown element in verilog: {ptr.show()}")
-
-            # Concatenation: {signal1, signal2}
-            elif isinstance(argname, Concat):
-                # Build concatenation string
-                concat_signals = []
-                if hasattr(argname, "list"):
-                    for item in argname.list:
-                        if isinstance(item, Identifier):
-                            concat_signals.append(item.name)
-                        else:
-                            concat_signals.append(str(item))
-                signal_name = "{" + ", ".join(concat_signals) + "}"
+            # Concatenation: {signal1, signal2, ...}
+            elif isinstance(arg_node, Concat):
+                info.is_bundle = True
+                for item in arg_node.list:
+                    # Recursively process each item in the concatenation
+                    nested_conns, nested_width = process_arg(item)
+                    connections.extend(nested_conns)
+                    total_width += nested_width
 
             # Constant value
-            elif isinstance(argname, IntConst):
-                signal_name = argname.value
-            elif isinstance(argname, Partselect):
-                if hasattr(argname, "var"):
-                    signal_name = argname.var.name
-                if hasattr(argname, "msb"):
-                    if isinstance(argname.msb, IntConst):
-                        msb = int(argname.msb.value)
-                if hasattr(argname, "lsb"):
-                    if isinstance(argname.lsb, IntConst):
-                        lsb = int(argname.lsb.value)
+            elif isinstance(arg_node, IntConst):
+                conn = self._create_connection_info(arg_node.value, None, None, module_def)
+                connections.append(conn)
+                total_width = conn.connection_width  # Width of a constant is tricky, assume 1 for now
 
-            # Other expressions (unary, binary operations, etc.)
+            # Partselect
+            elif isinstance(arg_node, Partselect):
+                signal_name = arg_node.var.name if hasattr(arg_node, "var") else None
+                msb, lsb = self._get_select_from_ptr(arg_node)
+                conn = self._create_connection_info(signal_name, msb, lsb, module_def)
+                connections.append(conn)
+                total_width = conn.connection_width
+
+            # Other expressions
             else:
-                log.warning(f"ignoring element in verilog: {argname.show()}")
-                signal_name = str(argname)
-        return (port_name, signal_name, msb, lsb)
+                log.warning(f"Ignoring unknown element in port connection: {arg_node.show()}")
+                signal_name = str(arg_node)
+                conn = self._create_connection_info(signal_name, None, None, module_def)
+                connections.append(conn)
+                total_width = conn.connection_width
+
+            return connections, total_width
+
+        info.connections, info.total_connection_width = process_arg(argname)
+        return info
+
+    def _get_select_from_ptr(self, ptr_node):
+        """Helper to extract MSB and LSB from various pointer-like nodes."""
+        msb, lsb = None, None
+        if isinstance(ptr_node, IntConst):
+            msb = int(ptr_node.value)
+            lsb = int(ptr_node.value)
+        elif isinstance(ptr_node, Identifier):
+            msb = ptr_node.name
+            lsb = ptr_node.name
+        elif hasattr(ptr_node, "__class__") and "Partselect" in ptr_node.__class__.__name__:
+            if hasattr(ptr_node, "msb"):
+                msb = int(ptr_node.msb.value) if isinstance(ptr_node.msb, IntConst) else str(ptr_node.msb)
+            if hasattr(ptr_node, "lsb"):
+                lsb = int(ptr_node.lsb.value) if isinstance(ptr_node.lsb, IntConst) else str(ptr_node.lsb)
+        return msb, lsb
+
+    def _create_connection_info(self, signal_name, select_msb, select_lsb, module_def):
+        """Helper to create a SignalConnectionInfo object and calculate widths."""
+        signal_msb, signal_lsb, signal_type = self.get_signal_width_from_module(module_def, signal_name)
+
+        if signal_msb is not None and signal_lsb is not None:
+            signal_width = abs(signal_msb - signal_lsb) + 1
+        else:
+            signal_width = 1
+
+        if select_msb is not None and select_lsb is not None:
+            if isinstance(select_msb, int) and isinstance(select_lsb, int):
+                connection_width = abs(select_msb - select_lsb) + 1
+            else:
+                connection_width = 1  # Assume 1 for dynamic widths for now
+        else:
+            connection_width = signal_width
+
+        return SignalConnectionInfo(
+            signal_name=signal_name,
+            select_msb=select_msb,
+            select_lsb=select_lsb,
+            signal_msb=signal_msb,
+            signal_lsb=signal_lsb,
+            signal_type=signal_type,
+            signal_width=signal_width,
+            connection_width=connection_width,
+        )
 
     def get_signal_width_from_module(self, module_def, signal_name):
         """
@@ -211,62 +265,9 @@ class VerilogModifier:
         return (None, None, None)
 
     def extract_portarg_with_width(self, port_arg, module_def):
-        return self.extract_portarg_with_width_helper(port_arg, module_def)
-
-    def extract_portarg_with_width_helper(self, port_arg, module_def):
-        """
-        Extract PortArg info AND the declared width of the connected signal
-
-        Args:
-            port_arg: PortArg node
-            module_def: ModuleDef node (parent module containing this connection)
-
-        Returns:
-            dict with:
-                - port_name: Name of the port being connected
-                - signal_name: Name of the signal/expression being connected
-                - select_msb: MSB of bit/part select in connection (if any)
-                - select_lsb: LSB of bit/part select in connection (if any)
-                - signal_msb: MSB of signal's declared width
-                - signal_lsb: LSB of signal's declared width
-                - signal_type: Type of signal ('wire', 'reg', 'input', 'output', etc.)
-                - signal_width: Full declared width of the signal
-                - connection_width: Actual width being connected (considering bit/part selects)
-        """
-        # Get basic connection info
-        port_name, signal_name, select_msb, select_lsb = self.extract_portarg_info(port_arg)
-
-        # Get signal's declared width
-        signal_msb, signal_lsb, signal_type = self.get_signal_width_from_module(module_def, signal_name)
-
-        # Calculate full declared width
-        if signal_msb is not None and signal_lsb is not None:
-            signal_width = abs(signal_msb - signal_lsb) + 1
-        else:
-            signal_width = 1
-
-        # Calculate actual connection width
-        # If there's a bit/part select in the connection, use that
-        # Otherwise, use the full signal width
-        if select_msb is not None and select_lsb is not None:
-            if isinstance(select_msb, int) and isinstance(select_lsb, int):
-                connection_width = abs(select_msb - select_lsb) + 1
-            else:
-                connection_width = None  # Dynamic/parameter-based width
-        else:
-            connection_width = signal_width
-
-        return {
-            "port_name": port_name,
-            "signal_name": signal_name,
-            "select_msb": select_msb,  # From connection like A(B[7:0])
-            "select_lsb": select_lsb,
-            "signal_msb": signal_msb,  # From declaration like wire [7:0] B;
-            "signal_lsb": signal_lsb,
-            "signal_type": signal_type,
-            "signal_width": signal_width,  # Full declared width
-            "connection_width": connection_width,  # Actual width being connected
-        }
+        info = self.extract_portarg_info(port_arg, module_def)
+        log.warning(f"{info=}")
+        return info
 
     def add_port_to_module(self, module_def, port_name, direction, msb=None, lsb=None, signed=False):
         """

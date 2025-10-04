@@ -20,7 +20,10 @@ from schematic_from_netlist.interfaces.netlist_database import (
     PinDirection,
     Port,
 )
-from schematic_from_netlist.interfaces.verilog_ast_modifier import VerilogModifier
+from schematic_from_netlist.interfaces.verilog_ast_modifier import (
+    VerilogModifier,
+    portArgInfo,
+)
 
 log = logging.getLogger(__name__)
 
@@ -79,7 +82,7 @@ class mInst:
 class mModule:
     name: str = ""
     insts: Set[mInst] = field(default_factory=set)
-    ports: Set[mPort] = field(default_factory=set)
+    ports: List[mPort] = field(default_factory=list)
     nets: Set[mNet] = field(default_factory=set)
     level: int = 0
     is_stub: bool = False
@@ -87,7 +90,7 @@ class mModule:
 
     def add_port(self, name, direction, msb=0, lsb=0):
         port = mPort(name, direction, msb, lsb)
-        self.ports.add(port)
+        self.ports.append(port)
 
     def add_net(self, name, bus=None):
         net = mNet(name, bus)
@@ -175,11 +178,21 @@ class VerilogParser:
 
     def walk_add_module(self, node):
         module_name = self._clean_name(node.name)
-        module = mModule(name=module_name)
-        self.modules[module_name] = module
+        
+        # If a stub for this module already exists, update it.
+        # Otherwise, create a new module object.
+        module = self.modules.get(module_name, mModule(name=module_name))
+        module.is_stub = False # It's a real module definition now
+        
+        if module_name not in self.modules:
+            self.modules[module_name] = module
+
         if not self.top_module_name:
             self.top_module_name = module_name
 
+        # Clear any placeholder ports from the stub and add the real ones
+        module.ports.clear()
+        
         # Collect ports
         if node.portlist:
             for port in node.portlist.ports:
@@ -189,50 +202,118 @@ class VerilogParser:
                     module.add_port(name, direction)
                     module.add_net(name)
                 else:
-                    module.add_port(name, direction, msb=msb, lsb=lsb)
-                    module.add_bus(name, msb=msb, lsb=lsb)
+                    module.add_port(name, direction, msb=int(msb), lsb=int(lsb))
+                    module.add_bus(name, msb=int(msb), lsb=int(lsb))
 
     def get_port_name_from_module_port_position(self, module, position, select_msb, select_lsb):
         return "foo"
 
+    def _get_bit_mapping(self, info: "portArgInfo", port_info: "mPort") -> List[Tuple[str, str]]:
+        """
+        Generates a list of bit-level connections between port pins and signal pins.
+
+        Args:
+            info: A portArgInfo object describing the connection.
+            port_info: An mPort object describing the port on the module.
+
+        Returns:
+            A list of tuples, where each tuple is (port_pin_str, signal_pin_str).
+        """
+        port_name = info.port_name
+        port_width = abs(port_info.msb - port_info.lsb) + 1 if port_info.msb is not None else 1
+
+        # Create a flat list of all signal bits being connected, from MSB to LSB
+        signal_bits = []
+        for conn in info.connections:
+            msb = conn.select_msb if conn.select_msb is not None else conn.signal_msb
+            lsb = conn.select_lsb if conn.select_lsb is not None else conn.signal_lsb
+
+            if msb is None and lsb is None:  # Single bit signal
+                signal_bits.append(conn.signal_name)
+                continue
+
+            try:
+                msb, lsb = int(msb), int(lsb)
+            except (ValueError, TypeError):
+                log.warning(f"Cannot expand non-integer bus slice for signal '{conn.signal_name}' on port '{port_name}'.")
+                unexpanded_signal = f"{conn.signal_name}[{msb}:{lsb}]" if msb is not None else conn.signal_name
+                signal_bits.append(unexpanded_signal)
+                continue
+
+            if msb >= lsb:  # Descending order e.g., [7:0]
+                for i in range(msb, lsb - 1, -1):
+                    signal_bits.append(f"{conn.signal_name}[{i}]")
+            else:  # Ascending order e.g., [0:7]
+                for i in range(lsb, msb + 1):
+                    signal_bits.append(f"{conn.signal_name}[{i}]")
+
+        # Check for width mismatch
+        if len(signal_bits) != port_width:
+            log.warning(
+                f"Connection width mismatch for port '{port_name}'. "
+                f"Port width is {port_width}, but signal connection width is {len(signal_bits)}."
+            )
+            # Return a single entry representing the unexpanded connection
+            return [(port_name, "{" + ",".join(signal_bits) + "}")]
+
+        # Create a flat list of all port pins, from MSB to LSB
+        port_pins = []
+        if port_width == 1:
+            port_pins.append(port_name)
+        else:
+            if port_info.msb >= port_info.lsb:  # Descending order
+                for i in range(port_info.msb, port_info.lsb - 1, -1):
+                    port_pins.append(f"{port_name}[{i}]")
+            else:  # Ascending order
+                for i in range(port_info.msb, port_info.lsb + 1):
+                    port_pins.append(f"{port_name}[{i}]")
+
+        # The first signal bit (from the leftmost Verilog element) maps to the first port pin (MSB)
+        return list(zip(port_pins, signal_bits))
+
     def pop_add_instance(self, vinst, module, module_node):
         module_ref_name = self._clean_name(vinst.module)
         if module_ref_name not in self.modules:
-            # need to create stub first
             self.pop_create_stub_module(module_ref_name, vinst, module_node)
+
         module_ref = self.modules[module_ref_name]
         inst = module.add_inst(vinst.name, module_ref)
+
         if vinst.parameterlist:
-            # 'parameterlist' is a vast.ParamArgList, which contains vast.ParamArg objects
             for param_arg in vinst.parameterlist:
                 param_name = self._clean_name(param_arg.paramname)
                 inst.add_parameter(param_name)
+
         for i, port_arg in enumerate(vinst.portlist):
             info = self.modifier.extract_portarg_with_width(port_arg, module_node)
-            port_name, signal_name, select_msb, select_lsb, signal_msb, signal_lsb, signal_type, signal_width, connection_width = (
-                info["port_name"],
-                info["signal_name"],
-                info["select_msb"],
-                info["select_lsb"],
-                info["signal_msb"],
-                info["signal_lsb"],
-                info["signal_type"],
-                info["signal_width"],
-                info["connection_width"],
-            )
-            if hasattr(port_arg, "portname") and port_arg.portname:
-                port_name = port_arg.portname
+
+            port_info = None
+            port_name = info.port_name
+
+            if port_name:
+                # Named port connection
+                port_info = next((p for p in module_ref.ports if p.name == port_name), None)
             else:
-                # not using .A(B) notation, so count ports on module
-                port_name = self.get_port_name_from_module_port_position(module, i, select_msb, select_lsb)
-            if select_msb is not None and select_lsb is not None:
-                if select_msb == select_lsb:
-                    print(f"Adding connection {inst.name}/{port_name} -> {signal_name}[{select_msb}]")
+                # Positional port connection
+                if i < len(module_ref.ports):
+                    port_info = module_ref.ports[i]
+                    info.port_name = port_info.name
                 else:
-                    print(f"Adding connection {inst.name}/{port_name} -> {signal_name}[{select_msb}:{select_lsb}]")
-            else:
-                print(f"Adding connection {inst.name}/{port_name} -> {signal_name}")
-            # inst.connect_pin(port_name, signal_name)
+                    log.error(
+                        f"Positional connection index {i} is out of bounds for module '{module_ref.name}' "
+                        f"(has {len(module_ref.ports)} ports). Skipping connection for instance '{inst.name}'."
+                    )
+                    continue
+
+            if not port_info:
+                log.error(f"Port '{port_name}' not found in module '{module_ref.name}' for instance '{inst.name}'")
+                continue
+
+            # Get the bit-level mapping and print the connections
+            mapping = self._get_bit_mapping(info, port_info)
+            for port_pin, signal_pin in mapping:
+                print(f"Adding connection {inst.name}/{port_pin} -> {signal_pin}")
+
 
     def pop_create_stub_module(self, module_ref_name, vinst, module_node):
         # module_ref = self.modules.get(module_ref_name)
@@ -248,27 +329,22 @@ class VerilogParser:
                 module_ref.add_parameter(param_name)
         for i, port_arg in enumerate(vinst.portlist):
             info = self.modifier.extract_portarg_with_width(port_arg, module_node)
-            port_name, signal_name, select_msb, select_lsb, signal_msb, signal_lsb, signal_type, signal_width, connection_width = (
-                info["port_name"],
-                info["signal_name"],
-                info["select_msb"],
-                info["select_lsb"],
-                info["signal_msb"],
-                info["signal_lsb"],
-                info["signal_type"],
-                info["signal_width"],
-                info["connection_width"],
-            )
-            if hasattr(port_arg, "portname") and port_arg.portname:
-                port_name = port_arg.portname
-            else:
-                # stub module...so just make up name
-                port_name = f"PIN{i}"
 
-            if connection_width == 1:
+            port_name = info.port_name
+            if not port_name:
+                # For positional stubs, we must create ports in order.
+                # The real names will be resolved when the actual module is parsed.
+                if i < len(module_ref.ports):
+                    port_name = module_ref.ports[i].name
+                else:
+                    # Create a placeholder name
+                    port_name = f"p{i}"
+                info.port_name = port_name
+
+            if info.total_connection_width <= 1:
                 module_ref.add_port(port_name, "inout")
             else:
-                (msb, lsb) = (connection_width - 1, 0)
+                (msb, lsb) = (info.total_connection_width - 1, 0)
                 module_ref.add_port(port_name, direction="inout", msb=msb, lsb=lsb)
                 module_ref.add_bus(port_name, msb=msb, lsb=lsb)
 
