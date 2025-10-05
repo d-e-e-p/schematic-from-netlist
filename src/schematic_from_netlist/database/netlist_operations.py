@@ -10,7 +10,7 @@ from typing import Dict, List, Optional
 
 from schematic_from_netlist.graph.graph_partition import Edge, HypergraphData
 
-from .netlist_structures import Cluster, Instance, Module, Net, Pin, PinDirection
+from .netlist_structures import Instance, Module, Net, Pin, PinDirection
 
 
 class NetlistOperationsMixin:
@@ -167,7 +167,7 @@ class NetlistOperationsMixin:
         logging.info(f"instrumentation: in {module.name} Found {len(nets_to_buffer)} nets to buffer.")
         for net in nets_to_buffer:
             original_net_name = net.name
-            net.shape = []
+            net.draw.shape = []
             logging.debug(f"instrumentation: in {module.name} Buffering net {original_net_name} with {net.num_conn} connections.")
             i = 0
             buffer_name = f"{self.inserted_buf_prefix}{i}_{original_net_name}"
@@ -235,7 +235,7 @@ class NetlistOperationsMixin:
                 net = self.top_module.nets[net_name]
                 logging.debug(f"looking for original of {net_name=} =  {net.buffer_original_netname}")
                 original_net = self.nets_by_name.get(net.buffer_original_netname)
-                original_net.shape.extend(net.shape)
+                original_net.draw.shape.extend(net.draw.shape)
                 del self.top_module.nets[net_name]
 
         self.buffered_nets_log.clear()
@@ -436,14 +436,14 @@ class NetlistOperationsMixin:
 
     def clear_all_shapes(self):
         for inst in self.top_module.get_all_instances().values():
-            inst.shape = None
+            inst.draw.shape = None
 
         for net in self.top_module.get_all_nets().values():
-            net.shape.clear()
-            net.buffer_patch_points.clear()
+            net.draw.shape.clear()
+            net.draw.buffer_patch_points.clear()
 
         for pin in self.top_module.get_all_pins().values():
-            pin.shape = None
+            pin.draw.shape = None
 
     def geom2shape(self):
         """Convert all geom objects to shape."""

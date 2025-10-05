@@ -7,6 +7,15 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 from shapely.geometry import LineString, MultiLineString, Point, Polygon, box
 
+from schematic_from_netlist.database.physical_structures import (
+    DesignPhysical,
+    InstancePhysical,
+    ModulePhysical,
+    NetPhysical,
+    PinPhysical,
+    PortPhysical,
+)
+
 
 # -----------------------------
 # Enums
@@ -45,10 +54,7 @@ class Port:
     direction: PinDirection
     module: Module
     bus: Optional[Bus] = None  # Reference to the full Bus object (Layer 1)
-
-    fig: Optional[Tuple[float, float]] = None
-    shape: Optional[Tuple[int, int]] = None
-    geom: Optional[Point] = None
+    draw: PortPhysical = field(default_factory=PortPhysical)
 
 
 # -----------------------------
@@ -64,25 +70,7 @@ class Pin:
     net: Optional["Net"] = None
     bus: Optional[Bus] = None  # Reference to the full Bus object (Layer 1)
     bit_index: Optional[int] = None  # The specific index within the parent bus (e.g., 3)
-
-    fig: Optional[Tuple[float, float]] = None
-    shape: Optional[Tuple[int, int]] = None
-    geom: Optional[Point] = None
-
-    def shape2geom(self):
-        if self.shape is None:
-            self.geom = None
-            return None
-        x, y = self.shape
-        self.geom = Point(round(x), round(y))
-        return self.geom
-
-    def geom2shape(self):
-        if self.geom is None:
-            self.shape = None
-            return None
-        self.shape = (int(self.geom.x), int(self.geom.y))
-        return self.shape
+    draw: PinPhysical = field(default_factory=PinPhysical)
 
     def __post_init__(self):
         self.full_name = f"{self.instance.full_name}/{self.name}"
@@ -108,11 +96,7 @@ class Net:
     num_conn: int = 0
     is_buffer_wire: bool = False
     buffer_original_netname: Optional[str] = None
-    buffer_patch_points: List[Tuple[Tuple[int, int], Tuple[int, int]]] = field(default_factory=list)
-
-    fig: List[Tuple[Tuple[int, int], Tuple[int, int]]] = field(default_factory=list)
-    shape: List[Tuple[Tuple[int, int], Tuple[int, int]]] = field(default_factory=list)
-    geom: Optional[MultiLineString] = None
+    draw: NetPhysical = field(default_factory=NetPhysical)
 
     def __post_init__(self):
         self.full_name = f"{self.module.full_name}.{self.name}"
@@ -157,30 +141,6 @@ class Net:
     def has_multiple_drivers(self) -> bool:
         return len(self.drivers) > 1
 
-    def shape2geom(self):
-        if not self.shape:
-            self.geom = None
-            return None
-        # Base geometry
-        lines = [LineString(seg) for seg in self.shape]
-        # Optionally add patch lines
-        lines.extend(LineString(seg) for seg in self.buffer_patch_points)
-
-        # Merge into one MultiLineString
-        self.geom = MultiLineString(lines)
-        return self.geom
-
-    def geom2shape(self):
-        if self.geom is None:
-            self.shape.clear()
-            return None
-        # Convert MultiLineString back to list of 2-point segments
-        self.shape = [
-            ((int(line.coords[0][0]), int(line.coords[0][1])), (int(line.coords[1][0]), int(line.coords[1][1])))
-            for line in self.geom.geoms
-        ]
-        return self.shape
-
     def __hash__(self):
         return hash(self.full_name)
 
@@ -205,10 +165,7 @@ class Instance:
     is_buffer: bool = False
     buffer_original_netname: Optional[str] = None
     module_ref_uniq: Optional[str] = None
-
-    fig: Optional[Tuple[float, float, float, float]] = None
-    shape: Optional[Tuple[int, int, int, int]] = None
-    geom: Optional[Polygon] = None
+    draw: InstancePhysical = field(default_factory=InstancePhysical)
 
     def __post_init__(self):
         self.full_name = f"{self.parent_module.full_name}/{self.name}"
@@ -230,42 +187,8 @@ class Instance:
     def get_connected_nets(self) -> Set[Net]:
         return {pin.net for pin in self.pins.values() if pin.net}
 
-    def shape2geom(self):
-        if not self.shape or len(self.shape) != 4:
-            self.geom = None
-            return None
-        x1, y1, x2, y2 = self.shape
-        self.geom = box(x1, y1, x2, y2)
-        return self.geom
-
-    def geom2shape(self):
-        if self.geom is None:
-            self.shape = None
-            return None
-        x_min, y_min, x_max, y_max = self.geom.bounds
-        self.shape = (int(x_min), int(y_min), int(x_max), int(y_max))
-        return self.shape
-
     def __hash__(self):
         return hash(self.full_name)
-
-
-# -----------------------------
-# Cluster
-# -----------------------------
-@dataclass
-class Cluster:
-    id: int
-    instances: List[Instance] = field(default_factory=list)
-    size: Optional[Tuple[int, int]] = None
-    offset: Optional[Tuple[int, int]] = None
-    pins: Dict[str, Pin] = field(default_factory=dict)
-    shape: Optional[Tuple[int, int, int, int]] = None
-    size_float: Optional[Tuple[float, float]] = None
-    offset_float: Optional[Tuple[float, float]] = None
-
-    def add_pin(self, pin: Pin):
-        self.pins[pin.full_name] = pin
 
 
 # -----------------------------
@@ -278,16 +201,14 @@ class Module:
     instances: Dict[str, Instance] = field(default_factory=dict)
     nets: Dict[str, Net] = field(default_factory=dict)
     ports: Dict[str, Port] = field(default_factory=dict)
+    pins: Dict[str, Pin] = field(default_factory=dict)
     child_modules: Dict[str, Module] = field(default_factory=dict)
     busses: Dict[str, Bus] = field(default_factory=dict)
     parameters: Dict[str, Any] = field(default_factory=dict)
     depth: int = 0
     is_leaf: bool = False
     is_stub: bool = True
-
-    fig: Optional[Tuple[float, float, float, float]] = None
-    shape: Optional[Tuple[int, int, int, int]] = None
-    geom: Optional[Polygon] = None
+    draw: ModulePhysical = field(default_factory=ModulePhysical)
 
     def __post_init__(self):
         self.full_name = f"{self.parent_module.full_name}/{self.name}" if self.parent_module else self.name
@@ -364,3 +285,13 @@ class Module:
             for child in self.child_modules.values():
                 all_pins.update(child.get_all_pins(True))
         return all_pins
+
+
+# -----------------------------
+# Module
+# -----------------------------
+@dataclass
+class Design:
+    modules: Dict[str, Module] = field(default_factory=dict)
+    top_module: Optional[Module] = None
+    draw: DesignPhysical = field(default_factory=DesignPhysical)
