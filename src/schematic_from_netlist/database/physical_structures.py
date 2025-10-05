@@ -5,6 +5,8 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 from shapely.geometry import LineString, MultiLineString, Point, Polygon, box
 
+scaling_from_graph_to_sch = 0.24  # from graphviz to LTspice, about 72/0.24 = 300dpi
+
 
 # --------------------------------------
 # Common geometry mixin for rectangle objects
@@ -13,6 +15,15 @@ class RectanglePhysical:
     fig: Optional[Tuple[float, float, float, float]] = None
     shape: Optional[Tuple[int, int, int, int]] = None
     geom: Optional[Polygon] = None
+
+    def fig2shape(self):
+        if self.fig is None:
+            self.shape = None
+            return self.shape
+        s = scaling_from_graph_to_sch
+        x1, y1, x2, y2 = self.fig
+        self.shape = (int(round(x1 * s)), int(round(y1 * s)), int(round(x2 * s)), int(round(y2 * s)))
+        return self.shape
 
     def shape2geom(self):
         if not self.shape or len(self.shape) != 4:
@@ -35,6 +46,15 @@ class PointPhysical:
     fig: Optional[Tuple[float, float]] = None
     shape: Optional[Tuple[int, int]] = None
     geom: Optional[Point] = None
+
+    def fig2shape(self):
+        if self.fig is None:
+            self.shape = None
+            return self.shape
+        s = scaling_from_graph_to_sch
+        x, y = self.fig
+        self.shape = (int(round(x * s)), int(round(y * s)))
+        return self.shape
 
     def shape2geom(self):
         if self.shape is None:
@@ -75,13 +95,32 @@ class NetPhysical:
     geom: Optional[MultiLineString] = None
     buffer_patch_points: List[Tuple[Tuple[int, int], Tuple[int, int]]] = field(default_factory=list)
 
+    def fig2shape(self):
+        if not self.fig:
+            self.shape = []
+            return self.shape
+
+        def scale_point(point: tuple[float, float]) -> tuple[int, int]:
+            """Scale a single points (x,y)"""
+            s = scaling_from_graph_to_sch
+            x, y = point
+            return (int(round(x * s)), int(round(y * s)))
+
+        segments = self.fig
+        for seg_start, seg_end in segments:
+            pt_start = scale_point(seg_start)
+            pt_end = scale_point(seg_end)
+            if pt_start != pt_end:
+                self.shape.append((pt_start, pt_end))
+        return self.shape
+
     def shape2geom(self):
         if not self.shape:
             self.geom = None
             return None
         # Base geometry
         lines = [LineString(seg) for seg in self.shape]
-        # Optionally add patch lines
+        # also add patch lines
         lines.extend(LineString(seg) for seg in self.buffer_patch_points)
 
         # Merge into one MultiLineString

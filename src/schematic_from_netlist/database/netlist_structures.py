@@ -148,7 +148,6 @@ class Instance:
         pin = Pin(pin_name, direction, self)
         self.pins[pin_name] = pin
         self.parent_module.pins[pin.full_name] = pin
-        logging.info(f"Adding pin {pin.full_name} to module {self.parent_module.name}")
         if net:
             net.connect_pin(pin)
         return pin

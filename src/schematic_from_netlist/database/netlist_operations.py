@@ -8,6 +8,8 @@ from collections import defaultdict
 # from pprint import pprint
 from typing import Dict, List, Optional
 
+from tabulate import tabulate
+
 from schematic_from_netlist.graph.graph_partition import Edge, HypergraphData
 
 from .netlist_structures import Design, Instance, Module, Net, Pin, PinDirection
@@ -195,7 +197,7 @@ class NetlistOperationsMixin:
         if not self.design.top_module:
             return
 
-        logging.debug(f" before removing buffers: {self.print_design_stats()}")
+        self.print_design_stats("before removing buffers")
 
         # Restore original nets from the log
         for original_net_name, log in self.buffered_nets_log.items():
@@ -241,7 +243,7 @@ class NetlistOperationsMixin:
         self.buffered_nets_log.clear()
         self._build_lookup_tables()
 
-        logging.debug(f" after removing buffers: {self.print_design_stats()}")
+        self.print_design_stats("after removing buffers")
 
     def create_buffering_for_groups(self, net, ordering, collections, cluster_id):
         """deal with fanout routing"""
@@ -377,14 +379,96 @@ class NetlistOperationsMixin:
 
         return totals
 
-    def print_design_stats(self, header: str = ""):
-        """Get overall design statistics"""
-        # Build the complete count dict
-        count = {}
-        for name, module in self.design.modules.items():
-            count[name] = self.count_with_children(module)
-        # find module with most instances
-        logging.info(f"{header=} {count=}")
+    def print_design_stats(self, title: str = ""):
+        """Prints detailed design statistics in a hierarchical table."""
+
+        if not self.design.top_module:
+            logging.error("No top module set.")
+            return
+
+        headers = ["Hierarchy", "Module", "Instances", "Ports", "Pins", "Nets", "Max Fanout", "Buffers"]
+        table_data = []
+        memo_stats = {}
+
+        def get_stats(module):
+            if module.name in memo_stats:
+                return memo_stats[module.name]
+
+            # Direct stats from this module
+            totals = {
+                "ports": len(module.ports),
+                "instances": len(module.instances),
+                "pins": len(module.pins),
+                "nets": len(module.nets),
+                "max_fanout": max([net.num_conn for net in module.nets.values()], default=0),
+                "buffers": sum(1 for inst in module.instances.values() if inst.is_buffer),
+            }
+
+            # Recursively add stats from child modules
+            for instance in module.instances.values():
+                child_module = self.design.modules.get(instance.module_ref)
+                if child_module:
+                    child_totals = get_stats(child_module)
+                    totals["instances"] += child_totals["instances"]
+                    totals["pins"] += child_totals["pins"]
+                    totals["nets"] += child_totals["nets"]
+                    totals["ports"] += child_totals["ports"]
+
+            memo_stats[module.name] = totals
+            return totals
+
+        def build_table_recursive(module, prefix="", is_top=True):
+            stats = get_stats(module)
+
+            if is_top:
+                # Top module entry
+                table_data.append(
+                    [
+                        module.name,
+                        module.name,
+                        stats["instances"],
+                        stats["ports"],
+                        stats["pins"],
+                        stats["nets"],
+                        stats["max_fanout"],
+                        stats["buffers"],
+                    ]
+                )
+
+            # Sort child instances by their total instance count
+            sorted_instances = sorted(
+                module.instances.values(),
+                key=lambda inst: get_stats(self.design.modules.get(inst.module_ref, Module("dummy"))).get("instances", 0),
+                reverse=True,
+            )
+
+            for i, instance in enumerate(sorted_instances):
+                child_module = self.design.modules.get(instance.module_ref)
+                if not child_module or child_module.is_leaf:
+                    continue
+
+                is_last = i == len(sorted_instances) - 1
+                connector = "└── " if is_last else "├── "
+
+                child_stats = get_stats(child_module)
+                table_data.append(
+                    [
+                        f"{prefix}{connector}{instance.name}",
+                        child_module.name,
+                        child_stats["instances"],
+                        child_stats["ports"],
+                        child_stats["pins"],
+                        child_stats["nets"],
+                        child_stats["max_fanout"],
+                        child_stats["buffers"],
+                    ]
+                )
+
+                new_prefix = prefix + ("    " if is_last else "│   ")
+                build_table_recursive(child_module, new_prefix, is_top=False)
+
+        build_table_recursive(self.design.top_module)
+        logging.info(title + "\n" + tabulate(table_data, headers=headers, tablefmt="fancy_grid"))
 
     def build_hypergraph_data(self) -> "HypergraphData":
         """Builds the hypergraph data structure for KaHyPar."""
