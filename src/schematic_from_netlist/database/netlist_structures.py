@@ -91,7 +91,7 @@ class Net:
     net_type: NetType = NetType.WIRE
     bus: Optional[Bus] = field(default=None)
 
-    pins: Set[Pin] = field(default_factory=set)
+    pins: Dict[str, Pin] = field(default_factory=dict)
     id: int = -1
     num_conn: int = 0
     is_buffer_wire: bool = False
@@ -99,47 +99,21 @@ class Net:
     draw: NetPhysical = field(default_factory=NetPhysical)
 
     def __post_init__(self):
-        self.full_name = f"{self.module.full_name}.{self.name}"
-        self.drivers: Set[Pin] = set()
-        self.loads: Set[Pin] = set()
-        self.connections: Set[Pin] = set()
+        self.full_name = f"{self.module.full_name}/{self.name}"
 
-    def add_pin(self, pin: Pin):
+    def connect_pin(self, pin: Pin):
         if pin.net is not None and pin.net != self:
             pin.net.remove_pin(pin)
-        self.pins.add(pin)
+        self.pins[pin.full_name] = pin
         pin.net = self
-        self.connections.add(pin)
         self.num_conn += 1
-        if pin.direction == PinDirection.OUTPUT:
-            self.drivers.add(pin)
-        elif pin.direction == PinDirection.INPUT:
-            self.loads.add(pin)
-        else:  # INOUT
-            self.drivers.add(pin)
-            self.loads.add(pin)
-        logging.debug(f"after add_pin {self.name=} {self.num_conn=} {pin.full_name=}")
+        logging.debug(f"after connect_pin {self.name=} {self.num_conn=} {pin.full_name=}")
 
     def remove_pin(self, pin: Pin):
-        self.pins.discard(pin)
-        self.connections.discard(pin)
-        self.drivers.discard(pin)
-        self.loads.discard(pin)
+        del self.pins[pin.full_name]
         self.num_conn -= 1
         pin.net = None
         logging.debug(f"after remove_pin {self.name=} {self.num_conn=}")
-
-    def get_fanout(self) -> int:
-        return len(self.loads)
-
-    def get_connections(self) -> int:
-        return len(self.connections)
-
-    def is_floating(self) -> bool:
-        return len(self.drivers) == 0
-
-    def has_multiple_drivers(self) -> bool:
-        return len(self.drivers) > 1
 
     def __hash__(self):
         return hash(self.full_name)
@@ -168,13 +142,15 @@ class Instance:
     draw: InstancePhysical = field(default_factory=InstancePhysical)
 
     def __post_init__(self):
-        self.full_name = f"{self.parent_module.full_name}/{self.name}"
+        self.full_name = f"{self.parent_module.name}/{self.name}"
 
     def add_pin(self, pin_name: str, direction: PinDirection, net: Optional[Net] = None) -> Pin:
         pin = Pin(pin_name, direction, self)
         self.pins[pin_name] = pin
+        self.parent_module.pins[pin.full_name] = pin
+        logging.info(f"Adding pin {pin.full_name} to module {self.parent_module.name}")
         if net:
-            net.add_pin(pin)
+            net.connect_pin(pin)
         return pin
 
     def connect_pin(self, pin_name: str, net: Net):
@@ -182,7 +158,7 @@ class Instance:
             pin = self.pins[pin_name]
             if pin.net:
                 pin.net.remove_pin(pin)
-            net.add_pin(pin)
+            net.connect_pin(pin)
 
     def get_connected_nets(self) -> Set[Net]:
         return {pin.net for pin in self.pins.values() if pin.net}
@@ -241,6 +217,7 @@ class Module:
                     instance.add_pin(pin_name, port.direction)
             else:
                 instance.add_pin(port.name, port.direction)
+        # add these pins to module
 
         return instance
 
@@ -292,6 +269,51 @@ class Module:
 # -----------------------------
 @dataclass
 class Design:
+    name: str
     modules: Dict[str, Module] = field(default_factory=dict)
     top_module: Optional[Module] = None
     draw: DesignPhysical = field(default_factory=DesignPhysical)
+
+    def update_module_depth_map(self):
+        """
+        Build parent-child relationships between modules.
+        """
+        # Build parent-child relationships
+        for module in self.modules.values():
+            for instance in module.instances.values():
+                child_module = instance.module
+                module.child_modules[child_module.name] = child_module
+                logging.debug(f"  {module.name} -> {child_module.name}")
+
+        depth_map = {}
+
+        def get_depth(module):
+            if module.name in depth_map:
+                return depth_map[module.name]
+            if not module.parent_module:
+                depth = 0
+            else:
+                depth = get_depth(module.parent_module) + 1
+            depth_map[module.name] = depth
+            return depth
+
+        for module in self.modules.values():
+            module.depth = get_depth(module)
+
+    def print_design_hierarchy(self):
+        # Helper to print the hierarchy tree
+        if not self.top_module:
+            logging.error("No top module set.")
+            return
+
+        self.update_module_parent_child_relationships()
+
+        def print_hierarchy(module, prefix=""):
+            print(f"{prefix}- {module.name}")
+            for child in module.child_modules.values():
+                print_hierarchy(child, prefix + "  ")
+
+        print("Design Hierarchy:")
+        print_hierarchy(self.top_module)
+
+        return sorted_modules

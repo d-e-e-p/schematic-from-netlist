@@ -32,8 +32,8 @@ class VerilogParser:
         self.modifier = VerilogModifier(ast)
         self.walker(ast)
         self.create_ast_stubs(ast)
-        if self.db.top_module:
-            output_filename = f"data/verilog/processed_{self.db.top_module.name}.v"
+        if self.db.design.top_module:
+            output_filename = f"data/verilog/processed_{self.db.design.top_module.name}.v"
             self.write_ast(ast, output_filename)
         return self.db
 
@@ -46,19 +46,19 @@ class VerilogParser:
         for node in ast.description.definitions:
             if isinstance(node, vast.ModuleDef):
                 module_name = self._clean_name(node.name)
-                if module_name not in self.db.modules:
-                    self.db.modules[module_name] = Module(name=module_name)
-                if not self.db.top_module:
-                    self.db.top_module = self.db.modules[module_name]
+                if module_name not in self.db.design.modules:
+                    self.db.design.modules[module_name] = Module(name=module_name)
+                if not self.db.design.top_module:
+                    self.db.design.top_module = self.db.design.modules[module_name]
 
-                module = self.db.modules[module_name]
+                module = self.db.design.modules[module_name]
                 self.walk_populate_ports_and_nets(module, node)
 
         # Second pass: Populate the modules with instances in reverse order.
         for node in reversed(ast.description.definitions):
             if isinstance(node, vast.ModuleDef):
                 module_name = self._clean_name(node.name)
-                module = self.db.modules[module_name]
+                module = self.db.design.modules[module_name]
                 self.walk_populate_instances(module, node)
 
     def walk_populate_ports_and_nets(self, module, node):
@@ -116,7 +116,7 @@ class VerilogParser:
         log.info(f"Reordered Verilog written to {filename}")
 
     def create_ast_stubs(self, ast):
-        stubs = [module for module in self.db.modules.values() if module.is_stub]
+        stubs = [module for module in self.db.design.modules.values() if module.is_stub]
         for module in stubs:
             portlist = []
             for port in module.ports.values():
@@ -135,7 +135,7 @@ class VerilogParser:
 
     def pop_add_instance(self, vinst, module, module_node):
         module_ref_name = self._clean_name(vinst.module)
-        module_ref = self.db.modules.get(module_ref_name)
+        module_ref = self.db.design.modules.get(module_ref_name)
 
         if not module_ref:
             # This case should ideally not happen if all modules are pre-created
@@ -207,7 +207,7 @@ class VerilogParser:
 
                 pin = inst.pins.get(pin_name)
                 if pin:
-                    net.add_pin(pin)
+                    net.connect_pin(pin)
                 else:
                     log.error(f"Pin '{port_pin}' not found on instance '{inst.name}'")
 
@@ -261,7 +261,7 @@ class VerilogParser:
 
     def pop_create_stub_module(self, module_ref_name, vinst, module_node):
         module_ref = Module(name=module_ref_name)
-        self.db.modules[module_ref_name] = module_ref
+        self.db.design.modules[module_ref_name] = module_ref
         module_ref.is_stub = True
 
         if vinst.parameterlist:

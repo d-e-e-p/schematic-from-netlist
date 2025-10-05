@@ -3,26 +3,28 @@ from collections import defaultdict
 from typing import Dict, List, Optional, Tuple
 
 from .netlist_operations import NetlistOperationsMixin
-from .netlist_structures import Bus, Instance, Module, Net, NetType, Pin, PinDirection, Port
+from .netlist_structures import Bus, Design, Instance, Module, Net, NetType, Pin, PinDirection, Port
 
 
 class NetlistDatabase(NetlistOperationsMixin):
     """Main database class for the hierarchical netlist"""
 
-    def __init__(self, fanout_threshold: int = 15):
+    def __init__(self, fanout_threshold: int = 15, skip_nets: List[str] = []):
         self.fanout_threshold = fanout_threshold
+        self.skip_nets = skip_nets
+        # design > module > instance
+        self.current_design = "initial"
+        self.design = Design(self.current_design)
 
         self.debug: bool = False
         self.geom_db: Optional[object] = None
         self.schematic_db: Optional[object] = None
         self.stage: Optional[str] = None
 
-        self.top_module: Optional[Module] = None
-        self.modules: Dict[str, Module] = {}  # Module definitions
-
         self.inst_by_name: Dict[str, Instance] = {}  # Fast lookup by full name
         self.nets_by_name: Dict[str, Net] = {}  # Fast lookup by full name
         self.pins_by_name: Dict[str, Pin] = {}  # Fast lookup by full name
+        self.ports_by_name: Dict[str, Port] = {}  # Fast lookup by full name
 
         self.inst_by_id: Dict[int, Instance] = {}
         self.nets_by_id: Dict[int, Net] = {}
@@ -40,12 +42,12 @@ class NetlistDatabase(NetlistOperationsMixin):
 
     def set_top_module(self, module: Module):
         """Set the top-level module"""
-        self.top_module = module
+        self.design.top_module = module
         self._build_lookup_tables()
 
     def _build_lookup_tables(self):
         """Build fast lookup tables for instances, nets, and pins"""
-        if not self.top_module:
+        if not self.design.top_module:
             return
 
         # Clear existing tables
@@ -67,22 +69,22 @@ class NetlistDatabase(NetlistOperationsMixin):
 
             # Add module ports as pins
             for port in module.ports.values():
-                self.pins_by_name[port.name] = port
+                self.ports_by_name[port.name] = port
 
             # Recursively traverse child modules
             for child_module in module.child_modules.values():
                 traverse_module(child_module)
 
-        traverse_module(self.top_module)
+        traverse_module(self.design.top_module)
 
         """
         instances_by_partition = defaultdict(list)
         for _, inst in self.inst_by_name.items():
             instances_by_partition[inst.partition].append(inst)
 
-        self.top_module.clusters.clear()
+        self.design.top_module.clusters.clear()
         for part_id, inst_list in instances_by_partition.items():
-            self.top_module.clusters[part_id] = Cluster(id=part_id, instances=inst_list)
+            self.design.top_module.clusters[part_id] = Cluster(id=part_id, instances=inst_list)
         """
 
 
@@ -94,7 +96,7 @@ def create_example_netlist():
     # Create top module
     top_module = Module("TOP")
     db.set_top_module(top_module)
-    db.modules["TOP"] = top_module
+    db.design.modules["TOP"] = top_module
 
     # Add nets
     val_net = top_module.add_net("VAL", NetType.WIRE, 4, (3, 0))

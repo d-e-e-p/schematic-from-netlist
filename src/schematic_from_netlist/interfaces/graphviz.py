@@ -83,7 +83,7 @@ class Graphviz:
         self.output_dir = "data/json"
 
     def generate_layout_figures(self):
-        sorted_modules = sorted(self.db.modules.values(), key=lambda m: m.depth, reverse=True)
+        sorted_modules = sorted(self.db.design.modules.values(), key=lambda m: m.depth, reverse=True)
         for module in sorted_modules:
             if not module.is_leaf:
                 self.generate_module_layout(module)
@@ -107,7 +107,7 @@ class Graphviz:
         for net in module.nets.values():
             # if net.name.startswith("GND") or net.name.startswith("_3V3") or net.name.startswith("VBUS"):
             #    continue
-            pins = list(net.pins)
+            pins = list(net.pins.values())
             if len(pins) > 1:
                 src = pins[0]
                 for dst in pins[1:]:
@@ -566,18 +566,18 @@ class Graphviz:
 
             return tail_coord, head_coord, segments
 
-        all_pins = module.get_all_pins(recursive=False)
         for edge in A.edges():
             tail_coord, head_coord, wire_segments = parse_edge_pin_positions(edge)
             tail_pin = edge.attr.get("taillabel")
             head_pin = edge.attr.get("headlabel")
             net_name = edge.attr.get("label")
-            # order is important because for open nets head and tail labels are the same
+            # order is important because for open nets head and tail labels are the same, and we need to overwrite
+            # with tail
             if head_pin and head_coord:
-                pin = all_pins.get(head_pin)
+                pin = module.pins.get(head_pin)
                 pin.draw.fig = head_coord
             if tail_pin and tail_coord:
-                pin = all_pins.get(tail_pin)
+                pin = module.pins.get(tail_pin)
                 pin.draw.fig = tail_coord
             if net_name:
                 module.nets[net_name].draw.fig.extend(wire_segments)
