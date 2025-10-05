@@ -11,7 +11,6 @@ from schematic_from_netlist.graph.layout_optimizer import LayoutOptimizer
 from schematic_from_netlist.interfaces.graphviz import Graphviz
 from schematic_from_netlist.interfaces.ltspice_writer import LTSpiceWriter
 from schematic_from_netlist.interfaces.verilog_parser import VerilogParser
-from schematic_from_netlist.interfaces.verilog_reorder import VerilogReorder
 
 # ---------------- Pipeline Stages ---------------- #
 

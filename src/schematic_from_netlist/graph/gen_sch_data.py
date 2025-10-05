@@ -4,8 +4,8 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import List, Tuple
 
-from schematic_from_netlist.interfaces.netlist_database import Pin
-from schematic_from_netlist.interfaces.netlist_structures import Instance, PinDirection
+from schematic_from_netlist.database.netlist_database import Pin
+from schematic_from_netlist.database.netlist_structures import Instance, PinDirection
 
 
 class GenSchematicData:

@@ -10,8 +10,8 @@ import pyverilog.vparser.ast as vast
 from pyverilog.ast_code_generator.codegen import ASTCodeGenerator
 from pyverilog.vparser.parser import parse
 
-from schematic_from_netlist.interfaces.netlist_database import NetlistDatabase
-from schematic_from_netlist.interfaces.netlist_structures import Bus, Instance, Module, Net, NetType, Pin, PinDirection, Port
+from schematic_from_netlist.database.netlist_database import NetlistDatabase
+from schematic_from_netlist.database.netlist_structures import Bus, Instance, Module, Net, NetType, Pin, PinDirection, Port
 from schematic_from_netlist.interfaces.verilog_ast_modifier import VerilogModifier, portArgInfo
 
 log = logging.getLogger(__name__)
