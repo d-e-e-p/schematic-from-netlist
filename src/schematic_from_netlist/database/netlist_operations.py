@@ -214,67 +214,63 @@ class NetlistOperationsMixin:
             original_net.draw.shape.extend(net.draw.shape)
             del module.nets[net.name]
 
-    def create_buffering_for_groups(self, net, ordering, collections, cluster_id):
+    def create_buffering_for_groups(self, module, net, ordering, collections):
         """deal with fanout routing"""
         original_net_name = net.name
-        table_output_dir = "data/tables"
         self.dump_to_table(f"pre_buffering_{original_net_name}")
 
         buffer_insts_map = {}
 
+        module_ref = "FANOUT_BUFFER"
+        stub_module = Module(name=module_ref)
+        stub_module.is_leaf = True
+
         for i, collection in enumerate(collections):
-            if original_net_name not in self.buffered_nets_log:
-                self.buffered_nets_log[original_net_name] = {"old_pins": set(), "buffer_insts": [], "new_nets": []}
-
-            log = self.buffered_nets_log[original_net_name]
-            if not log["old_pins"]:
-                log["old_pins"] = net.pins.copy()
-
-            buffer_name = f"{self.inserted_buf_prefix}{i}{cluster_id}_{original_net_name}"
-            buffer_inst = self.design.top_module.add_instance(buffer_name, "FANOUT_BUFFER")
-            buffer_inst.partition = cluster_id
+            buffer_name = f"{self.inserted_buf_prefix}{i}_{original_net_name}"
+            buffer_inst = module.add_instance(buffer_name, stub_module, module_ref)
             buffer_inst.is_buffer = True
             buffer_insts_map[i] = buffer_inst
-            log["buffer_insts"].append(buffer_inst)
-            logging.debug(f" connecting {buffer_name=} to collection {collection=}")
 
-            pins_to_buffer = [self.find_pin(pinname) for pinname in collection]
-            for j, pin in enumerate(pins_to_buffer):
+            pinnames = [pin.name for pin in collection]
+            logging.debug(f" {i} connecting {buffer_name=} to {pinnames}")
+
+            for j, pin in enumerate(collection):
                 if pin is None:
-                    logging.warning(f"instrumentation: WARNING - Could not find pin for name {collection[j]}")
+                    logging.warning(f"WARNING - Could not find pin for name {collection[j]}")
                     continue
-                new_net_name = f"{original_net_name}{self.inserted_net_suffix}{i}_{j}_{cluster_id}"
-                new_net = self.design.top_module.add_net(new_net_name)
+                new_net_name = f"{original_net_name}{self.inserted_net_suffix}{i}_{j}"
+                new_net = module.add_net(new_net_name)
                 new_net.is_buffered_net = True
                 new_net.buffer_original_netname = original_net_name
 
                 buf_inout_pin = buffer_inst.add_pin(f"IO{j}", PinDirection.INOUT)
-                new_net.add_pin(buf_inout_pin)
-                logging.debug(f" buffer pin {buf_inout_pin.full_name} in {cluster_id=} now drives {collection=}")
+                new_net.connect_pin(buf_inout_pin)
+                logging.debug(f" buffer pin {buf_inout_pin.full_name} now drives {pinnames=}")
 
                 net.remove_pin(pin)
-                new_net.add_pin(pin)
-                log["new_nets"].append(new_net)
+                new_net.connect_pin(pin)
+                logging.debug(f" buffer pin {buf_inout_pin.full_name} now drives {pin.full_name}")
 
         if len(ordering) > 1:
             for k in range(len(ordering) - 1):
                 src_buf_idx, dst_buf_idx = ordering[k], ordering[k + 1]
                 src_buffer_inst, dst_buffer_inst = buffer_insts_map.get(src_buf_idx), buffer_insts_map.get(dst_buf_idx)
                 if src_buffer_inst and dst_buffer_inst:
-                    chain_net_name = f"top_{self.inserted_buf_prefix}{src_buf_idx}_{dst_buf_idx}_{cluster_id}_{original_net_name}"
-                    chain_net = self.design.top_module.add_net(chain_net_name)
+                    chain_net_name = f"top_{self.inserted_buf_prefix}{src_buf_idx}_{dst_buf_idx}_{original_net_name}"
+                    chain_net = module.add_net(chain_net_name)
                     chain_net.is_buffered_net = True
+                    chain_net.is_chained_net = True
                     chain_net.buffer_original_netname = original_net_name
 
-                    src_pin_num, dst_pin_num = len(src_buffer_inst.pins), len(dst_buffer_inst.pins)
+                    src_pin_num, dst_pin_num = len(src_buffer_inst.pins.values()), len(dst_buffer_inst.pins.values())
                     src_pin = src_buffer_inst.add_pin(f"IO{src_pin_num}", PinDirection.INOUT)
                     dst_pin = dst_buffer_inst.add_pin(f"IO{dst_pin_num}", PinDirection.INOUT)
 
-                    chain_net.add_pin(src_pin)
-                    chain_net.add_pin(dst_pin)
-                    logging.debug(
-                        f"instrumentation: Chaining buffer {src_buffer_inst.name} to {dst_buffer_inst.name} with net {chain_net.name}"
-                    )
+                    chain_net.connect_pin(src_pin)
+                    chain_net.connect_pin(dst_pin)
+                    logging.debug(f"Chaining buffer {src_buffer_inst.name} to {dst_buffer_inst.name} with net {chain_net.name}")
+                else:
+                    logging.warning("WARNING - Could not find buffer instances ")
 
         self._build_lookup_tables()
         # self.dump_to_table(table_output_dir, f"post_buffering_{original_net_name}", -1)

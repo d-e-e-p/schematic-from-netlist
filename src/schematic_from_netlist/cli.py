@@ -115,6 +115,7 @@ def main():
     produce_graph(db)
     db.schematic_db = GenSchematicData(db)
     db.schematic_db.generate_schematic()
+    generate_steiner_buffers(db)
 
     db.remove_multi_fanout_buffers()
     db.dump_to_table("final_state_after_buffer_removal")

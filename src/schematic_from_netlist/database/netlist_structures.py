@@ -95,6 +95,7 @@ class Net:
     id: int = -1
     num_conn: int = 0
     is_buffered_net: bool = False
+    is_chained_net: bool = False
     buffer_original_netname: Optional[str] = None
     draw: NetPhysical = field(default_factory=NetPhysical)
 
