@@ -39,31 +39,6 @@ class NetlistOperationsMixin:
             "all_pins": list(net.pins),
         }
 
-    def trace_net_path(self, start_pin: "Pin", max_depth: int = 10) -> "List[Pin]":
-        """Trace the path from a pin through connected nets"""
-        path = [start_pin]
-        current_pin = start_pin
-        depth = 0
-
-        while depth < max_depth and current_pin.net:
-            net = current_pin.net
-            # Find the next pin in the path
-            if current_pin.direction == PinDirection.OUTPUT:
-                # Follow to inputs (loads)
-                next_pins = list(net.loads)
-            else:
-                # Follow to outputs (drivers)
-                next_pins = list(net.drivers)
-
-            if next_pins:
-                current_pin = next_pins[0]  # Take first connection
-                path.append(current_pin)
-            else:
-                break
-            depth += 1
-
-        return path
-
     def get_fanout_tree(self, driver_pin: "Pin") -> "Dict":
         """Get the complete fanout tree from a driver pin"""
         if driver_pin.direction != PinDirection.OUTPUT or not driver_pin.net:
@@ -199,51 +174,45 @@ class NetlistOperationsMixin:
 
         self.print_design_stats("before removing buffers")
 
-        # Restore original nets from the log
-        for original_net_name, log in self.buffered_nets_log.items():
-            original_net = self.find_net(original_net_name)
-            if not original_net:
-                logging.warning(f"instrumentation: Could not find original net {original_net_name} during restore.")
-                continue
+        for module in self.design.modules.values():
+            if not module.is_leaf:
+                self.remove_multi_fanout_buffers_for_module(module)
 
-            logging.debug(f"instrumentation: Restoring pins for {original_net_name}")
-            for pin in log.get("old_pins", []):
-                if pin.net != original_net:
-                    original_net.add_pin(pin)
-
-        # Proactively find and delete all buffer instances and nets
-        instances_to_delete = [
-            inst_name for inst_name in self.design.top_module.instances if inst_name.startswith(self.inserted_buf_prefix)
-        ]
-        nets_to_delete = [
-            net_name
-            for net_name in self.design.top_module.nets
-            if self.inserted_net_suffix in net_name or net_name.startswith(f"top_{self.inserted_buf_prefix}")
-        ]
-
-        for inst_name in instances_to_delete:
-            instance = self.design.top_module.instances.get(inst_name)
-            if instance:
-                logging.debug(f"instrumentation: Deleting buffer instance {instance.name}")
-                for pin in instance.pins.values():
-                    if pin.net:
-                        pin.net.remove_pin(pin)
-                del self.design.top_module.instances[inst_name]
-
-        for net_name in nets_to_delete:
-            if net_name in self.design.top_module.nets:
-                logging.debug(f"instrumentation: Deleting buffer net {net_name}")
-                # clone wires before delete
-                net = self.design.top_module.nets[net_name]
-                logging.debug(f"looking for original of {net_name=} =  {net.buffer_original_netname}")
-                original_net = self.nets_by_name.get(net.buffer_original_netname)
-                original_net.draw.shape.extend(net.draw.shape)
-                del self.design.top_module.nets[net_name]
-
-        self.buffered_nets_log.clear()
         self._build_lookup_tables()
-
         self.print_design_stats("after removing buffers")
+
+    def remove_multi_fanout_buffers_for_module(self, module):
+        """Removes all buffers in module"""
+
+        for net in module.nets.values():
+            if net.is_buffered_net:
+                original_net_name = net.buffer_original_netname
+                original_net = module.nets.get(original_net_name)
+                if not original_net:
+                    logging.warning(f"Could not find original net {original_net_name} during restore of {module.name}")
+                    continue
+                pins = list(net.pins.values())
+                for pin in pins:
+                    original_net.connect_pin(pin)
+
+        # find and delete all buffer instances and nets
+        instances_to_delete = [inst for inst in module.instances.values() if inst.is_buffer]
+        nets_to_delete = [net for net in module.nets.values() if net.is_buffered_net]
+
+        for inst in instances_to_delete:
+            logging.info(f" Deleting buffer instance {inst.name}")
+            for pin in inst.pins.values():
+                if pin.net:
+                    pin.net.remove_pin(pin)
+            module.remove_instance(inst.name)
+
+        for net in nets_to_delete:
+            logging.debug(f"Deleting buffer net {net.name}")
+            # clone wires before delete
+            original_net_name = net.buffer_original_netname
+            original_net = module.nets.get(original_net_name)
+            original_net.draw.shape.extend(net.draw.shape)
+            del module.nets[net.name]
 
     def create_buffering_for_groups(self, net, ordering, collections, cluster_id):
         """deal with fanout routing"""
@@ -518,50 +487,31 @@ class NetlistOperationsMixin:
         return edges
 
     def clear_all_shapes(self):
-        for inst in self.design.top_module.get_all_instances().values():
-            inst.draw.shape = None
+        return self.design.draw.clear_all_shapes()
 
-        for net in self.design.top_module.get_all_nets().values():
-            net.draw.shape.clear()
-            net.draw.buffer_patch_points.clear()
-
-        for pin in self.design.top_module.get_all_pins().values():
-            pin.draw.shape = None
+    def fig2shape(self):
+        return self.design.draw.fig2shape()
 
     def geom2shape(self):
-        """Convert all geom objects to shape."""
-        self.clear_all_shapes()
-        for collection in (
-            self.design.top_module.get_all_instances().values(),
-            self.design.top_module.get_all_nets().values(),
-            self.design.top_module.get_all_pins().values(),
-        ):
-            for obj in collection:
-                obj.geom2shape()
+        return self.design.draw.geom2shape()
 
     def shape2geom(self):
-        """Convert all shape objects to geom."""
-        for collection in (
-            self.design.top_module.get_all_instances().values(),
-            self.design.top_module.get_all_nets().values(),
-            self.design.top_module.get_all_pins().values(),
-        ):
-            for obj in collection:
-                obj.shape2geom()
+        return self.design.draw.shape2geom()
 
     def uniquify_module_names(self):
         """needed to have each ref having different shape"""
-        seen = {}
-        for inst in self.design.top_module.get_all_instances().values():
-            if seen.get(inst.module_ref):
-                counter = seen[inst.module_ref]
-            else:
-                counter = 0
+        for module in self.design.modules.values():
+            seen = {}
+            for inst in module.instances.values():
+                if seen.get(inst.module_ref):
+                    counter = seen[inst.module_ref]
+                else:
+                    counter = 0
 
-            name = f"{inst.module_ref}{counter}"
-            safe_name = re.sub(r"[^a-zA-Z0-9_]", "_", name)
-            inst.module_ref_uniq = safe_name
-            seen[inst.module_ref] = counter + 1
+                name = f"{inst.module_ref}{counter}"
+                safe_name = re.sub(r"[^a-zA-Z0-9_]", "_", name)
+                inst.module_ref_uniq = safe_name
+                seen[inst.module_ref] = counter + 1
 
     def determine_design_hierarchy(self) -> List[Module]:
         """

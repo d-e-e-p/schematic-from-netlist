@@ -113,6 +113,8 @@ def main():
 
     db = load_netlist(args.netlist_file, args.debug)
     produce_graph(db)
+    db.schematic_db = GenSchematicData(db)
+    db.schematic_db.generate_schematic()
 
     db.remove_multi_fanout_buffers()
     db.dump_to_table("final_state_after_buffer_removal")

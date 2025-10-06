@@ -1,7 +1,9 @@
-import logging
+import logging as log
 from dataclasses import dataclass, field
-from enum import Enum
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set, Tuple
+
+if TYPE_CHECKING:
+    from schematic_from_netlist.database.netlist_structures import Design  # type hints only
 
 from shapely.geometry import LineString, MultiLineString, Point, Polygon, box
 
@@ -151,7 +153,7 @@ class InstancePhysical(RectanglePhysical):
 # Module
 # -----------------------------
 @dataclass
-class ModulePhysical(RectanglePhysical):
+class ModulePhysical(PointPhysical):
     pass
 
 
@@ -160,9 +162,11 @@ class ModulePhysical(RectanglePhysical):
 # -----------------------------
 @dataclass
 class DesignPhysical(RectanglePhysical):
+    design: Optional["Design"] = None
+
     def clear_all_shapes(self):
         self.shape = None
-        for module in super().modules.values():
+        for module in self.design.modules.values():
             module.draw.shape = None
             for inst in module.instances.values():
                 inst.draw.shape = None
@@ -171,27 +175,26 @@ class DesignPhysical(RectanglePhysical):
             for pin in module.pins.values():
                 pin.draw.shape = None
 
-    def geom2shape(self):
-        """Convert all geom objects to shape."""
-        self.clear_all_shapes()
-        for module in super().modules.values():
+    def _for_each_draw_obj(self, fn: Callable):
+        for module in self.design.modules.values():
             for collection in (
+                [module],
                 module.ports.values(),
                 module.instances.values(),
                 module.nets.values(),
                 module.pins.values(),
             ):
                 for obj in collection:
-                    obj.geom2shape()
+                    if hasattr(obj, "draw"):
+                        fn(obj.draw)
+
+    def fig2shape(self):
+        self.clear_all_shapes()
+        self._for_each_draw_obj(lambda d: d.fig2shape())
+
+    def geom2shape(self):
+        self.clear_all_shapes()
+        self._for_each_draw_obj(lambda d: d.geom2shape())
 
     def shape2geom(self):
-        """Convert all shape objects to geom."""
-        for module in super().modules.values():
-            for collection in (
-                module.ports.values(),
-                module.instances.values(),
-                module.nets.values(),
-                module.pins.values(),
-            ):
-                for obj in collection:
-                    obj.shape2geom()
+        self._for_each_draw_obj(lambda d: d.shape2geom())

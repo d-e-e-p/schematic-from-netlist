@@ -94,7 +94,7 @@ class Net:
     pins: Dict[str, Pin] = field(default_factory=dict)
     id: int = -1
     num_conn: int = 0
-    is_buffer_wire: bool = False
+    is_buffered_net: bool = False
     buffer_original_netname: Optional[str] = None
     draw: NetPhysical = field(default_factory=NetPhysical)
 
@@ -271,7 +271,10 @@ class Design:
     name: str
     modules: Dict[str, Module] = field(default_factory=dict)
     top_module: Optional[Module] = None
-    draw: DesignPhysical = field(default_factory=DesignPhysical)
+    draw: DesignPhysical = field(init=False)
+
+    def __post_init__(self):
+        self.draw = DesignPhysical(design=self)
 
     def update_module_depth_map(self):
         """

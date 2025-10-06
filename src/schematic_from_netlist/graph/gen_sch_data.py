@@ -22,10 +22,10 @@ class GenSchematicData:
 
     def generate_schematic(self):
         self.db.clear_all_shapes()
-        self.scale_and_annotate_clusters()
+        self.db.fig2shape()
         self.mark_multi_fanout_buffers()
-        self.find_block_bounding_boxes()
-        self.find_net_shapes()
+        # self.find_block_bounding_boxes()
+        # self.find_net_shapes()
         self.patch_pins_of_buffers()
         self.db.remove_multi_fanout_buffers()
         # self.center_schematic()
@@ -138,9 +138,6 @@ class GenSchematicData:
                     if pt_start != pt_end:
                         net.shape.append((pt_start, pt_end))
 
-    def route_to_center(self, pt_center, pt_port):
-        pass
-
     def mark_multi_fanout_buffers(self):
         """locate inst/net by pattern"""
 
@@ -152,10 +149,13 @@ class GenSchematicData:
                 return m.group("original")
             return None
 
-        for name, net in self.db.top_module.get_all_nets().items():
-            if original_net_name := extract_original_from_net(name):
-                net.is_buffered_net = True
-                net.buffer_original_netname = original_net_name
+        for module in self.db.design.modules.values():
+            for name, net in module.nets.items():
+                if original_net_name := extract_original_from_net(name):
+                    if not net.is_buffered_net:
+                        logging.warning(f"Net {name} missing {net.is_buffered_net=}")
+                    net.is_buffered_net = True
+                    net.buffer_original_netname = original_net_name
 
         pattern_cell = re.compile(rf"^{re.escape(self.db.inserted_buf_prefix)}\d+_(?P<original>.+)$")
 
@@ -164,67 +164,49 @@ class GenSchematicData:
                 return m.group("original")
             return None
 
-        for name, inst in self.db.top_module.get_all_instances().items():
-            # if prefix is self.inserted_buf_prefix
-            if original := extract_original_from_cell(name):
-                inst.is_buffer = True
-                inst.buffer_original_netname = original
+        for module in self.db.design.modules.values():
+            for name, inst in module.instances.items():
+                if original := extract_original_from_cell(name):
+                    if not inst.is_buffer:
+                        logging.warning(f"Net {name} missing {inst.is_buffer=}")
+                    inst.is_buffer = True
+                    inst.buffer_original_netname = original
 
     def patch_pins_of_buffers(self):
         """
         shorts pins of buffers instances
         """
+        for module in self.db.design.modules.values():
+            for inst in module.instances.values():
+                if inst.is_buffer:
+                    points = []
+                    for pin in inst.pins.values():
+                        if pin.draw.shape:
+                            points.append(pin.draw.shape)
+                    if not points:
+                        logging.warning(f"perhaps problem? {inst.name} with {list(inst.pins.keys())} has no shapes")
+                        continue
+                    pt_center = self.center_of_points(points)
 
-        for _, inst in self.db.top_module.get_all_instances().items():
-            if inst.is_buffer:
-                points = []
-                for _, pin in inst.pins.items():
-                    if pin.shape:
-                        points.append(pin.shape)
-                if not points:
-                    logging.warning(f"perhaps problem? {inst.name} with {list(inst.pins.keys())} has no shapes")
-                    continue
-                pt_center = self.center_of_points(points)
+                    if inst.buffer_original_netname in self.db.nets_by_name:
+                        net = self.db.nets_by_name[inst.buffer_original_netname]
+                        for pt in points:
+                            if pt == pt_center:
+                                continue
+                            segment = (pt_center, pt)
+                            net.draw.buffer_patch_points.append(segment)
+                        logging.debug(
+                            f"Patched buffer {inst.name} with net {inst.buffer_original_netname=} {net.draw.buffer_patch_points=}"
+                        )
+                    else:
+                        logging.warning(f"Warning: Net {inst.buffer_original_netname} not found")
+                    module.remove_instance(inst)
 
-                if inst.buffer_original_netname in self.db.nets_by_name:
-                    net = self.db.nets_by_name[inst.buffer_original_netname]
-                    for pt in points:
-                        if pt == pt_center:
-                            continue
-                        segment = (pt_center, pt)
-                        net.buffer_patch_points.append(segment)
-                    logging.debug(f"Patched buffer {inst.name} with net {inst.buffer_original_netname=} {net.buffer_patch_points=}")
-                else:
-                    logging.warning(f"Warning: Net {inst.buffer_original_netname} not found")
-                self.db.top_module.remove_instance(inst)
         self.db._build_lookup_tables()
         # ok now we're ready to remove logical buffers and restore logical connection
 
     def calc_sheet_size(self):
-        """too concise perhaps?"""
-        coords = []
-
-        for _, net in self.db.top_module.get_all_nets().items():
-            for p1, p2 in net.shape:
-                coords.extend([p1, p2])
-
-            if net.buffer_patch_points:
-                for p1, p2 in net.buffer_patch_points:
-                    coords.extend([p1, p2])
-
-        padding = 100  # units is in grid at this point
-        if coords:
-            xs = [x for x, y in coords]
-            ys = [y for x, y in coords]
-            # if min(xs) < padding or min(ys) < padding:
-            #    self.shift_all_geom_by(padding - min(xs), padding - min(ys))
-
-            xsize = round(max(xs) - min(xs) + 2 * padding)
-            ysize = round(max(ys) - min(ys) + 2 * padding)
-
-            self.sheet_size = (xsize, ysize)
-        else:
-            self.sheet_size = (padding, padding)
+        self.sheet_size = self.db.design.top_module.draw.shape
 
     def compare_cluster_bboxes(self):
         """Compares the bounding box of instances within a cluster to the cluster's own shape."""
@@ -351,7 +333,9 @@ class GenSchematicData:
         # Shift net shapes
         for net in self.db.top_module.get_all_nets().values():
             net.shape = [((p1[0] + dx, p1[1] + dy), (p2[0] + dx, p2[1] + dy)) for p1, p2 in net.shape]
-            net.buffer_patch_points = [((p1[0] + dx, p1[1] + dy), (p2[0] + dx, p2[1] + dy)) for p1, p2 in net.buffer_patch_points]
+            net.draw.buffer_patch_points = [
+                ((p1[0] + dx, p1[1] + dy), (p2[0] + dx, p2[1] + dy)) for p1, p2 in net.draw.buffer_patch_points
+            ]
 
         # Shift cluster shapes, pins, and offsets
         for cluster in self.db.top_module.clusters.values():
