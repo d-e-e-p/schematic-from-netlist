@@ -1,4 +1,4 @@
-import logging
+import logging as log
 import os
 from enum import Enum
 
@@ -32,7 +32,7 @@ class LTSpiceWriter:
         self.db = db
         self.schematic_db = db.schematic_db
         self.module_names = {}
-        self.add_comments = False  # kicad can't seem to parse spice with comments
+        self.add_comments = True  # kicad can't seem to parse spice with comments
         self.output_dir = "output/ltspice"
         self.symlib = SymbolLibrary()
 
@@ -59,30 +59,51 @@ class LTSpiceWriter:
         x, y = point
         return (x * g, y * g)
 
-    def asc_place_inst(self, inst):
+    def asc_place_inst(self, inst, xoffset=0, yoffset=0):
         """Formats a single symbol line for the .asc file."""
         out = ""
 
-        if not inst.shape:
+        if not inst.draw.shape:
             return out
 
         name = inst.name
         module_ref = inst.module_ref_uniq
-        x1, y1, x2, y2 = self.upscale_rect(inst.shape)
-        x = (x1 + x2) // 2
-        y = (y1 + y2) // 2
+        x1, y1, x2, y2 = self.upscale_rect(inst.draw.shape)
+        x = (x1 + x2) // 2 + xoffset
+        y = (y1 + y2) // 2 + yoffset
         out += f"SYMBOL {module_ref} {x} {y} R0\n"
         out += f"SYMATTR InstName {name}\n"
         out += f"SYMATTR Value {module_ref}\n"
         return out
 
+    def asc_place_module(self, inst, xoffset=0, yoffset=0):
+        """Formats a module with other instances in .asc file."""
+        out = ""
+
+        if not inst.draw.shape:
+            return out
+
+        x1, y1, x2, y2 = self.upscale_rect(inst.draw.shape)
+        (x1, x2) = (x1 + xoffset, x2 + xoffset)
+        (y1, y2) = (y1 + yoffset, y2 + yoffset)
+
+        out += f"TEXT x2 y2 Center 2 {inst.name} ({inst.module_ref})\n"
+        out += f"RECTANGLE NORMAL {x1} {y1} {x2} {y2}\n"
+
+        for inst_child in inst.module.instances.values():
+            if inst_child.module.is_leaf:
+                out += self.asc_place_inst(inst_child, x1, y1)
+            else:
+                out += self.asc_place_module(inst_child, x1, y1)
+        return out
+
     def format_asc_wire(self, net):
         """Formats WIRE and FLAG lines for the .asc file."""
 
-        if not net.shape:
+        if not net.draw.shape:
             return ""
 
-        def segments_to_wire(out, segments, comment, add_label):
+        def segments_to_wire(out, segments, netname, comment, add_label):
             for pt_start, pt_end in segments:
                 out += f"WIRE {pt_start[0]} {pt_start[1]} {pt_end[0]} {pt_end[1]}{comment}\n"
                 if add_label:
@@ -90,16 +111,19 @@ class LTSpiceWriter:
                         (pt_start[0] + pt_end[0]) // 2,
                         (pt_start[1] + pt_end[1]) // 2,
                     )
-                    out += f"FLAG {pt_mid[0]} {pt_mid[1]} {net.name}\n"
+                    out += f"FLAG {pt_mid[0]} {pt_mid[1]} {netname}\n"
             return out
 
         comment = f" $   {net.name}" if self.add_comments else ""
         out = ""
+        log.info(f"{comment=}")
+        if net.name == "{}":
+            breakpoint()
 
         # Main net segments (with label)
-        out = segments_to_wire(out, self.upscale_segments(net.shape), comment, add_label=True)
+        out = segments_to_wire(out, self.upscale_segments(net.draw.shape), net.name, comment, add_label=True)
         # Patch points (without label)
-        out = segments_to_wire(out, self.upscale_segments(net.buffer_patch_points), comment, add_label=False)
+        out = segments_to_wire(out, self.upscale_segments(net.draw.buffer_patch_points), net.name, comment, add_label=False)
 
         return out
 
@@ -177,9 +201,9 @@ class LTSpiceWriter:
         """Generates an .asy file for a given module."""
 
         # eg a cap connected between vdd and gnd
-        if not inst.shape:
+        if not inst.draw.shape:
             return
-        rect = self.upscale_rect(inst.shape)
+        rect = self.upscale_rect(inst.draw.shape)
         hw = (rect[2] - rect[0]) // 2  # half width
         hh = (rect[3] - rect[1]) // 2  # half height
 
@@ -195,9 +219,9 @@ class LTSpiceWriter:
         asy += f"SYMATTR SpiceLine -\n"  # This sets Sim.Device
         asy += self.generate_symbol_window_commands(hw, hh)
         for pinname, pin in inst.pins.items():
-            if not pin.shape:
+            if not pin.draw.shape:
                 continue
-            port_center_x, port_center_y = self.upscale_point(pin.shape)
+            port_center_x, port_center_y = self.upscale_point(pin.draw.shape)
             x = port_center_x - inst_offset_x
             y = port_center_y - inst_offset_y
             pt = (x, y)
@@ -208,7 +232,7 @@ class LTSpiceWriter:
         asy_path = os.path.join(self.output_dir, f"{inst.module_ref_uniq}.asy")
         with open(asy_path, "w") as f:
             f.write(asy)
-        logging.debug(f"Generated symbol file: {asy_path}")
+        log.debug(f"Generated symbol file: {asy_path}")
 
     def produce_schematic(self, output_dir="data/ltspice"):
         """Generates the .asc schematic and .asy symbol files."""
@@ -217,14 +241,16 @@ class LTSpiceWriter:
 
         # first create symbols
         self.db.uniquify_module_names()
-        for inst in self.db.top_module.get_all_instances().values():
-            if inst.module_ref in self.symlib.symbols:
-                self.symlib.generate_symbol_asy(inst.module_ref, output_dir)
-                inst.module_ref_uniq = inst.module_ref
-            else:
-                self.generate_symbol_asy(inst)
+        for module in self.db.design.modules.values():
+            for inst in module.instances.values():
+                if inst.module.is_leaf:
+                    if inst.module.name in self.symlib.symbols:
+                        self.symlib.generate_symbol_asy(inst.module.name, output_dir)
+                        inst.module_ref_uniq = inst.module_ref
+                    else:
+                        self.generate_symbol_asy(inst)
 
-        top_module_name = self.db.top_module.name
+        top_module_name = self.db.design.top_module.name
         asc_path = os.path.join(output_dir, f"{top_module_name}.asc")
 
         width, height = self.schematic_db.sheet_size
@@ -232,17 +258,18 @@ class LTSpiceWriter:
         height *= self.schematic_db.schematic_grid_size
         asc_content = ["Version 4", f"Sheet 1 {width} {height}"]
 
-        for inst in self.db.top_module.get_all_instances().values():
-            asc_content.append(self.asc_place_inst(inst))
+        for inst in self.db.design.top_module.instances.values():
+            if inst.module.is_leaf:
+                asc_content.append(self.asc_place_inst(inst))
+            else:
+                asc_content.append(self.asc_place_module(inst))
 
         # Process wires
-        for _, net in self.db.top_module.get_all_nets().items():
+        for net in self.db.design.top_module.nets.values():
+            if not net.name:
+                breakpoint()
             asc_content.append(self.format_asc_wire(net))
-
-        # Add cluster outlines
-        for cluster in self.db.top_module.clusters.values():
-            asc_content.append(self.format_asc_cluster_outline(cluster))
 
         with open(asc_path, "w") as f:
             f.write("\n".join(asc_content))
-        logging.info(f"Generated schematic file: {asc_path}")
+        log.info(f"Generated schematic file: {asc_path}")

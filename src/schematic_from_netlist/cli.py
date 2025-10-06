@@ -116,9 +116,8 @@ def main():
     db.schematic_db = GenSchematicData(db)
     db.schematic_db.generate_schematic()
     generate_steiner_buffers(db)
-
-    db.remove_multi_fanout_buffers()
-    db.dump_to_table("final_state_after_buffer_removal")
+    produce_graph(db)
+    generate_schematic(db, args.output_dir)
 
     logging.info("Run Complete.")
 

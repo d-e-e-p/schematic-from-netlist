@@ -107,6 +107,10 @@ class Graphviz:
         for net in module.nets.values():
             # if net.name.startswith("GND") or net.name.startswith("_3V3") or net.name.startswith("VBUS"):
             #    continue
+            if net.is_chained_net:
+                weight = 0
+            else:
+                weight = 1
             pins = list(net.pins.values())
             if len(pins) > 1:
                 src = pins[0]
@@ -117,6 +121,7 @@ class Graphviz:
                         label=net.name,
                         headlabel=dst.full_name,
                         taillabel=src.full_name,
+                        weight=weight,
                     )
             elif len(pins) == 1:
                 if add_stubs:
@@ -129,6 +134,7 @@ class Graphviz:
                         label=net.name,
                         headlabel=pin.full_name,
                         taillabel=pin.full_name,
+                        weight=weight,
                     )
 
     def add_nodes(self, A, module):

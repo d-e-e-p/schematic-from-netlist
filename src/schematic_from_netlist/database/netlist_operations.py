@@ -245,7 +245,6 @@ class NetlistOperationsMixin:
 
                 buf_inout_pin = buffer_inst.add_pin(f"IO{j}", PinDirection.INOUT)
                 new_net.connect_pin(buf_inout_pin)
-                logging.debug(f" buffer pin {buf_inout_pin.full_name} now drives {pinnames=}")
 
                 net.remove_pin(pin)
                 new_net.connect_pin(pin)

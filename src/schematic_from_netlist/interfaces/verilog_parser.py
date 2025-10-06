@@ -134,6 +134,8 @@ class VerilogParser:
         return ast
 
     def pop_add_instance(self, vinst, module, module_node):
+        """adding instances during populating module"""
+        index_unconnected = 0
         module_ref_name = self._clean_name(vinst.module)
         module_ref = self.db.design.modules.get(module_ref_name)
 
@@ -193,7 +195,10 @@ class VerilogParser:
                     net_name = "GND"
                 elif "1'b1" in signal_pin:
                     net_name = "VDD"
-
+                if net_name == "{}":
+                    net_name = f"unconnected_{index_unconnected}"
+                    index_unconnected += 1
+                    log.info(f" {net_name} net Connecting {port_pin} to {signal_pin} on instance '{inst.name}'")
                 net = module.nets.get(net_name)
                 if not net:
                     if net_name is None:
