@@ -32,7 +32,7 @@ class LTSpiceWriter:
         self.db = db
         self.schematic_db = db.schematic_db
         self.module_names = {}
-        self.add_comments = True  # kicad can't seem to parse spice with comments
+        self.add_comments = False  # kicad can't seem to parse spice with comments
         self.output_dir = "output/ltspice"
         self.symlib = SymbolLibrary()
 
@@ -87,7 +87,7 @@ class LTSpiceWriter:
         (x1, x2) = (x1 + xoffset, x2 + xoffset)
         (y1, y2) = (y1 + yoffset, y2 + yoffset)
 
-        out += f"TEXT x2 y2 Center 2 {inst.name} ({inst.module_ref})\n"
+        out += f"TEXT {x2} {y2} Center 2 ;{inst.name} ({inst.module_ref})\n"
         out += f"RECTANGLE NORMAL {x1} {y1} {x2} {y2}\n"
 
         for inst_child in inst.module.instances.values():
@@ -116,9 +116,6 @@ class LTSpiceWriter:
 
         comment = f" $   {net.name}" if self.add_comments else ""
         out = ""
-        log.info(f"{comment=}")
-        if net.name == "{}":
-            breakpoint()
 
         # Main net segments (with label)
         out = segments_to_wire(out, self.upscale_segments(net.draw.shape), net.name, comment, add_label=True)

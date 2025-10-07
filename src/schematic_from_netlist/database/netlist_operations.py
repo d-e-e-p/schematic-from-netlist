@@ -432,7 +432,7 @@ class NetlistOperationsMixin:
                 build_table_recursive(child_module, new_prefix, is_top=False)
 
         build_table_recursive(self.design.top_module)
-        logging.info(title + "\n" + tabulate(table_data, headers=headers, tablefmt="fancy_grid"))
+        logging.info(title + "\n" + tabulate(table_data, headers=headers, tablefmt="pipe"))
 
     def build_hypergraph_data(self) -> "HypergraphData":
         """Builds the hypergraph data structure for KaHyPar."""

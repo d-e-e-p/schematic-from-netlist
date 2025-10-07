@@ -2,6 +2,7 @@ import logging
 import os
 import re
 import sys
+import copy
 from dataclasses import dataclass, field
 from optparse import OptionParser
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -97,8 +98,11 @@ class VerilogParser:
         """Populates an existing Module object with its instances from the AST."""
         for item in module_node.items:
             if isinstance(item, vast.InstanceList):
-                for inst in item.instances:
-                    self.pop_add_instance(inst, module, module_node)
+                for vinst in item.instances:
+                    if vinst.array:
+                        self.unroll_and_add_arrayed_instance(vinst, item, module, module_node)
+                    else:
+                        self.pop_add_instance(vinst, module, module_node, item.module)
         for item in module_node.items:
             if isinstance(item, vast.GenerateStatement):
                 for statement in item.items:
@@ -133,10 +137,71 @@ class VerilogParser:
             ast.description = vast.Description(tuple(current_defs))
         return ast
 
-    def pop_add_instance(self, vinst, module, module_node):
+    def unroll_and_add_arrayed_instance(self, vinst, inst_list, module, module_node):
+        """Unrolls an arrayed instance into individual instances and adds them."""
+        if not vinst.array:
+            log.warning(f"Called unroll_and_add_arrayed_instance for non-arrayed instance {vinst.name}")
+            self.pop_add_instance(vinst, module, module_node, inst_list.module)
+            return
+
+        width = vinst.array
+        try:
+            # Use codegen to handle potential expressions in bounds
+            msb = int(self.modifier.codegen.visit(width.msb))
+            lsb = int(self.modifier.codegen.visit(width.lsb))
+        except (ValueError, AttributeError):
+            log.error(f"Could not evaluate array bounds for instance {vinst.name}")
+            return
+
+        indices = range(msb, lsb - 1, -1) if msb >= lsb else range(lsb, msb + 1)
+
+        module_ref_name = self._clean_name(inst_list.module)
+        module_ref = self.db.design.modules.get(module_ref_name)
+        if not module_ref:
+            log.warning(f"Module '{module_ref_name}' not found for arrayed instance '{vinst.name}', creating stub.")
+            module_ref = self.pop_create_stub_module(module_ref_name, vinst, module_node)
+
+        for i in indices:
+            vinst_copy = copy.deepcopy(vinst)
+            vinst_copy.name = f"{vinst.name}[{i}]"
+            vinst_copy.array = None  # This is now a scalar instance
+
+            for port_idx, port_arg in enumerate(vinst_copy.portlist):
+                if not port_arg.argname:
+                    continue
+
+                port_name = self._clean_name(port_arg.portname)
+                port_info = None
+                if port_name:
+                    port_info = module_ref.ports.get(port_name)
+                else:  # Positional
+                    if port_idx < len(module_ref.ports):
+                        port_info = list(module_ref.ports.values())[port_idx]
+                    else:
+                        log.error(f"Positional connection index {port_idx} out of bounds for '{module_ref.name}'")
+                        continue
+
+                if not port_info:
+                    log.error(f"Port '{port_name}' not found in module '{module_ref.name}'")
+                    continue
+
+                port_width = abs(port_info.bus.msb - port_info.bus.lsb) + 1 if port_info.bus else 1
+
+                # To get signal width, we need to analyze the original port argument
+                original_port_arg = vinst.portlist[port_idx]
+                info = self.modifier.extract_portarg_with_width(original_port_arg, module_node)
+                signal_width = info.total_connection_width
+
+                if port_width == 1 and signal_width > 1 and isinstance(port_arg.argname, vast.Identifier):
+                    ptr = vast.IntConst(str(i))
+                    port_arg.argname = vast.Pointer(var=port_arg.argname, ptr=ptr)
+
+            self.pop_add_instance(vinst_copy, module, module_node, inst_list.module)
+
+    def pop_add_instance(self, vinst, module, module_node, module_ref_name):
         """adding instances during populating module"""
         index_unconnected = 0
-        module_ref_name = self._clean_name(vinst.module)
+        module_ref_name = self._clean_name(module_ref_name)
         module_ref = self.db.design.modules.get(module_ref_name)
 
         if not module_ref:
@@ -256,7 +321,7 @@ class VerilogParser:
                                 # Prepend the generate block name to the instance name
                                 original_name = inst.name
                                 inst.name = f"{block_name}[{i}]/{original_name}"
-                                self.pop_add_instance(inst, module, module_node)
+                                self.pop_add_instance(inst, module, module_node, concrete_item.module)
 
             except Exception as e:
                 log.error(f"Failed to parse generate for-loop: {e}")
@@ -337,7 +402,10 @@ class VerilogParser:
                 signal_bits.append(f"{conn.signal_name}[{msb}:{lsb}]")
 
         if len(signal_bits) != port_width:
-            log.warning(f"Width mismatch for port '{port_name}': port is {port_width}, signal is {len(signal_bits)}")
+            if len(signal_bits) == 0:
+                log.info(f"Unconnected port '{port_name}' (width {port_width}).")
+            else:
+                log.error(f"Width mismatch for port '{port_name}': port is {port_width}, signal is {len(signal_bits)}")
             return [(port_name, "{" + ",".join(signal_bits) + "}")]
 
         port_pins = []
