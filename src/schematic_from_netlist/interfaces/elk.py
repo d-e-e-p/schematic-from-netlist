@@ -229,19 +229,28 @@ class ElkInterface:
             identifier = node.getIdentifier() or "unnamed"
 
             lines.append(f"{prefix}node {identifier} {{")
-
-            # Properties
+            
+            # Combine size and position into a single layout clause
+            layout_props = []
             if node.getWidth() > 0 or node.getHeight() > 0:
-                lines.append(f"{prefix}  layout [ size: {node.getWidth()}, {node.getHeight()} ]")
+                layout_props.append(f"size: {node.getWidth()}, {node.getHeight()}")
             if node.getX() != 0 or node.getY() != 0:
-                lines.append(f"{prefix}  layout [ position: {node.getX()}, {node.getY()} ]")
+                layout_props.append(f"position: {node.getX()}, {node.getY()}")
+            
+            if layout_props:
+                lines.append(f"{prefix}  layout [ {', '.join(layout_props)} ]")
 
             # Ports
             for port in node.getPorts():
                 port_id = port.getIdentifier() or "unnamed_port"
                 lines.append(f"{prefix}  port {port_id} {{")
-                lines.append(f"{prefix}    layout [ position: {port.getX()}, {port.getY()} ]")
-                lines.append(f"{prefix}    layout [ size: {port.getWidth()}, {port.getHeight()} ]")
+                
+                # Combine port position and size into a single layout clause
+                port_layout_props = []
+                port_layout_props.append(f"position: {port.getX()}, {port.getY()}")
+                port_layout_props.append(f"size: {port.getWidth()}, {port.getHeight()}")
+                lines.append(f"{prefix}    layout [ {', '.join(port_layout_props)} ]")
+                
                 port_side = port.getProperty(CoreOptions.PORT_SIDE)
                 if port_side:
                     lines.append(f"{prefix}    org.eclipse.elk.^port.side: {port_side}")
@@ -275,13 +284,14 @@ class ElkInterface:
                     # Build edge identifier
                     src_id = src.getIdentifier() if hasattr(src, "getIdentifier") else str(src)
                     tgt_id = tgt.getIdentifier() if hasattr(tgt, "getIdentifier") else str(tgt)
+                    edge_id = edge.getIdentifier() or f"{src_id}_{tgt_id}"
 
                     lines.append(f"{prefix}edge {src_id} -> {tgt_id} {{")
                     
-                    # Add edge sections
-                    for section in edge.getSections():
+                    # Add edge sections - all in one layout clause
+                    for i, section in enumerate(edge.getSections()):
                         lines.append(f"{prefix}  layout [")
-                        lines.append(f"{prefix}    section s0 [")
+                        lines.append(f"{prefix}    section s{i} [")
                         lines.append(f"{prefix}      incoming: {src_id}")
                         lines.append(f"{prefix}      outgoing: {tgt_id}")
                         lines.append(f"{prefix}      start: {section.getStartX()}, {section.getStartY()}")
