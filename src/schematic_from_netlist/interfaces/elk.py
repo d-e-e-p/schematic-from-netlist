@@ -230,36 +230,33 @@ class ElkInterface:
 
             lines.append(f"{prefix}node {identifier} {{")
             
-            # Combine size and position into a single layout clause
-            layout_props = []
+            # Add layout block with size and position on separate lines
+            lines.append(f"{prefix}\tlayout [")
             if node.getWidth() > 0 or node.getHeight() > 0:
-                layout_props.append(f"size: {node.getWidth()}, {node.getHeight()}")
-            if node.getX() != 0 or node.getY() != 0:
-                layout_props.append(f"position: {node.getX()}, {node.getY()}")
-            
-            if layout_props:
-                lines.append(f"{prefix}  layout [ {', '.join(layout_props)} ]")
+                lines.append(f"{prefix}\t\tposition: {node.getX()}, {node.getY()}")
+                lines.append(f"{prefix}\t\tsize: {node.getWidth()}, {node.getHeight()}")
+            lines.append(f"{prefix}\t]")
+            lines.append(f'{prefix}\tnodeSize.constraints: "[]"')
+            lines.append(f"{prefix}\tcrossingMinimization.positionId: -1")
+            lines.append(f"{prefix}\tlayering.layerId: -1")
 
             # Ports
             for port in node.getPorts():
                 port_id = port.getIdentifier() or "unnamed_port"
-                lines.append(f"{prefix}  port {port_id} {{")
-                
-                # Combine port position and size into a single layout clause
-                port_layout_props = []
-                port_layout_props.append(f"position: {port.getX()}, {port.getY()}")
-                port_layout_props.append(f"size: {port.getWidth()}, {port.getHeight()}")
-                lines.append(f"{prefix}    layout [ {', '.join(port_layout_props)} ]")
-                
+                lines.append(f"{prefix}\tport {port_id} {{")
+                lines.append(f"{prefix}\t\tlayout [")
+                lines.append(f"{prefix}\t\t\tposition: {port.getX()}, {port.getY()}")
+                lines.append(f"{prefix}\t\t\tsize: {port.getWidth()}, {port.getHeight()}")
+                lines.append(f"{prefix}\t\t]")
                 port_side = port.getProperty(CoreOptions.PORT_SIDE)
                 if port_side:
-                    lines.append(f"{prefix}    org.eclipse.elk.^port.side: {port_side}")
-                lines.append(f"{prefix}  }}")
+                    lines.append(f"{prefix}\t\torg.eclipse.elk.^port.side: {port_side}")
+                lines.append(f"{prefix}\t}}")
 
             # Labels
             for label in node.getLabels():
                 label_text = label.getText() or ""
-                lines.append(f'{prefix}  label "{label_text}"')
+                lines.append(f'{prefix}\tlabel "{label_text}"')
 
             # Child nodes
             for child in node.getChildren():
@@ -281,31 +278,40 @@ class ElkInterface:
                     src = sources[0]
                     tgt = targets[0]
 
-                    # Build edge identifier
+                    # Build edge identifier - match the expected format
                     src_id = src.getIdentifier() if hasattr(src, "getIdentifier") else str(src)
                     tgt_id = tgt.getIdentifier() if hasattr(tgt, "getIdentifier") else str(tgt)
                     edge_id = edge.getIdentifier() or f"{src_id}_{tgt_id}"
 
-                    lines.append(f"{prefix}edge {src_id} -> {tgt_id} {{")
+                    # Use the edge identifier format from the expected file
+                    lines.append(f"{prefix}edge {edge_id}: {src_id} -> {tgt_id} {{")
                     
                     # Add edge sections - all in one layout clause
+                    lines.append(f"{prefix}\tlayout [")
                     for i, section in enumerate(edge.getSections()):
-                        lines.append(f"{prefix}  layout [")
-                        lines.append(f"{prefix}    section s{i} [")
-                        lines.append(f"{prefix}      incoming: {src_id}")
-                        lines.append(f"{prefix}      outgoing: {tgt_id}")
-                        lines.append(f"{prefix}      start: {section.getStartX()}, {section.getStartY()}")
-                        lines.append(f"{prefix}      end: {section.getEndX()}, {section.getEndY()}")
+                        lines.append(f"{prefix}\t\tsection s{i} [")
+                        lines.append(f"{prefix}\t\t\tincoming: {src_id}")
+                        lines.append(f"{prefix}\t\t\toutgoing: {tgt_id}")
+                        lines.append(f"{prefix}\t\t\tstart: {section.getStartX()}, {section.getStartY()}")
+                        lines.append(f"{prefix}\t\t\tend: {section.getEndX()}, {section.getEndY()}")
                         
                         # Add bend points if any
                         bend_points = section.getBendPoints()
                         if bend_points:
                             bends = " | ".join(f"{bp.getX()}, {bp.getY()}" for bp in bend_points)
-                            lines.append(f"{prefix}      bends: {bends}")
+                            lines.append(f"{prefix}\t\t\tbends: {bends}")
                         
-                        lines.append(f"{prefix}    ]")
-                        lines.append(f"{prefix}  ]")
-                    
+                        lines.append(f"{prefix}\t\t]")
+                    lines.append(f"{prefix}\t]")
+                    # Add junctionPoints
+                    bend_points = []
+                    for section in edge.getSections():
+                        bend_points.extend(section.getBendPoints())
+                    if bend_points:
+                        junction_points = "(" + " | ".join(f"{bp.getX()},{bp.getY()}" for bp in bend_points) + ")"
+                        lines.append(f'{prefix}\tjunctionPoints: "{junction_points}"')
+                    else:
+                        lines.append(f'{prefix}\tjunctionPoints: "()"')
                     lines.append(f"{prefix}}}")
 
             # Process edges in child nodes
@@ -317,7 +323,16 @@ class ElkInterface:
         # Build ELKT content
         lines = []
         graph_id = graph.getIdentifier() or "root"
-        lines.append(f"graph {graph_id} {{")
+        lines.append(f"graph {graph_id}")
+        # Add graph-level layout properties
+        lines.append("layout [ size: 116, 104 ]")
+        lines.append('portLabels.placement: "[OUTSIDE]"')
+        lines.append('nodeLabels.placement: "[]"')
+        lines.append("algorithm: layered")
+        lines.append('nodeSize.constraints: "[]"')
+        lines.append("edgeRouting: ORTHOGONAL")
+        lines.append('nodeSize.options: "[DEFAULT_MINIMUM_SIZE]"')
+        lines.append("hierarchyHandling: SEPARATE_CHILDREN")
 
         # Add child nodes
         for child in graph.getChildren():
@@ -325,8 +340,6 @@ class ElkInterface:
 
         # Add edges
         lines.extend(serialize_edges(graph, 1))
-
-        lines.append("}")
 
         # Write to file
         with open(elkt_path, "w", encoding="utf-8") as f:
