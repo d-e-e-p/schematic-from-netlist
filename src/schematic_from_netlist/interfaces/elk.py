@@ -239,7 +239,13 @@ class ElkInterface:
             # Ports
             for port in node.getPorts():
                 port_id = port.getIdentifier() or "unnamed_port"
-                lines.append(f"{prefix}  port {port_id}")
+                lines.append(f"{prefix}  port {port_id} {{")
+                lines.append(f"{prefix}    layout [ position: {port.getX()}, {port.getY()} ]")
+                lines.append(f"{prefix}    layout [ size: {port.getWidth()}, {port.getHeight()} ]")
+                port_side = port.getProperty(CoreOptions.PORT_SIDE)
+                if port_side:
+                    lines.append(f"{prefix}    org.eclipse.elk.^port.side: {port_side}")
+                lines.append(f"{prefix}  }}")
 
             # Labels
             for label in node.getLabels():
@@ -270,7 +276,27 @@ class ElkInterface:
                     src_id = src.getIdentifier() if hasattr(src, "getIdentifier") else str(src)
                     tgt_id = tgt.getIdentifier() if hasattr(tgt, "getIdentifier") else str(tgt)
 
-                    lines.append(f"{prefix}edge {src_id} -> {tgt_id}")
+                    lines.append(f"{prefix}edge {src_id} -> {tgt_id} {{")
+                    
+                    # Add edge sections
+                    for section in edge.getSections():
+                        lines.append(f"{prefix}  layout [")
+                        lines.append(f"{prefix}    section s0 [")
+                        lines.append(f"{prefix}      incoming: {src_id}")
+                        lines.append(f"{prefix}      outgoing: {tgt_id}")
+                        lines.append(f"{prefix}      start: {section.getStartX()}, {section.getStartY()}")
+                        lines.append(f"{prefix}      end: {section.getEndX()}, {section.getEndY()}")
+                        
+                        # Add bend points if any
+                        bend_points = section.getBendPoints()
+                        if bend_points:
+                            bends = " | ".join(f"{bp.getX()}, {bp.getY()}" for bp in bend_points)
+                            lines.append(f"{prefix}      bends: {bends}")
+                        
+                        lines.append(f"{prefix}    ]")
+                        lines.append(f"{prefix}  ]")
+                    
+                    lines.append(f"{prefix}}}")
 
             # Process edges in child nodes
             for child in node.getChildren():
