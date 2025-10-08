@@ -54,7 +54,6 @@ class PointPhysical:
             self.shape = None
             return self.shape
         s = scaling_from_graph_to_sch
-        log.info(f"{self.fig=}")
         x, y = self.fig
         self.shape = (int(round(x * s)), int(round(y * s)))
         return self.shape
@@ -63,7 +62,6 @@ class PointPhysical:
         if self.shape is None:
             self.geom = None
             return None
-        log.info(f"{self.fig=}")
         x, y = self.shape
         self.geom = Point(round(x), round(y))
         return self.geom
@@ -187,7 +185,6 @@ class DesignPhysical(RectanglePhysical):
                 module.pins.values(),
             ):
                 for obj in collection:
-                    log.info(f" {type(obj)=} {obj.name=}")
                     if hasattr(obj, "draw"):
                         fn(obj.draw)
 

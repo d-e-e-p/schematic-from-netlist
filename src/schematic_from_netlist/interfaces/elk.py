@@ -80,9 +80,10 @@ class ElkInterface:
         self.create_edges(module, graph, ports)
 
         self.layout_graph(graph, "pass1")
-        self.update_graph_with_symbols(graph)
-        self.layout_graph(graph, "pass2")
-        self.extract_geometry(graph, module)
+        # self.update_graph_with_symbols(graph)
+        # self.layout_graph(graph, "pass2")
+        # self.extract_geometry(graph, module)
+        exit()
 
     def scale_macro_size(self, inst):
         degree = len(inst.pins.keys())
@@ -107,7 +108,6 @@ class ElkInterface:
                 port.setIdentifier(self.genid(pin))
                 port.setWidth(port_size)
                 port.setHeight(port_size)
-                breakpoint()
                 ports[self.genid(pin)] = port
         return nodes, ports
 
@@ -136,12 +136,12 @@ class ElkInterface:
     def layout_graph(self, graph, step: str = ""):
         graph.setProperty(CoreOptions.ALGORITHM, "layered")
         graph.setProperty(LayeredOptions.EDGE_ROUTING, EdgeRouting.ORTHOGONAL)
-        self.write_graph_to_file(graph, f"pre_{step}_")
+        self.write_graph_to_file(graph, f"pre_{step}")
 
         layout_engine = RecursiveGraphLayoutEngine()
         monitor = BasicProgressMonitor()
         layout_engine.layout(graph, monitor)
-        self.write_graph_to_file(graph, f"post_{step}_")
+        self.write_graph_to_file(graph, f"post_{step}")
 
     def extract_geometry(self, graph, module):
         def walk_graph_and_extract_data(node, module):
@@ -218,13 +218,85 @@ class ElkInterface:
         # --- ELKT ---
         elkt_path = output_dir / "elkt" / f"{prefix}.elkt"
         elkt_path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            setup = ElkGraphStandaloneSetup()
-            injector = setup.createInjectorAndDoEMFRegistration()
-            serializer = injector.getInstance(ISerializer)
-            elkt_str = str(serializer.serialize(graph))
-            with open(elkt_path, "w", encoding="utf-8") as f:
-                f.write(str(elkt_str))
-            log.info(f"Wrote ELK graph ELKT to: {elkt_path}")
-        except Exception as e:
-            log.exception(f"Failed to write ELKT: {e}")
+        self.write_elkt(graph, elkt_path)
+
+    def write_elkt(self, graph, elkt_path: Path) -> None:
+        """Write ELK graph in ELKT format manually."""
+
+        def serialize_node(node, indent=0):
+            lines = []
+            prefix = "  " * indent
+            identifier = node.getIdentifier() or "unnamed"
+
+            lines.append(f"{prefix}node {identifier} {{")
+
+            # Properties
+            if node.getWidth() > 0 or node.getHeight() > 0:
+                lines.append(f"{prefix}  layout [ size: {node.getWidth()}, {node.getHeight()} ]")
+            if node.getX() != 0 or node.getY() != 0:
+                lines.append(f"{prefix}  layout [ position: {node.getX()}, {node.getY()} ]")
+
+            # Ports
+            for port in node.getPorts():
+                port_id = port.getIdentifier() or "unnamed_port"
+                lines.append(f"{prefix}  port {port_id}")
+
+            # Labels
+            for label in node.getLabels():
+                label_text = label.getText() or ""
+                lines.append(f'{prefix}  label "{label_text}"')
+
+            # Child nodes
+            for child in node.getChildren():
+                lines.extend(serialize_node(child, indent + 1))
+
+            lines.append(f"{prefix}}}")
+            return lines
+
+        def serialize_edges(node, indent=0):
+            lines = []
+            prefix = "  " * indent
+
+            for edge in node.getContainedEdges():
+                # Get source
+                sources = list(edge.getSources())
+                targets = list(edge.getTargets())
+
+                if sources and targets:
+                    src = sources[0]
+                    tgt = targets[0]
+
+                    # Build edge identifier
+                    src_id = src.getIdentifier() if hasattr(src, "getIdentifier") else str(src)
+                    tgt_id = tgt.getIdentifier() if hasattr(tgt, "getIdentifier") else str(tgt)
+
+                    lines.append(f"{prefix}edge {src_id} -> {tgt_id}")
+
+            # Process edges in child nodes
+            for child in node.getChildren():
+                lines.extend(serialize_edges(child, indent))
+
+            return lines
+
+        # Build ELKT content
+        lines = []
+        graph_id = graph.getIdentifier() or "root"
+        lines.append(f"graph {graph_id} {{")
+
+        # Add child nodes
+        for child in graph.getChildren():
+            lines.extend(serialize_node(child, 1))
+
+        # Add edges
+        lines.extend(serialize_edges(graph, 1))
+
+        lines.append("}")
+
+        # Write to file
+        with open(elkt_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines))
+
+        log.info(f"Wrote ELK graph ELKT to: {elkt_path}")
+
+    def update_graph_with_symbols(self, graph):
+        pass
