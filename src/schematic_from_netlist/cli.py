@@ -8,7 +8,7 @@ from schematic_from_netlist.graph.gen_sch_data import GenSchematicData
 from schematic_from_netlist.graph.graph_partition import HypergraphPartitioner
 from schematic_from_netlist.graph.group_maker import SteinerGroupMaker
 from schematic_from_netlist.graph.layout_optimizer import LayoutOptimizer
-from schematic_from_netlist.interfaces.graphviz import Graphviz
+from schematic_from_netlist.interfaces.elk import ElkInterface
 from schematic_from_netlist.interfaces.ltspice_writer import LTSpiceWriter
 from schematic_from_netlist.interfaces.verilog_parser import VerilogParser
 
@@ -29,24 +29,16 @@ def load_netlist(netlist_file: str, debug: bool):
     db.dump_to_table("initial_parse")
     db.determine_design_hierarchy()
 
-    db.buffer_multi_fanout_nets()  # Insert fanout buffers
-    db.dump_to_table("after_initial_buffering")
+    # db.buffer_multi_fanout_nets()  # Insert fanout buffers
+    # db.dump_to_table("after_initial_buffering")
 
     return db
 
 
-def partition_hypergraph(db, k: int, config_file: str):
-    """Partition hypergraph and assign groups."""
-    hypergraph_data = db.build_hypergraph_data()
-    partitioner = HypergraphPartitioner(hypergraph_data, db)
-    partition = partitioner.run_partitioning(k, config_file)
-    db.assign_to_groups(partition)
-
-
 def produce_graph(db):
     """Build Graphviz layouts for groups and top-level interconnect."""
-    gv = Graphviz(db)
-    gv.generate_layout_figures()
+    elk = ElkInterface(db)
+    elk.generate_layout_figures()
 
 
 def generate_schematic(db, output_dir: str):
@@ -112,10 +104,6 @@ def main():
     logging.info(f"Processing netlist file: {args.netlist_file}")
 
     db = load_netlist(args.netlist_file, args.debug)
-    produce_graph(db)
-    db.schematic_db = GenSchematicData(db)
-    db.schematic_db.generate_schematic()
-    generate_steiner_buffers(db)
     produce_graph(db)
     generate_schematic(db, args.output_dir)
 

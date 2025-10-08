@@ -1,8 +1,8 @@
+import copy
 import logging
 import os
 import re
 import sys
-import copy
 from dataclasses import dataclass, field
 from optparse import OptionParser
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -36,6 +36,7 @@ class VerilogParser:
         if self.db.design.top_module:
             output_filename = f"data/verilog/processed_{self.db.design.top_module.name}.v"
             self.write_ast(ast, output_filename)
+        self.db._build_lookup_tables()
         return self.db
 
     # --------------------------------------------------------------------------

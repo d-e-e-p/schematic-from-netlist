@@ -76,7 +76,7 @@ class Pin:
         self.full_name = f"{self.instance.full_name}/{self.name}"
 
     def __hash__(self):
-        return hash(self.full_name)
+        return hash(self.full_name) & 0xFFFFFFFF
 
 
 # -----------------------------
@@ -117,7 +117,7 @@ class Net:
         logging.debug(f"after remove_pin {self.name=} {self.num_conn=}")
 
     def __hash__(self):
-        return hash(self.full_name)
+        return hash(self.full_name) & 0xFFFFFFFF
 
 
 # -----------------------------
@@ -164,7 +164,7 @@ class Instance:
         return {pin.net for pin in self.pins.values() if pin.net}
 
     def __hash__(self):
-        return hash(self.full_name)
+        return hash(self.full_name) & 0xFFFFFFFF
 
 
 # -----------------------------
@@ -181,6 +181,11 @@ class Module:
     child_modules: Dict[str, Module] = field(default_factory=dict)
     busses: Dict[str, Bus] = field(default_factory=dict)
     parameters: Dict[str, Any] = field(default_factory=dict)
+
+    hash2instance: Dict[str, Instance] = field(default_factory=dict)
+    hash2net: Dict[str, Net] = field(default_factory=dict)
+    hash2pin: Dict[str, Pin] = field(default_factory=dict)
+
     depth: int = 0
     is_leaf: bool = False
     is_stub: bool = True

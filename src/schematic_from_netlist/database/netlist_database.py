@@ -1,5 +1,4 @@
-import logging
-from collections import defaultdict
+import logging as log
 from typing import Dict, List, Optional, Tuple
 
 from .netlist_operations import NetlistOperationsMixin
@@ -47,35 +46,34 @@ class NetlistDatabase(NetlistOperationsMixin):
 
     def _build_lookup_tables(self):
         """Build fast lookup tables for instances, nets, and pins"""
-        if not self.design.top_module:
-            return
 
         # Clear existing tables
         self.inst_by_name.clear()
         self.nets_by_name.clear()
         self.pins_by_name.clear()
 
-        def traverse_module(module: Module):
+        for module in self.design.modules.values():
             # Add all instances
+            module.hash2instance.clear()
+            module.hash2net.clear()
+            module.hash2pin.clear()
             for instance in module.instances.values():
-                self.inst_by_name[instance.name] = instance
+                module.hash2instance[str(hash(instance))] = instance
+                self.inst_by_name[instance.full_name] = instance
+
                 # Add all pins of this instance
                 for pin in instance.pins.values():
+                    module.hash2pin[str(hash(pin))] = pin
                     self.pins_by_name[pin.full_name] = pin
 
             # Add all nets
             for net in module.nets.values():
+                module.hash2net[str(hash(net))] = net
                 self.nets_by_name[net.name] = net
 
             # Add module ports as pins
             for port in module.ports.values():
                 self.ports_by_name[port.name] = port
-
-            # Recursively traverse child modules
-            for child_module in module.child_modules.values():
-                traverse_module(child_module)
-
-        traverse_module(self.design.top_module)
 
         """
         instances_by_partition = defaultdict(list)
@@ -119,6 +117,6 @@ if __name__ == "__main__":
 
     # Query examples
     logging.info("Design Statistics:")
-    stats = db.get_design_statistics()
+    stats = db.design.get_design_statistics()
     for key, value in stats.items():
         logging.info(f"  {key}: {value}")
