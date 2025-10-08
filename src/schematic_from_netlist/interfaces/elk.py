@@ -47,7 +47,7 @@ class ElkInterface:
     def __init__(self, db):
         self.db = db
         self.output_dir = "data/json"
-        self.size_min_macro = 10
+        self.size_min_macro = 30
         self.size_factor_per_pin = 2  #  ie 200-pin macro will be 200x200
 
     def genid(self, obj, counter: int | None = None):
@@ -79,7 +79,9 @@ class ElkInterface:
         nodes, ports = self.create_nodes(module, graph)
         self.create_edges(module, graph, ports)
 
-        self.layout_graph(graph)
+        self.layout_graph(graph, "pass1")
+        self.update_graph_with_symbols(graph)
+        self.layout_graph(graph, "pass2")
         self.extract_geometry(graph, module)
 
     def scale_macro_size(self, inst):
@@ -105,6 +107,7 @@ class ElkInterface:
                 port.setIdentifier(self.genid(pin))
                 port.setWidth(port_size)
                 port.setHeight(port_size)
+                breakpoint()
                 ports[self.genid(pin)] = port
         return nodes, ports
 
@@ -130,20 +133,17 @@ class ElkInterface:
                     edge.getSources().add(src_port)
                     edge.getTargets().add(dst_port)
 
-    def layout_graph(self, graph):
+    def layout_graph(self, graph, step: str = ""):
         graph.setProperty(CoreOptions.ALGORITHM, "layered")
         graph.setProperty(LayeredOptions.EDGE_ROUTING, EdgeRouting.ORTHOGONAL)
-        self.write_graph_to_file(graph, "pre")
+        self.write_graph_to_file(graph, f"pre_{step}_")
 
         layout_engine = RecursiveGraphLayoutEngine()
         monitor = BasicProgressMonitor()
         layout_engine.layout(graph, monitor)
-        self.write_graph_to_file(graph, "post")
+        self.write_graph_to_file(graph, f"post_{step}_")
 
     def extract_geometry(self, graph, module):
-        all_node_geometry = []
-        all_edge_routes = []
-
         def walk_graph_and_extract_data(node, module):
             is_root = node.getParent() is None
             if is_root:
