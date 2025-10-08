@@ -229,7 +229,7 @@ class ElkInterface:
             identifier = node.getIdentifier() or "unnamed"
 
             lines.append(f"{prefix}node {identifier} {{")
-            
+
             # Add layout block with size and position on separate lines
             lines.append(f"{prefix}\tlayout [")
             if node.getWidth() > 0 or node.getHeight() > 0:
@@ -277,26 +277,26 @@ class ElkInterface:
                 if sources and targets:
                     src = sources[0]
                     tgt = targets[0]
-                    
+
                     # Get the parent node IDs
                     src_node = src.getParent()
                     tgt_node = tgt.getParent()
-                    
+
                     # Build identifiers in the format node_id.port_id
                     src_node_id = src_node.getIdentifier() if hasattr(src_node, "getIdentifier") else str(src_node)
                     src_port_id = src.getIdentifier() if hasattr(src, "getIdentifier") else str(src)
                     tgt_node_id = tgt_node.getIdentifier() if hasattr(tgt_node, "getIdentifier") else str(tgt_node)
                     tgt_port_id = tgt.getIdentifier() if hasattr(tgt, "getIdentifier") else str(tgt)
-                    
+
                     # Build full source and target identifiers
                     src_full_id = f"{src_node_id}.{src_port_id}"
                     tgt_full_id = f"{tgt_node_id}.{tgt_port_id}"
-                    
+
                     edge_id = edge.getIdentifier() or f"{src_node_id}_{src_port_id}_{tgt_node_id}_{tgt_port_id}"
 
                     # Use the edge identifier format from the expected file
                     lines.append(f"{prefix}edge {edge_id}: {src_full_id} -> {tgt_full_id} {{")
-                    
+
                     # Add edge sections - all in one layout clause
                     lines.append(f"{prefix}\tlayout [")
                     for i, section in enumerate(edge.getSections()):
@@ -305,13 +305,13 @@ class ElkInterface:
                         lines.append(f"{prefix}\t\t\toutgoing: {tgt_full_id}")
                         lines.append(f"{prefix}\t\t\tstart: {section.getStartX()}, {section.getStartY()}")
                         lines.append(f"{prefix}\t\t\tend: {section.getEndX()}, {section.getEndY()}")
-                        
+
                         # Add bend points if any
                         bend_points = section.getBendPoints()
                         if bend_points:
                             bends = " | ".join(f"{bp.getX()}, {bp.getY()}" for bp in bend_points)
                             lines.append(f"{prefix}\t\t\tbends: {bends}")
-                        
+
                         lines.append(f"{prefix}\t\t]")
                     lines.append(f"{prefix}\t]")
                     # Add junctionPoints
@@ -319,7 +319,7 @@ class ElkInterface:
                     for section in edge.getSections():
                         bend_points.extend(section.getBendPoints())
                     if bend_points:
-                        junction_points = "(" + " | ".join(f"{bp.getX()},{bp.getY()}" for bp in bend_points) + ")"
+                        junction_points = "(" + " ; ".join(f"{bp.getX()},{bp.getY()}" for bp in bend_points) + ")"
                         lines.append(f'{prefix}\tjunctionPoints: "{junction_points}"')
                     else:
                         lines.append(f'{prefix}\tjunctionPoints: "()"')
