@@ -30,8 +30,8 @@ def load_netlist(netlist_file: str, debug: bool):
     db.dump_to_table("initial_parse")
     db.determine_design_hierarchy()
 
-    # db.buffer_multi_fanout_nets()  # Insert fanout buffers
-    # db.dump_to_table("after_initial_buffering")
+    db.buffer_multi_fanout_nets()  # Insert fanout buffers
+    db.dump_to_table("after_initial_buffering")
 
     return db
 

@@ -1,5 +1,6 @@
 import json
 import logging as log
+import math
 import os
 import re
 from dataclasses import dataclass, field
@@ -9,7 +10,11 @@ from typing import Dict, List, Optional, Tuple
 import jpype
 import jpype.imports
 from jpype import JClass, JDouble, JInt
+from shapely.affinity import rotate, scale, translate
+from shapely.geometry import Point, Polygon, box
 
+from schematic_from_netlist.interfaces.elk_utils import ElkUtils
+from schematic_from_netlist.interfaces.symbol_library import SymbolLibrary
 from schematic_from_netlist.utils.config import setup_elk
 
 setup_elk()
@@ -29,17 +34,30 @@ from org.eclipse.elk.alg.layered.options import (
 from org.eclipse.elk.core import RecursiveGraphLayoutEngine
 
 # ELK Option classes for layout configuration
-from org.eclipse.elk.core.options import CoreOptions, Direction, EdgeRouting, PortAlignment, PortConstraints
+from org.eclipse.elk.core.options import CoreOptions, Direction, EdgeRouting, PortAlignment, PortConstraints, PortSide
 from org.eclipse.elk.core.util import BasicProgressMonitor
 from org.eclipse.elk.graph import ElkEdge, ElkNode, ElkPort
 
 # ELK IO Utility
 from org.eclipse.elk.graph.json import ElkGraphJson
+from org.eclipse.elk.graph.properties import IProperty, Property
 from org.eclipse.elk.graph.text import ElkGraphStandaloneSetup, ElkGraphTextUtil
 
 # ELK Model classes for programmatic graph construction
 from org.eclipse.elk.graph.util import ElkGraphUtil
 from org.eclipse.xtext.serializer import ISerializer
+
+# Map LTSpice orientations to Shapely transform directives
+ORIENTATIONS = {
+    "R0": {"rotate": 0, "mirror_x": False, "mirror_y": False},
+    "R90": {"rotate": 90, "mirror_x": False, "mirror_y": False},
+    "R180": {"rotate": 180, "mirror_x": False, "mirror_y": False},
+    "R270": {"rotate": 270, "mirror_x": False, "mirror_y": False},
+    "M0": {"rotate": 0, "mirror_x": False, "mirror_y": True},
+    "M90": {"rotate": 90, "mirror_x": False, "mirror_y": True},
+    "M180": {"rotate": 180, "mirror_x": True, "mirror_y": False},
+    "M270": {"rotate": 270, "mirror_x": False, "mirror_y": True},
+}
 
 
 class ElkInterface:
@@ -49,6 +67,10 @@ class ElkInterface:
         self.size_min_macro = 6
         self.size_factor_per_pin = 1  #  ie size_min_macro + size_factor_per_pin * degree
 
+        self.symbol_outlines = SymbolLibrary().get_symbol_outlines()
+        self.keep_port_loc_property = Property("keep_port_loc ", False)
+        self.elk_utils = ElkUtils()
+
     def genid(self, obj, counter: int | None = None):
         h = hash(obj)
         if counter is not None:
@@ -57,6 +79,12 @@ class ElkInterface:
 
     def id2hash(self, id_str: str) -> int:
         match = re.match(r"id(\d+)(?:_\d+)?$", str(id_str))
+        if not match:
+            raise ValueError(f"Invalid ID format: {id_str}")
+        return match.group(1)
+
+    def id2name(self, id_str: str) -> str:
+        match = re.match(r"(\S+)(_idx\d+)$", str(id_str))
         if not match:
             raise ValueError(f"Invalid ID format: {id_str}")
         return match.group(1)
@@ -79,7 +107,7 @@ class ElkInterface:
         self.create_edges(module, graph, ports)
 
         self.layout_graph(graph, "pass1")
-        # self.update_graph_with_symbols(graph)
+        # self.update_graph_with_symbols(module, graph)
         # self.layout_graph(graph, "pass2")
         self.extract_geometry(graph, module)
 
@@ -96,17 +124,17 @@ class ElkInterface:
         port_size = 0
         for inst in module.instances.values():
             node = ElkGraphUtil.createNode(graph)
-            node.setIdentifier(self.genid(inst))
+            node.setIdentifier(inst.name)
             size = self.scale_macro_size(inst)
-            node.setWidth(size)
-            node.setHeight(size)
+            node.setWidth(6)
+            node.setHeight(18)
             nodes[inst.name] = node
             for pin in inst.pins.values():
                 port = ElkGraphUtil.createPort(node)
-                port.setIdentifier(self.genid(pin))
+                port.setIdentifier(pin.full_name)
                 port.setWidth(port_size)
                 port.setHeight(port_size)
-                ports[self.genid(pin)] = port
+                ports[pin.full_name] = port
         return nodes, ports
 
     def create_edges(self, module, graph, ports):
@@ -119,30 +147,42 @@ class ElkInterface:
                 # sort by fanout of driver
                 sorted_pins = sorted(pins, key=lambda pin: len(pin.instance.pins.values()), reverse=True)
                 src = sorted_pins[0]
-                src_hash = self.genid(src)
-                src_port = ports[src_hash]
+                src_port = ports[src.full_name]
                 for dst in pins[1:]:
-                    dst_hash = self.genid(dst)
-                    dst_port = ports[dst_hash]
-                    net_id = self.genid(net, net_index)
+                    dst_port = ports[dst.full_name]
+
+                    net_id = f"{net.name}_idx{net_index}"
                     net_index += 1
                     edge = ElkGraphUtil.createEdge(graph)
                     edge.setProperty(CoreOptions.EDGE_THICKNESS, 0.0)
-                    edge.setProperty(CoreOptions.DIRECTION, "UNDEFINED")
                     edge.setProperty(CoreOptions.DIRECTION, Direction.UNDEFINED)
                     edge.setIdentifier(net_id)
                     edge.getSources().add(src_port)
                     edge.getTargets().add(dst_port)
 
+                    """
+                    net_id = f"{net.name}_idx{net_index}"
+                    net_index += 1
+                    edge = ElkGraphUtil.createEdge(graph)
+                    edge.setProperty(CoreOptions.EDGE_THICKNESS, 0.0)
+                    edge.setProperty(CoreOptions.DIRECTION, Direction.UNDEFINED)
+                    edge.setIdentifier(net_id)
+                    edge.getSources().add(dst_port)
+                    edge.getTargets().add(src_port)
+                    """
+
     def layout_graph(self, graph, step: str = ""):
         graph.setProperty(CoreOptions.ALGORITHM, "layered")
         graph.setProperty(LayeredOptions.EDGE_ROUTING, EdgeRouting.ORTHOGONAL)
-        self.write_json(graph, f"pre_{step}")
+        graph.setProperty(CoreOptions.PORT_CONSTRAINTS, PortConstraints.FREE)
+        graph.setProperty(LayeredOptions.PORT_CONSTRAINTS, PortConstraints.FREE)
+        # Force ELK to ignore old coordinates
+        self.write_graph_to_file(graph, f"pre_{step}")
 
         layout_engine = RecursiveGraphLayoutEngine()
         monitor = BasicProgressMonitor()
         layout_engine.layout(graph, monitor)
-        self.write_json(graph, f"post_{step}")
+        self.write_graph_to_file(graph, f"post_{step}")
 
     def extract_geometry(self, graph, module):
         def walk_graph_and_extract_data(node, module):
@@ -151,7 +191,7 @@ class ElkInterface:
                 module.draw.fig = (node.getWidth(), node.getHeight())
             else:
                 node_id = node.getIdentifier()
-                instance = module.hash2instance[self.id2hash(node_id)]
+                instance = module.instances[node_id]
                 instance.draw.fig = (
                     node.getX(),
                     node.getY(),
@@ -160,7 +200,7 @@ class ElkInterface:
                 )
                 for port in node.getPorts():
                     port_id = port.getIdentifier()
-                    pin = module.hash2pin[self.id2hash(port_id)]
+                    pin = module.pins[port_id]
                     pin.draw.fig = (
                         port.getX(),
                         port.getY(),
@@ -172,9 +212,7 @@ class ElkInterface:
                 # src_pinname = edge.getSources().get(JInt(0)).getIdentifier()
                 # dst_pinname = edge.getTargets().get(JInt(0)).getIdentifier()
                 net_id = edge.getIdentifier()
-                if self.id2hash(net_id) not in module.hash2net:
-                    breakpoint()
-                net = module.hash2net[self.id2hash(net_id)]
+                net = module.nets[self.id2name(net_id)]
                 if not edge.isConnected():
                     log.warning(f"Net {net.name} is not connected")
                 for section in edge.getSections():
@@ -196,9 +234,9 @@ class ElkInterface:
 
         walk_graph_and_extract_data(graph, module)
 
-    def write_json(self, graph, prefix: str) -> None:
+    def write_graph_to_file(self, graph, prefix: str) -> None:
         """
-        Write ELK graph to files in both JSON and ELKT formats.
+        Write ELK graph to files in JSON ELKT DOT formats.
         """
         output_dir = Path("data")
         prefix = f"{prefix}_{graph.getIdentifier()}"
@@ -212,7 +250,7 @@ class ElkInterface:
             # Configure options:
             export_builder.prettyPrint(True)  #
             export_builder.omitLayout(False)  # →  removes "layoutOptions": {...}
-            export_builder.omitZeroPositions(True)  # → omit nodes with (0,0)
+            export_builder.omitZeroPositions(False)  # → omit nodes with (0,0)
             export_builder.omitZeroDimension(True)  # → omit width=0 or height=0
             export_builder.shortLayoutOptionKeys(True)  # → use short keys
             export_builder.omitUnknownLayoutOptions(True)  # → hide unknown options
@@ -231,6 +269,16 @@ class ElkInterface:
         elkt_path = output_dir / "elkt" / f"{prefix}.elkt"
         elkt_path.parent.mkdir(parents=True, exist_ok=True)
         self.write_elkt(graph, elkt_path)
+
+        # --- DOT ---
+        injector = GraphvizDotStandaloneSetup().createInjectorAndDoEMFRegistration()
+        serializer = injector.getInstance(ISerializer)
+        breakpoint()
+        dot_str = serializer.serialize(graph)
+        dot_path = output_dir / "dot" / f"{prefix}.dot"
+        with open(dot_path, "w", encoding="utf-8") as f:
+            f.write(dot_str)
+        log.info(f"Wrote ELK graph DOT to: {dot_path}")
 
     def write_elkt(self, graph, elkt_path: Path) -> None:
         """Write ELK graph in ELKT format manually."""
@@ -363,112 +411,150 @@ class ElkInterface:
 
         # Add edges
         lines.extend(serialize_edges(graph, 1))
+        s = "\n".join(lines)
+        s = re.sub(r"[/⊕]", "_", s)
+        s = re.sub(r"_+", "_", s)
 
         # Write to file
         with open(elkt_path, "w", encoding="utf-8") as f:
-            f.write("\n".join(lines))
+            f.write(s)
 
         log.info(f"Wrote ELK graph ELKT to: {elkt_path}")
 
-    def update_graph_with_symbols(self, graph):
-        pass
+    def update_graph_with_symbols(self, module, graph):
+        for node in graph.getChildren():
+            node_id = node.getIdentifier()
+            ref_module = module.instances[node_id].module
+            if ref_module.name in self.symbol_outlines:
+                node.eUnset(node.eClass().getEStructuralFeature("x"))
+                node.eUnset(node.eClass().getEStructuralFeature("y"))
+                self.update_node_with_symbol(node, module, self.symbol_outlines[ref_module.name])
+                node.setProperty(CoreOptions.PORT_CONSTRAINTS, PortConstraints.FIXED_POS)
 
-    def calculate_best_orientation(self, old_pins, macro_pins_local, centroid):
-        orientations = {"R0": 0, "R90": 90, "R180": 180, "R270": 270}
-        min_dist = float("inf")
-        best_orient = None
-        best_pin_map = None
-        best_rotated_pins_local = None
+        for edge in graph.getContainedEdges():
+            edge.getSections().clear()
+            edge.getProperties().clear()
 
-        for orient_name, angle in orientations.items():
-            rotated_new_pins_local = [rotate(p, angle, origin="center") for p in macro_pins_local]
-            new_pins_global_centered = [Point(centroid.x + p.x, centroid.y + p.y) for p in rotated_new_pins_local]
+        for node in graph.getChildren():
+            for port in node.getPorts():
+                continue
+                if not port.getProperty(self.keep_port_loc_property):
+                    # Unset X and Y
+                    port.setProperty(CoreOptions.DIRECTION, None)
+                    port.setProperty(CoreOptions.POSITION, None)
+                    port.eUnset(port.eClass().getEStructuralFeature("x"))
+                    port.eUnset(port.eClass().getEStructuralFeature("y"))
 
-            dist1 = old_pins[0].distance(new_pins_global_centered[0]) + old_pins[1].distance(new_pins_global_centered[1])
-            dist2 = old_pins[0].distance(new_pins_global_centered[1]) + old_pins[1].distance(new_pins_global_centered[0])
+    def update_node_with_symbol(self, node, module, symbol):
+        old_pins_loc = {}
+        (hw, hh) = (node.getWidth() / 2, node.getHeight() / 2)
+        for port in node.getPorts():
+            port_id = port.getIdentifier()
+            pinname = module.pins[port_id].name
+            old_pins_loc[pinname] = Point(port.getX() - hw, port.getY() - hh)
 
-            current_dist, current_pin_map = (dist1, {0: 0, 1: 1}) if dist1 < dist2 else (dist2, {0: 1, 1: 0})
+        r0_pins_loc = {}
+        for name, port in symbol.ports.items():
+            r0_pins_loc[name] = port.fig
 
-            if current_dist < min_dist:
-                min_dist = current_dist
-                best_orient = orient_name
-                best_pin_map = current_pin_map
-                best_rotated_pins_local = rotated_new_pins_local
+        old_pins_loc = self.center_pins(old_pins_loc)
 
-        return best_orient, best_pin_map, best_rotated_pins_local
+        new_pins_loc, new_orientation = self.get_best_orientation(old_pins_loc, r0_pins_loc)
+        (h, w) = self.update_symbol_size_for_orientation(symbol, new_orientation)
+        node.setWidth(w)
+        node.setHeight(h)
+        (hw, hh) = (node.getWidth() / 2, node.getHeight() / 2)
+        for port in node.getPorts():
+            port_id = port.getIdentifier()
+            pinname = module.pins[port_id].name
+            loc = new_pins_loc[pinname]
+            port.setX(hw + loc.x)
+            port.setY(hh + loc.y)
+            side = self.get_port_side(hw, hh, loc)
+            port.setProperty(CoreOptions.PORT_SIDE, side)
+            # port.setProperty(self.keep_port_loc_property, True)
 
-    def adjust_location(self, inst):
+    def get_port_side(self, hw, hh, loc):
+        """Determine port side based on position relative to center."""
+        # Determine port side
+        rel_x = loc.x
+        rel_y = loc.y
+        if abs(rel_y - hh) < abs(rel_x - hw):
+            # More horizontal displacement → EAST/WEST
+            side = PortSide.EAST if rel_x > 0 else PortSide.WEST
+        else:
+            # More vertical displacement → NORTH/SOUTH
+            side = PortSide.SOUTH if rel_y > 0 else PortSide.NORTH
+        return side
+
+    def center_pins(self, pins_loc: dict) -> dict:
         """
-        Place and orient a new macro shape to minimize distance to existing pins.
+        Recenters pins so their geometric midpoint is at (0, 0).
+
+        Args:
+            pins_loc (dict[str, Point]): Original pin locations.
+
+        Returns:
+            dict[str, Point]: New pin locations centered around the midpoint.
         """
-        log.info(f"Optimizing instance {inst.name}")
-        log.info(f"  Initial geom: {inst.geom}, orient: {inst.orient}")
-        for name, pin in inst.pins.items():
-            log.info(f"  Pin {name}: {pin.geom}")
+        # Compute the centroid (midpoint) between all pin coordinates
+        xs = [p.x for p in pins_loc.values()]
+        ys = [p.y for p in pins_loc.values()]
+        cx = sum(xs) / len(xs)
+        cy = sum(ys) / len(ys)
 
-        old_geom = inst.geom
-        old_pins = [p.geom for p in inst.pins.values()]
-        pin_names = list(inst.pins.keys())
-        centroid = old_geom.centroid
+        # Shift all pins so that (cx, cy) moves to (0, 0)
+        centered = {name: Point(p.x - cx, p.y - cy) for name, p in pins_loc.items()}
 
-        macro_box = box(-1, -3, 1, 3)
-        macro_pins_local = [Point(0, 3), Point(0, -3)]
+        return centered
 
-        best_orient, best_pin_map, best_rotated_pins_local = self._calculate_best_orientation(old_pins, macro_pins_local, centroid)
+    def update_symbol_size_for_orientation(self, symbol, orientation: str):
+        """Return new (width, height) for a given orientation."""
+        w, h = symbol.width, symbol.height
+        orientation = orientation.upper()
 
-        p1_geom, p2_geom = old_pins[0], old_pins[1]
-        np_local1 = best_rotated_pins_local[best_pin_map[0]]
-        np_local2 = best_rotated_pins_local[best_pin_map[1]]
+        if orientation in ("R90", "R270", "M90", "M270"):
+            return w, h  # swapped
+        else:
+            return h, w  # unchanged
 
-        npgc1 = Point(centroid.x + np_local1.x, centroid.y + np_local1.y)
-        npgc2 = Point(centroid.x + np_local2.x, centroid.y + np_local2.y)
+    def transform_point(self, pt: Point, orientation: str) -> Point:
+        """Apply orientation transform to a point (mirror + rotate)."""
+        settings = ORIENTATIONS[orientation]
+        g = pt
+        if settings["mirror_x"]:
+            g = scale(g, xfact=-1, yfact=1, origin=(0, 0))
+        if settings["mirror_y"]:
+            g = scale(g, xfact=1, yfact=-1, origin=(0, 0))
+        if settings["rotate"] != 0:
+            g = rotate(g, settings["rotate"], origin=(0, 0))
+        return g
 
-        dx, dy = 0, 0
-        if best_orient in ["R0", "R180"]:
-            dy = (p1_geom.y + p2_geom.y - (npgc1.y + npgc2.y)) / 2
-            dy = max(-1.5, min(1.5, dy))
-        else:  # R90, R270
-            dx = (p1_geom.x + p2_geom.x - (npgc1.x + npgc2.x)) / 2
-            dx = max(-1.5, min(1.5, dx))
+    def get_best_orientation(self, old_pins_loc: dict, r0_pins_loc: dict):
+        """
+        Rotate and mirror the reference pin set (r0_pins_loc)
+        to find the orientation minimizing total pin displacement.
+        """
+        best_orientation = None
+        best_distance = float("inf")
+        best_pins_loc = None
 
-        final_translation_x = round(centroid.x + dx)
-        final_translation_y = round(centroid.y + dy)
+        for orient in ORIENTATIONS.keys():
+            # Apply the transform to each r0 pin
+            new_pins = {name: self.transform_point(pt, orient) for name, pt in r0_pins_loc.items()}
 
-        orientations = {"R0": 0, "R90": 90, "R180": 180, "R270": 270}
-        angle = orientations[best_orient]
-        new_geom = translate(rotate(macro_box, angle, origin="center"), xoff=final_translation_x, yoff=final_translation_y)
-        inst.geom = new_geom
-        inst.orient = best_orient
-
-        new_pin_geoms = [
-            Point(
-                final_translation_x + best_rotated_pins_local[best_pin_map[0]].x,
-                final_translation_y + best_rotated_pins_local[best_pin_map[0]].y,
-            ),
-            Point(
-                final_translation_x + best_rotated_pins_local[best_pin_map[1]].x,
-                final_translation_y + best_rotated_pins_local[best_pin_map[1]].y,
-            ),
-        ]
-
-        for i, pin_name in enumerate(pin_names):
-            pin = inst.pins[pin_name]
-            old_pin_geom = old_pins[i]
-            new_pin_geom = new_pin_geoms[i]
-
-            if pin.net:
-                log.info(
-                    f"  Net {pin.net.name} updated: {pin.net.geom} with new_segment={LineString([old_pin_geom, new_pin_geom])}"
-                )
-                new_segment = LineString([old_pin_geom, new_pin_geom])
-                if pin.net.geom and hasattr(pin.net.geom, "geoms"):
-                    existing_lines = list(pin.net.geom.geoms)
+            # Compute total distance from old pin positions
+            total_dist = 0.0
+            for name, old_pt in old_pins_loc.items():
+                if name in new_pins:
+                    total_dist += old_pt.distance(new_pins[name])
                 else:
-                    existing_lines = []
-                pin.net.geom = MultiLineString(existing_lines + [new_segment])
+                    # if pin missing, penalize heavily
+                    total_dist += 1e6
+                log.info(f"{name=}, {old_pt=}, {new_pins[name]=}, {total_dist=}")
+            if total_dist < best_distance:
+                best_distance = total_dist
+                best_orientation = orient
+                best_pins_loc = new_pins
 
-            pin.geom = new_pin_geom
-
-        log.info(f"  Final geom: {inst.geom}, orient: {inst.orient}")
-        for name, pin in inst.pins.items():
-            log.info(f"  Pin {name}: {pin.geom}")
+        return best_pins_loc, best_orientation

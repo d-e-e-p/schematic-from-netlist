@@ -1,4 +1,22 @@
 import os
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Tuple
+
+from shapely.geometry import Point, Polygon
+
+
+@dataclass
+class Port:
+    name: str
+    fig: Point
+
+
+@dataclass
+class Symbol:
+    name: str
+    height: float
+    width: float
+    ports: Dict[str, Port] = field(default_factory=dict)
 
 
 class SymbolLibrary:
@@ -129,3 +147,27 @@ PINATTR SpiceOrder 2
         filepath = os.path.join(output_dir, f"{key}.asy")
         with open(filepath, "w") as f:
             f.write(self.get_symbol(key))
+
+    def get_symbol_outlines(self) -> Dict[str, Symbol]:
+        """
+        Create a dictionary of basic electrical symbols ("res", "cap", "ind")
+        centered at (0, 0).
+
+        Each symbol:
+          - has a rectangular Polygon from (-1, -3) to (1, 3)
+          - has two ports:
+              "1" at (0, -3)
+              "2" at (0, 3)
+        """
+        common_ports = {
+            "1": Port("1", Point(0.0, -3.0)),
+            "2": Port("2", Point(0.0, 3.0)),
+        }
+        height = 6.0
+        width = 2.0
+
+        symbols = {}
+        for name in ("res", "cap", "ind"):
+            symbols[name] = Symbol(name=name, height=height, width=width, ports=common_ports)
+
+        return symbols

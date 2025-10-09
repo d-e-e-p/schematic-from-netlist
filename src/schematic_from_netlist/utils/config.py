@@ -29,15 +29,11 @@ def setup_logging(verbose: bool = False, log_file: Optional[str] = None) -> None
 
     # Console handler with color
     console_handler = colorlog.StreamHandler()
-    console_handler.setFormatter(
-        colorlog.ColoredFormatter("%(log_color)s%(levelname)s:%(funcName)s:%(message)s")
-    )
+    console_handler.setFormatter(colorlog.ColoredFormatter("%(log_color)s%(levelname)s:%(funcName)s:%(message)s"))
 
     # File handler
     file_handler = log.FileHandler(log_file, mode="w")
-    file_handler.setFormatter(
-        log.Formatter("%(levelname)s - %(funcName)s - %(name)s - %(message)s")
-    )
+    file_handler.setFormatter(log.Formatter("%(levelname)s - %(funcName)s - %(name)s - %(message)s"))
 
     # Attach handlers
     root_logger.addHandler(console_handler)
@@ -58,6 +54,8 @@ def setup_elk(jvm_path: Optional[str] = None) -> None:
     Raises:
         FileNotFoundError: If required files are not found.
     """
+    if jpype.isJVMStarted():
+        return
 
     # Set default paths
     PACKAGE_ROOT = Path(__file__).parent.parent.parent.parent
@@ -78,7 +76,13 @@ def setup_elk(jvm_path: Optional[str] = None) -> None:
         raise FileNotFoundError(f"Required JLI library not found: {jvm_path}")
 
     # Start JVM
-    jpype.startJVM(jvm_path, "-ea", f"-Djava.class.path={jar_path}", "--enable-native-access=ALL-UNNAMED", convertStrings=False)
+    jpype.startJVM(
+        jvm_path,
+        "-ea",
+        "--enable-native-access=ALL-UNNAMED",
+        "--sun-misc-unsafe-memory-access=allow",
+        classpath=jar_path,
+    )
     if jpype.isJVMStarted():
         log.info(f"JVM started successfully: {jpype.getJVMVersion()}")
     else:
