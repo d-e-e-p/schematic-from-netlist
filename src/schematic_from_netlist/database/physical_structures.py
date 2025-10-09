@@ -7,7 +7,8 @@ if TYPE_CHECKING:
 
 from shapely.geometry import LineString, MultiLineString, Point, Polygon, box
 
-scaling_from_graph_to_sch = 0.24  # from graphviz to LTspice, about 72/0.24 = 300dpi
+# scaling_from_fig_to_shape = 0.24  # from graphviz to LTspice, about 72/0.24 = 300dpi
+scaling_from_fig_to_shape = 1.0  # from elk to LTspice,
 
 
 # --------------------------------------
@@ -22,7 +23,7 @@ class RectanglePhysical:
         if self.fig is None:
             self.shape = None
             return self.shape
-        s = scaling_from_graph_to_sch
+        s = scaling_from_fig_to_shape
         x1, y1, x2, y2 = self.fig
         self.shape = (int(round(x1 * s)), int(round(y1 * s)), int(round(x2 * s)), int(round(y2 * s)))
         return self.shape
@@ -53,7 +54,7 @@ class PointPhysical:
         if self.fig is None:
             self.shape = None
             return self.shape
-        s = scaling_from_graph_to_sch
+        s = scaling_from_fig_to_shape
         x, y = self.fig
         self.shape = (int(round(x * s)), int(round(y * s)))
         return self.shape
@@ -104,7 +105,7 @@ class NetPhysical:
 
         def scale_point(point: tuple[float, float]) -> tuple[int, int]:
             """Scale a single points (x,y)"""
-            s = scaling_from_graph_to_sch
+            s = scaling_from_fig_to_shape
             x, y = point
             return (int(round(x * s)), int(round(y * s)))
 

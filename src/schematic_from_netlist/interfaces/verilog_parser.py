@@ -1,5 +1,5 @@
 import copy
-import logging
+import logging as log
 import os
 import re
 import sys
@@ -14,8 +14,6 @@ from pyverilog.vparser.parser import parse
 from schematic_from_netlist.database.netlist_database import NetlistDatabase
 from schematic_from_netlist.database.netlist_structures import Bus, Instance, Module, Net, NetType, Pin, PinDirection, Port
 from schematic_from_netlist.interfaces.verilog_ast_modifier import VerilogModifier, portArgInfo
-
-log = logging.getLogger(__name__)
 
 
 class VerilogParser:

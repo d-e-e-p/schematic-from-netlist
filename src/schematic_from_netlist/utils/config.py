@@ -1,8 +1,50 @@
 import logging as log
+import os
 from pathlib import Path
 from typing import Optional
 
+import colorlog
 import jpype
+
+
+def setup_logging(verbose: bool = False, log_file: Optional[str] = None) -> None:
+    """
+    Set up logging with color output to console and plain output to file.
+    After calling this, other files can use `import logging as log` and do `log.info(...)`.
+
+    Args:
+        verbose: If True, sets log level to DEBUG, else INFO.
+        log_file: Optional path to log file. Defaults to 'logs/schematic-from-netlist.log'.
+    """
+    if log_file is None:
+        log_file = "logs/schematic-from-netlist.log"
+
+    # Make sure directory exists
+    os.makedirs(os.path.dirname(log_file), exist_ok=True)
+
+    # Clear existing handlers to prevent duplicates
+    root_logger = log.getLogger()
+    root_logger.handlers.clear()
+    root_logger.propagate = False
+
+    # Console handler with color
+    console_handler = colorlog.StreamHandler()
+    console_handler.setFormatter(
+        colorlog.ColoredFormatter("%(log_color)s%(levelname)s:%(funcName)s:%(message)s")
+    )
+
+    # File handler
+    file_handler = log.FileHandler(log_file, mode="w")
+    file_handler.setFormatter(
+        log.Formatter("%(levelname)s - %(funcName)s - %(name)s - %(message)s")
+    )
+
+    # Attach handlers
+    root_logger.addHandler(console_handler)
+    root_logger.addHandler(file_handler)
+
+    # Set level
+    root_logger.setLevel(log.DEBUG if verbose else log.INFO)
 
 
 def setup_elk(jvm_path: Optional[str] = None) -> None:

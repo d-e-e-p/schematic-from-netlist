@@ -11,6 +11,7 @@ from schematic_from_netlist.graph.layout_optimizer import LayoutOptimizer
 from schematic_from_netlist.interfaces.elk import ElkInterface
 from schematic_from_netlist.interfaces.ltspice_writer import LTSpiceWriter
 from schematic_from_netlist.interfaces.verilog_parser import VerilogParser
+from schematic_from_netlist.utils.config import setup_logging
 
 # ---------------- Pipeline Stages ---------------- #
 
@@ -84,24 +85,7 @@ def main():
     args = parse_args()
 
     # Set up logging
-    log_file = "logs/schematic-from-netlist.log"
-    os.makedirs(os.path.dirname(log_file), exist_ok=True)
-
-    handler = colorlog.StreamHandler()
-    handler.setFormatter(colorlog.ColoredFormatter("%(log_color)s%(levelname)s:%(funcName)s:%(message)s"))
-
-    file_handler = logging.FileHandler(log_file, mode="w")
-    file_handler.setFormatter(logging.Formatter("%(levelname)s - %(funcName)s - %(name)s - %(message)s"))
-
-    logger = colorlog.getLogger()
-    logger.addHandler(handler)
-    logger.addHandler(file_handler)
-    logger.setLevel(logging.INFO)
-
-    if args.verbose:
-        logger.setLevel(logging.DEBUG)
-
-    logging.info(f"Processing netlist file: {args.netlist_file}")
+    setup_logging(args.verbose)
 
     db = load_netlist(args.netlist_file, args.debug)
     produce_graph(db)

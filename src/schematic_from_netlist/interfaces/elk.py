@@ -12,7 +12,6 @@ from jpype import JClass, JDouble, JInt
 
 from schematic_from_netlist.utils.config import setup_elk
 
-log.basicConfig(level=log.DEBUG)
 setup_elk()
 
 # ruff: noqa: E402
@@ -30,7 +29,7 @@ from org.eclipse.elk.alg.layered.options import (
 from org.eclipse.elk.core import RecursiveGraphLayoutEngine
 
 # ELK Option classes for layout configuration
-from org.eclipse.elk.core.options import CoreOptions, EdgeRouting, PortAlignment, PortConstraints
+from org.eclipse.elk.core.options import CoreOptions, Direction, EdgeRouting, PortAlignment, PortConstraints
 from org.eclipse.elk.core.util import BasicProgressMonitor
 from org.eclipse.elk.graph import ElkEdge, ElkNode, ElkPort
 
@@ -47,8 +46,8 @@ class ElkInterface:
     def __init__(self, db):
         self.db = db
         self.output_dir = "data/json"
-        self.size_min_macro = 30
-        self.size_factor_per_pin = 2  #  ie 200-pin macro will be 200x200
+        self.size_min_macro = 6
+        self.size_factor_per_pin = 1  #  ie size_min_macro + size_factor_per_pin * degree
 
     def genid(self, obj, counter: int | None = None):
         h = hash(obj)
@@ -82,8 +81,7 @@ class ElkInterface:
         self.layout_graph(graph, "pass1")
         # self.update_graph_with_symbols(graph)
         # self.layout_graph(graph, "pass2")
-        # self.extract_geometry(graph, module)
-        exit()
+        self.extract_geometry(graph, module)
 
     def scale_macro_size(self, inst):
         degree = len(inst.pins.keys())
@@ -95,7 +93,7 @@ class ElkInterface:
     def create_nodes(self, module, graph):
         nodes = {}
         ports = {}
-        port_size = 1
+        port_size = 0
         for inst in module.instances.values():
             node = ElkGraphUtil.createNode(graph)
             node.setIdentifier(self.genid(inst))
@@ -129,6 +127,9 @@ class ElkInterface:
                     net_id = self.genid(net, net_index)
                     net_index += 1
                     edge = ElkGraphUtil.createEdge(graph)
+                    edge.setProperty(CoreOptions.EDGE_THICKNESS, 0.0)
+                    edge.setProperty(CoreOptions.DIRECTION, "UNDEFINED")
+                    edge.setProperty(CoreOptions.DIRECTION, Direction.UNDEFINED)
                     edge.setIdentifier(net_id)
                     edge.getSources().add(src_port)
                     edge.getTargets().add(dst_port)
@@ -136,12 +137,12 @@ class ElkInterface:
     def layout_graph(self, graph, step: str = ""):
         graph.setProperty(CoreOptions.ALGORITHM, "layered")
         graph.setProperty(LayeredOptions.EDGE_ROUTING, EdgeRouting.ORTHOGONAL)
-        self.write_graph_to_file(graph, f"pre_{step}")
+        self.write_json(graph, f"pre_{step}")
 
         layout_engine = RecursiveGraphLayoutEngine()
         monitor = BasicProgressMonitor()
         layout_engine.layout(graph, monitor)
-        self.write_graph_to_file(graph, f"post_{step}")
+        self.write_json(graph, f"post_{step}")
 
     def extract_geometry(self, graph, module):
         def walk_graph_and_extract_data(node, module):
@@ -195,7 +196,7 @@ class ElkInterface:
 
         walk_graph_and_extract_data(graph, module)
 
-    def write_graph_to_file(self, graph, prefix: str) -> None:
+    def write_json(self, graph, prefix: str) -> None:
         """
         Write ELK graph to files in both JSON and ELKT formats.
         """
@@ -206,11 +207,22 @@ class ElkInterface:
         json_path = output_dir / "json" / f"{prefix}.json"
         json_path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            json_str = ElkGraphJson.forGraph(graph).toJson()
-            json_data = json.loads(str(json_str))
+            export_builder = ElkGraphJson.forGraph(graph)
+
+            # Configure options:
+            export_builder.prettyPrint(True)  #
+            export_builder.omitLayout(False)  # →  removes "layoutOptions": {...}
+            export_builder.omitZeroPositions(True)  # → omit nodes with (0,0)
+            export_builder.omitZeroDimension(True)  # → omit width=0 or height=0
+            export_builder.shortLayoutOptionKeys(True)  # → use short keys
+            export_builder.omitUnknownLayoutOptions(True)  # → hide unknown options
+
+            # Finally generate JSON
+            json_str = str(export_builder.toJson())
+            json_str = re.sub(r'^.*"resolvedAlgorithm".*\n?', "", json_str, flags=re.MULTILINE)
 
             with open(json_path, "w", encoding="utf-8") as f:
-                json.dump(json_data, f, indent=2)
+                f.write(json_str)
             log.info(f"Wrote ELK graph JSON to: {json_path}")
         except Exception as e:
             log.exception(f"Failed to write JSON: {e}")
@@ -360,3 +372,103 @@ class ElkInterface:
 
     def update_graph_with_symbols(self, graph):
         pass
+
+    def calculate_best_orientation(self, old_pins, macro_pins_local, centroid):
+        orientations = {"R0": 0, "R90": 90, "R180": 180, "R270": 270}
+        min_dist = float("inf")
+        best_orient = None
+        best_pin_map = None
+        best_rotated_pins_local = None
+
+        for orient_name, angle in orientations.items():
+            rotated_new_pins_local = [rotate(p, angle, origin="center") for p in macro_pins_local]
+            new_pins_global_centered = [Point(centroid.x + p.x, centroid.y + p.y) for p in rotated_new_pins_local]
+
+            dist1 = old_pins[0].distance(new_pins_global_centered[0]) + old_pins[1].distance(new_pins_global_centered[1])
+            dist2 = old_pins[0].distance(new_pins_global_centered[1]) + old_pins[1].distance(new_pins_global_centered[0])
+
+            current_dist, current_pin_map = (dist1, {0: 0, 1: 1}) if dist1 < dist2 else (dist2, {0: 1, 1: 0})
+
+            if current_dist < min_dist:
+                min_dist = current_dist
+                best_orient = orient_name
+                best_pin_map = current_pin_map
+                best_rotated_pins_local = rotated_new_pins_local
+
+        return best_orient, best_pin_map, best_rotated_pins_local
+
+    def adjust_location(self, inst):
+        """
+        Place and orient a new macro shape to minimize distance to existing pins.
+        """
+        log.info(f"Optimizing instance {inst.name}")
+        log.info(f"  Initial geom: {inst.geom}, orient: {inst.orient}")
+        for name, pin in inst.pins.items():
+            log.info(f"  Pin {name}: {pin.geom}")
+
+        old_geom = inst.geom
+        old_pins = [p.geom for p in inst.pins.values()]
+        pin_names = list(inst.pins.keys())
+        centroid = old_geom.centroid
+
+        macro_box = box(-1, -3, 1, 3)
+        macro_pins_local = [Point(0, 3), Point(0, -3)]
+
+        best_orient, best_pin_map, best_rotated_pins_local = self._calculate_best_orientation(old_pins, macro_pins_local, centroid)
+
+        p1_geom, p2_geom = old_pins[0], old_pins[1]
+        np_local1 = best_rotated_pins_local[best_pin_map[0]]
+        np_local2 = best_rotated_pins_local[best_pin_map[1]]
+
+        npgc1 = Point(centroid.x + np_local1.x, centroid.y + np_local1.y)
+        npgc2 = Point(centroid.x + np_local2.x, centroid.y + np_local2.y)
+
+        dx, dy = 0, 0
+        if best_orient in ["R0", "R180"]:
+            dy = (p1_geom.y + p2_geom.y - (npgc1.y + npgc2.y)) / 2
+            dy = max(-1.5, min(1.5, dy))
+        else:  # R90, R270
+            dx = (p1_geom.x + p2_geom.x - (npgc1.x + npgc2.x)) / 2
+            dx = max(-1.5, min(1.5, dx))
+
+        final_translation_x = round(centroid.x + dx)
+        final_translation_y = round(centroid.y + dy)
+
+        orientations = {"R0": 0, "R90": 90, "R180": 180, "R270": 270}
+        angle = orientations[best_orient]
+        new_geom = translate(rotate(macro_box, angle, origin="center"), xoff=final_translation_x, yoff=final_translation_y)
+        inst.geom = new_geom
+        inst.orient = best_orient
+
+        new_pin_geoms = [
+            Point(
+                final_translation_x + best_rotated_pins_local[best_pin_map[0]].x,
+                final_translation_y + best_rotated_pins_local[best_pin_map[0]].y,
+            ),
+            Point(
+                final_translation_x + best_rotated_pins_local[best_pin_map[1]].x,
+                final_translation_y + best_rotated_pins_local[best_pin_map[1]].y,
+            ),
+        ]
+
+        for i, pin_name in enumerate(pin_names):
+            pin = inst.pins[pin_name]
+            old_pin_geom = old_pins[i]
+            new_pin_geom = new_pin_geoms[i]
+
+            if pin.net:
+                log.info(
+                    f"  Net {pin.net.name} updated: {pin.net.geom} with new_segment={LineString([old_pin_geom, new_pin_geom])}"
+                )
+                new_segment = LineString([old_pin_geom, new_pin_geom])
+                if pin.net.geom and hasattr(pin.net.geom, "geoms"):
+                    existing_lines = list(pin.net.geom.geoms)
+                else:
+                    existing_lines = []
+                pin.net.geom = MultiLineString(existing_lines + [new_segment])
+
+            pin.geom = new_pin_geom
+
+        log.info(f"  Final geom: {inst.geom}, orient: {inst.orient}")
+        for name, pin in inst.pins.items():
+            log.info(f"  Pin {name}: {pin.geom}")
