@@ -197,9 +197,6 @@ class ElkInterface:
         graph.setProperty(LayeredOptions.COMPACTION_CONNECTED_COMPONENTS, True)
         graph.setProperty(LayeredOptions.CONSIDER_MODEL_ORDER_CROSSING_COUNTER_NODE_INFLUENCE, 0.001)
         graph.setProperty(LayeredOptions.CROSSING_MINIMIZATION_GREEDY_SWITCH_ACTIVATION_THRESHOLD, Integer(0))  # always on
-        # graph.setProperty(
-        #    LayeredOptions.CROSSING_MINIMIZATION_STRATEGY, CrossingMinimizationStrategy.MEDIAN_LAYER_SWEEP
-        # )  # median is slower but better than default
         graph.setProperty(LayeredOptions.EDGE_ROUTING_SELF_LOOP_DISTRIBUTION, SelfLoopDistributionStrategy.EQUALLY)  # always on
         graph.setProperty(
             LayeredOptions.NODE_PLACEMENT_STRATEGY, NodePlacementStrategy.NETWORK_SIMPLEX
