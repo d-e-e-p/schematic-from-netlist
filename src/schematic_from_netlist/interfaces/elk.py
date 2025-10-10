@@ -1,3 +1,4 @@
+import csv
 import json
 import logging as log
 import math
@@ -11,23 +12,28 @@ import jpype
 import jpype.imports
 from jpype import JClass, JDouble, JInt
 from shapely.affinity import rotate, scale, translate
-from shapely.geometry import Point, Polygon, box
+from shapely.geometry import LineString, Point, Polygon, box
+from shapely.strtree import STRtree
+from tabulate import tabulate
 
 from schematic_from_netlist.interfaces.elk_utils import ElkUtils
 from schematic_from_netlist.interfaces.symbol_library import SymbolLibrary
 from schematic_from_netlist.utils.config import setup_elk
 
-setup_elk()
+setup_elk()  # Initialize ELK JVM
 
 # ruff: noqa: E402
 # pyright: reportMissingImports=false
-from com.google.gson import JsonObject, JsonParser
+
+from java.lang import Integer
 from org.eclipse.elk.alg.layered.options import (
     CrossingMinimizationStrategy,
     FixedAlignment,
     LayeredOptions,
     LayeringStrategy,
     NodePlacementStrategy,
+    SelfLoopDistributionStrategy,
+    WrappingStrategy,
 )
 
 # ELK Core Engine
@@ -64,8 +70,9 @@ class ElkInterface:
     def __init__(self, db):
         self.db = db
         self.output_dir = "data/json"
-        self.size_min_macro = 6
-        self.size_factor_per_pin = 1  #  ie size_min_macro + size_factor_per_pin * degree
+        self.size_node_base_w = 6
+        self.size_node_base_h = 18
+        self.size_factor_per_pin = 2  #  ie size_min_macro + size_factor_per_pin * degree
 
         self.symbol_outlines = SymbolLibrary().get_symbol_outlines()
         self.keep_port_loc_property = Property("keep_port_loc ", False)
@@ -98,7 +105,6 @@ class ElkInterface:
 
     def generate_module_layout(self, module):
         log.info(f"Generating layout for module {module.name}")
-        os.makedirs("data/png", exist_ok=True)
 
         graph = ElkGraphUtil.createGraph()
         graph.setIdentifier(module.name)
@@ -107,16 +113,27 @@ class ElkInterface:
         self.create_edges(module, graph, ports)
 
         self.layout_graph(graph, "pass1")
+        self.dump_elk_config_table(graph)
         # self.update_graph_with_symbols(module, graph)
         # self.layout_graph(graph, "pass2")
         self.extract_geometry(graph, module)
+        self.evaluate_layout(module)
 
-    def scale_macro_size(self, inst):
+    def get_node_size(self, inst):
+        self.size_node_base_w = 6
+        self.size_node_base_h = 18
+        self.size_factor_per_pin = 2  #  ie size_min_macro + size_factor_per_pin * degree
+        if inst.is_buffer:
+            return 1, 1
         degree = len(inst.pins.keys())
         if degree <= 3:
-            return self.size_min_macro
-        size_node = self.size_min_macro * self.size_factor_per_pin * degree
-        return round(size_node, 1)
+            return self.size_node_base_w, self.size_node_base_h
+        extra = self.size_factor_per_pin * degree
+        w = self.size_node_base_w + extra
+        h = self.size_node_base_h + extra
+        w = round(w, 1)
+        h = round(h, 1)
+        return w, h
 
     def create_nodes(self, module, graph):
         nodes = {}
@@ -125,9 +142,9 @@ class ElkInterface:
         for inst in module.instances.values():
             node = ElkGraphUtil.createNode(graph)
             node.setIdentifier(inst.name)
-            size = self.scale_macro_size(inst)
-            node.setWidth(6)
-            node.setHeight(18)
+            width, height = self.get_node_size(inst)
+            node.setWidth(width)
+            node.setHeight(height)
             nodes[inst.name] = node
             for pin in inst.pins.values():
                 port = ElkGraphUtil.createPort(node)
@@ -173,9 +190,24 @@ class ElkInterface:
 
     def layout_graph(self, graph, step: str = ""):
         graph.setProperty(CoreOptions.ALGORITHM, "layered")
+        graph.setProperty(CoreOptions.ASPECT_RATIO, 2.0)
         graph.setProperty(LayeredOptions.EDGE_ROUTING, EdgeRouting.ORTHOGONAL)
-        graph.setProperty(CoreOptions.PORT_CONSTRAINTS, PortConstraints.FREE)
         graph.setProperty(LayeredOptions.PORT_CONSTRAINTS, PortConstraints.FREE)
+        graph.setProperty(LayeredOptions.ALLOW_NON_FLOW_PORTS_TO_SWITCH_SIDES, True)
+        graph.setProperty(LayeredOptions.COMPACTION_CONNECTED_COMPONENTS, True)
+        graph.setProperty(LayeredOptions.CONSIDER_MODEL_ORDER_CROSSING_COUNTER_NODE_INFLUENCE, 0.001)
+        graph.setProperty(LayeredOptions.CROSSING_MINIMIZATION_GREEDY_SWITCH_ACTIVATION_THRESHOLD, Integer(0))  # always on
+        # graph.setProperty(
+        #    LayeredOptions.CROSSING_MINIMIZATION_STRATEGY, CrossingMinimizationStrategy.MEDIAN_LAYER_SWEEP
+        # )  # median is slower but better than default
+        graph.setProperty(LayeredOptions.EDGE_ROUTING_SELF_LOOP_DISTRIBUTION, SelfLoopDistributionStrategy.EQUALLY)  # always on
+        graph.setProperty(
+            LayeredOptions.NODE_PLACEMENT_STRATEGY, NodePlacementStrategy.NETWORK_SIMPLEX
+        )  # better than default BRANDES_KOEPF
+        graph.setProperty(LayeredOptions.SEPARATE_CONNECTED_COMPONENTS, False)  #
+        graph.setProperty(LayeredOptions.THOROUGHNESS, Integer(1000))  #  num of minimizeCrossingsWithCounter loops
+        graph.setProperty(LayeredOptions.WRAPPING_STRATEGY, WrappingStrategy.MULTI_EDGE)  #  bypoass chunks
+
         # Force ELK to ignore old coordinates
         self.write_graph_to_file(graph, f"pre_{step}")
 
@@ -244,182 +276,15 @@ class ElkInterface:
         # --- JSON ---
         json_path = output_dir / "json" / f"{prefix}.json"
         json_path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            export_builder = ElkGraphJson.forGraph(graph)
+        self.elk_utils.write_json_file(graph, json_path)
 
-            # Configure options:
-            export_builder.prettyPrint(True)  #
-            export_builder.omitLayout(False)  # →  removes "layoutOptions": {...}
-            export_builder.omitZeroPositions(False)  # → omit nodes with (0,0)
-            export_builder.omitZeroDimension(True)  # → omit width=0 or height=0
-            export_builder.shortLayoutOptionKeys(True)  # → use short keys
-            export_builder.omitUnknownLayoutOptions(True)  # → hide unknown options
-
-            # Finally generate JSON
-            json_str = str(export_builder.toJson())
-            json_str = re.sub(r'^.*"resolvedAlgorithm".*\n?', "", json_str, flags=re.MULTILINE)
-
-            with open(json_path, "w", encoding="utf-8") as f:
-                f.write(json_str)
-            log.info(f"Wrote ELK graph JSON to: {json_path}")
-        except Exception as e:
-            log.exception(f"Failed to write JSON: {e}")
-
-        # --- ELKT ---
         elkt_path = output_dir / "elkt" / f"{prefix}.elkt"
         elkt_path.parent.mkdir(parents=True, exist_ok=True)
-        self.write_elkt(graph, elkt_path)
+        self.elk_utils.write_elkt_file(graph, elkt_path)
 
-        # --- DOT ---
-        injector = GraphvizDotStandaloneSetup().createInjectorAndDoEMFRegistration()
-        serializer = injector.getInstance(ISerializer)
-        breakpoint()
-        dot_str = serializer.serialize(graph)
         dot_path = output_dir / "dot" / f"{prefix}.dot"
-        with open(dot_path, "w", encoding="utf-8") as f:
-            f.write(dot_str)
-        log.info(f"Wrote ELK graph DOT to: {dot_path}")
-
-    def write_elkt(self, graph, elkt_path: Path) -> None:
-        """Write ELK graph in ELKT format manually."""
-
-        def serialize_node(node, indent=0):
-            lines = []
-            prefix = "  " * indent
-            identifier = node.getIdentifier() or "unnamed"
-
-            lines.append(f"{prefix}node {identifier} {{")
-
-            # Add layout block with size and position on separate lines
-            lines.append(f"{prefix}\tlayout [")
-            if node.getWidth() > 0 or node.getHeight() > 0:
-                lines.append(f"{prefix}\t\tposition: {node.getX()}, {node.getY()}")
-                lines.append(f"{prefix}\t\tsize: {node.getWidth()}, {node.getHeight()}")
-            lines.append(f"{prefix}\t]")
-            lines.append(f'{prefix}\tnodeSize.constraints: "[]"')
-            lines.append(f"{prefix}\tcrossingMinimization.positionId: -1")
-            lines.append(f"{prefix}\tlayering.layerId: -1")
-
-            # Ports
-            for port in node.getPorts():
-                port_id = port.getIdentifier() or "unnamed_port"
-                lines.append(f"{prefix}\tport {port_id} {{")
-                lines.append(f"{prefix}\t\tlayout [")
-                lines.append(f"{prefix}\t\t\tposition: {port.getX()}, {port.getY()}")
-                lines.append(f"{prefix}\t\t\tsize: {port.getWidth()}, {port.getHeight()}")
-                lines.append(f"{prefix}\t\t]")
-                port_side = port.getProperty(CoreOptions.PORT_SIDE)
-                if port_side:
-                    lines.append(f"{prefix}\t\torg.eclipse.elk.^port.side: {port_side}")
-                lines.append(f"{prefix}\t}}")
-
-            # Labels
-            for label in node.getLabels():
-                label_text = label.getText() or ""
-                lines.append(f'{prefix}\tlabel "{label_text}"')
-
-            # Child nodes
-            for child in node.getChildren():
-                lines.extend(serialize_node(child, indent + 1))
-
-            lines.append(f"{prefix}}}")
-            return lines
-
-        def serialize_edges(node, indent=0):
-            lines = []
-            prefix = "  " * indent
-
-            for edge in node.getContainedEdges():
-                # Get source
-                sources = list(edge.getSources())
-                targets = list(edge.getTargets())
-
-                if sources and targets:
-                    src = sources[0]
-                    tgt = targets[0]
-
-                    # Get the parent node IDs
-                    src_node = src.getParent()
-                    tgt_node = tgt.getParent()
-
-                    # Build identifiers in the format node_id.port_id
-                    src_node_id = src_node.getIdentifier() if hasattr(src_node, "getIdentifier") else str(src_node)
-                    src_port_id = src.getIdentifier() if hasattr(src, "getIdentifier") else str(src)
-                    tgt_node_id = tgt_node.getIdentifier() if hasattr(tgt_node, "getIdentifier") else str(tgt_node)
-                    tgt_port_id = tgt.getIdentifier() if hasattr(tgt, "getIdentifier") else str(tgt)
-
-                    # Build full source and target identifiers
-                    src_full_id = f"{src_node_id}.{src_port_id}"
-                    tgt_full_id = f"{tgt_node_id}.{tgt_port_id}"
-
-                    edge_id = edge.getIdentifier() or f"{src_node_id}_{src_port_id}_{tgt_node_id}_{tgt_port_id}"
-
-                    # Use the edge identifier format from the expected file
-                    lines.append(f"{prefix}edge {edge_id}: {src_full_id} -> {tgt_full_id} {{")
-
-                    # Add edge sections - all in one layout clause
-                    lines.append(f"{prefix}\tlayout [")
-                    for i, section in enumerate(edge.getSections()):
-                        lines.append(f"{prefix}\t\tsection s{i} [")
-                        lines.append(f"{prefix}\t\t\tincoming: {src_full_id}")
-                        lines.append(f"{prefix}\t\t\toutgoing: {tgt_full_id}")
-                        lines.append(f"{prefix}\t\t\tstart: {section.getStartX()}, {section.getStartY()}")
-                        lines.append(f"{prefix}\t\t\tend: {section.getEndX()}, {section.getEndY()}")
-
-                        # Add bend points if any
-                        bend_points = section.getBendPoints()
-                        if bend_points:
-                            bends = " | ".join(f"{bp.getX()}, {bp.getY()}" for bp in bend_points)
-                            lines.append(f"{prefix}\t\t\tbends: {bends}")
-
-                        lines.append(f"{prefix}\t\t]")
-                    lines.append(f"{prefix}\t]")
-                    # Add junctionPoints
-                    bend_points = []
-                    for section in edge.getSections():
-                        bend_points.extend(section.getBendPoints())
-                    if bend_points:
-                        junction_points = "(" + " ; ".join(f"{bp.getX()},{bp.getY()}" for bp in bend_points) + ")"
-                        lines.append(f'{prefix}\tjunctionPoints: "{junction_points}"')
-                    else:
-                        lines.append(f'{prefix}\tjunctionPoints: "()"')
-                    lines.append(f"{prefix}}}")
-
-            # Process edges in child nodes
-            for child in node.getChildren():
-                lines.extend(serialize_edges(child, indent))
-
-            return lines
-
-        # Build ELKT content
-        lines = []
-        graph_id = graph.getIdentifier() or "root"
-        lines.append(f"graph {graph_id}")
-        # Add graph-level layout properties
-        lines.append("layout [ size: 116, 104 ]")
-        lines.append('portLabels.placement: "[OUTSIDE]"')
-        lines.append('nodeLabels.placement: "[]"')
-        lines.append("algorithm: layered")
-        lines.append('nodeSize.constraints: "[]"')
-        lines.append("edgeRouting: ORTHOGONAL")
-        lines.append('nodeSize.options: "[DEFAULT_MINIMUM_SIZE]"')
-        lines.append("hierarchyHandling: SEPARATE_CHILDREN")
-
-        # Add child nodes
-        for child in graph.getChildren():
-            lines.extend(serialize_node(child, 1))
-
-        # Add edges
-        lines.extend(serialize_edges(graph, 1))
-        s = "\n".join(lines)
-        s = re.sub(r"[/⊕]", "_", s)
-        s = re.sub(r"_+", "_", s)
-
-        # Write to file
-        with open(elkt_path, "w", encoding="utf-8") as f:
-            f.write(s)
-
-        log.info(f"Wrote ELK graph ELKT to: {elkt_path}")
+        dot_path.parent.mkdir(parents=True, exist_ok=True)
+        self.elk_utils.write_dot_file(graph, dot_path)
 
     def update_graph_with_symbols(self, module, graph):
         for node in graph.getChildren():
@@ -558,3 +423,211 @@ class ElkInterface:
                 best_pins_loc = new_pins
 
         return best_pins_loc, best_orientation
+
+    def evaluate_layout(self, module):
+        """
+        Evaluate the geometric quality of an ELK-generated layout.
+
+        Each net must have `net.draw.fig` as a list of (start, end) tuples: [((x1, y1), (x2, y2)), ...]
+
+        Returns a dictionary with:
+            - total_length
+            - mean_length
+            - num_segments
+            - num_crossings
+        """
+        segments = []
+        nets = []
+        disconnected_nets = 0
+
+        # Convert each net's drawn segments to shapely LineStrings
+        for net_name, net in module.nets.items():
+            if not hasattr(net, "draw") or not getattr(net.draw, "fig", None):
+                disconnected_nets += 1
+                continue
+
+            for start, end in net.draw.fig:
+                # Ignore degenerate zero-length segments
+                if start == end:
+                    continue
+                try:
+                    line = LineString([start, end])
+                    segments.append(line)
+                    nets.append(net_name)
+                except Exception as e:
+                    log.warning(f"Invalid line for net {net_name}: {start}->{end}, {e}")
+
+        if not segments:
+            return {
+                "total_length": 0.0,
+                "mean_length": 0.0,
+                "num_segments": 0,
+                "num_crossings": 0,
+                "disconnected_nets": disconnected_nets,
+            }
+
+        # --- Total wire length ---
+        total_length = sum(seg.length for seg in segments)
+        mean_length = total_length / len(segments)
+
+        # --- Build spatial index for fast crossing detection ---
+        tree = STRtree(segments)
+        crossings = 0
+
+        for i, seg in enumerate(segments):
+            for j in tree.query(seg):
+                if j <= i:
+                    continue
+                other = segments[j]
+                if seg.crosses(other):
+                    crossings += 1
+
+        # Each crossing counted twice (A→B, B→A)
+        num_crossings = crossings // 2
+
+        result = {
+            "total_length": total_length,
+            "mean_length": mean_length,
+            "num_segments": len(segments),
+            "num_crossings": num_crossings,
+            "disconnected_nets": disconnected_nets,
+        }
+
+        log.info(
+            f"Layout eval: {result['num_segments']} segments, "
+            f"{result['num_crossings']} crossings, "
+            f"total length={result['total_length']:.2f}"
+        )
+
+        return result
+
+    def dump_layered_options(self, graph):
+        log.info(f"{'Option':50} {'Current':25} {'Default':25} {'Changed':8}")
+        log.info("=" * 110)
+
+        for name in dir(LayeredOptions):
+            # Skip private names and non-properties
+            if name.startswith("_"):
+                continue
+
+            try:
+                prop = getattr(LayeredOptions, name)
+            except Exception:
+                continue
+
+            # Check if it's an actual IProperty<?> instance
+            if not isinstance(prop, IProperty):
+                continue
+
+            if not name.isupper():
+                continue
+
+            # Retrieve current and default values
+            try:
+                current_val = graph.getProperty(prop)
+                default_val = prop.getDefault()
+                changed = current_val is not None and current_val != default_val
+                log.info(
+                    f"{name:50} {str(current_val or '(unset)'):25} {str(default_val or '(none)'):25} {'YES' if changed else 'NO':8}"
+                )
+            except Exception:
+                continue
+
+    def dump_elk_config_table(self, obj, filename: str = "data/csv/elk_settings.csv"):
+        """
+        Dump ELK layout option values (current + default) for a given ELK Options class
+        into a CSV file, merging with metadata from elk_options.json.
+        """
+        # Locate JSON metadata file
+        PACKAGE_ROOT = Path(__file__).parent.parent.parent.parent
+        json_file = PACKAGE_ROOT / "resources" / "elk_options.json"
+
+        if not json_file.exists():
+            raise FileNotFoundError(f"Missing {json_file}")
+
+        options = json.loads(json_file.read_text())
+
+        # Build lookup for quick metadata access
+        json_lookup = {opt["option"]: opt for opt in options}
+
+        # CSV output path
+        csv_path = Path(filename)
+        csv_path.parent.mkdir(parents=True, exist_ok=True)
+
+        fieldnames = [
+            "Type",
+            "Option",
+            "Object",
+            "Current",
+            "Default",
+            "Options",
+            "Group",
+            "Targets",
+            "Description",
+        ]
+
+        with csv_path.open("w", newline="", encoding="utf-8") as csvfile:
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+            writer.writeheader()
+
+            # Iterate through all uppercase properties of the given ELK Options class
+            for option in (LayeredOptions, CoreOptions):
+                match = re.search(r"\.(\w+)\'>$", str(option))
+                if match:
+                    option_name = match.group(1)
+                else:
+                    option_name = str(option)
+
+                for name in dir(option):
+                    if not name.isupper():
+                        continue
+
+                    try:
+                        prop = getattr(option, name)
+                    except Exception:
+                        continue
+
+                    if not isinstance(prop, IProperty):
+                        continue
+
+                    try:
+                        current_val = obj.getProperty(prop).toString()
+                        default_val = prop.getDefault().toString()
+                    except Exception:
+                        current_val = None
+                        default_val = None
+
+                    try:
+                        val_options = [val.toString() for val in obj.getProperty(prop).values()]
+                    except Exception:
+                        val_options = None
+
+                    # Metadata enrichment
+                    meta = json_lookup.get(name, {})
+                    obj_name = obj.toString()
+                    group = meta.get("group", "")
+                    targets = meta.get("targets", "")
+                    desc = meta.get("description", "")
+
+                    # Short form ID (tail of getId().toString())
+                    try:
+                        opt_id = prop.getId().toString().split(".")[-1]
+                    except Exception:
+                        opt_id = name
+
+                    # Write CSV row
+                    writer.writerow(
+                        {
+                            "Type": option_name,
+                            "Option": opt_id,
+                            "Object": obj_name,
+                            "Current": str(current_val or ""),
+                            "Default": str(default_val or ""),
+                            "Options": str(val_options or ""),
+                            "Group": group,
+                            "Targets": targets,
+                            "Description": desc,
+                        }
+                    )
+
+        log.info(f"Dumped ELK option data for {obj} → {csv_path}")

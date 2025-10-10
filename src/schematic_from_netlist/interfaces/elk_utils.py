@@ -1,9 +1,10 @@
-import logging as log
+import logging as log  # Changed import to use 'log' alias
 import os  # Added for file path manipulation/cleanup in main block
-import re  # for JSON string cleanup
+import re  # Added for JSON string cleanup
 
 import jpype
 import jpype.imports
+import pygraphviz as pgv  # Added for DOT file manipulation and layout customization
 from jpype import shutdownJVM, startJVM
 from jpype.types import JFloat, JString
 
@@ -22,7 +23,7 @@ from org.eclipse.elk.graph.text import ElkGraphStandaloneSetup
 from org.eclipse.elk.graph.util import ElkGraphUtil
 from org.eclipse.emf.common.util import URI
 from org.eclipse.emf.ecore.resource.impl import ResourceSetImpl
-from org.eclipse.emf.ecore.util import EcoreUtil  # or deep copying
+from org.eclipse.emf.ecore.util import EcoreUtil  # Added for deep copying
 from org.eclipse.xtext.resource import IResourceFactory
 from org.eclipse.xtext.serializer import ISerializer
 
@@ -95,9 +96,8 @@ class ElkUtils:
         """
         Creates a deep copy of the graph and renames all nodes, ports, and edges
         to compliant identifiers (n_X, p_X, e_X) for serialization.
+        This is required for ELKT and JSON which have stricter naming requirements.
         """
-        log.info("Creating deep copy and renaming elements for serialization compliance.")
-
         # Use EcoreUtil.copy for a robust EMF deep copy
         copied_graph = EcoreUtil.copy(original_graph)
 
@@ -150,23 +150,19 @@ class ElkUtils:
     def get_dot_string(self, elk_graph):
         """
         Transforms the ELK graph to a Graphviz model and serializes it to a DOT string.
+        Uses the original graph names as requested.
         """
-        log.info("Starting DOT serialization.")
-
-        # Create compliant copy for serialization/transformation
-        graph_copy = self._create_deep_copy_and_rename(elk_graph)
 
         # 1. Transform ELK Graph to Graphviz Model (Abstract Syntax Tree)
         exporter = DotExporter()
         trans_data = DotTransformationData()
 
         # Set the USE_EDGE_IDS property on the transformation data to ensure edge identifiers (and labels)
-        # are included in the generated DOT model.
-        # This property is equivalent to the 'dotExporter.useEdgeIds' in Java.
-        DOT_USE_EDGE_IDS = Property("dotExporter.useEdgeIds", jpype.JBoolean(False))
+        DOT_USE_EDGE_IDS = Property("dotExporter.useEdgeIds", jpype.JBoolean(False))  # Assuming JBoolean is needed for type safety
         trans_data.setProperty(DOT_USE_EDGE_IDS, jpype.JBoolean(True))
 
-        trans_data.setSourceGraph(graph_copy)  # Use the copied, renamed graph
+        # Use the original graph directly (without deep copy/rename)
+        trans_data.setSourceGraph(elk_graph)
         exporter.transform(trans_data)
 
         # Get GraphvizModel
@@ -186,7 +182,10 @@ class ElkUtils:
         return "DOT Serialization skipped due to resource error."
 
     def write_dot_file(self, elk_graph, filepath):
-        """Generates the DOT string and writes it to the specified file."""
+        """
+        Generates the DOT string, loads it into pygraphviz for layout customization,
+        and writes the modified DOT string to the specified file.
+        """
         dot_str_with_header = self.get_dot_string(elk_graph)
 
         if dot_str_with_header.startswith("FATAL ERROR") or dot_str_with_header.endswith("skipped due to resource error."):
@@ -194,18 +193,49 @@ class ElkUtils:
             return
 
         # Extract the content by splitting the header
-        content = dot_str_with_header.split("--- Generated DOT String ---\n", 1)[-1]
+        raw_dot_content = dot_str_with_header.split("--- Generated DOT String ---\n", 1)[-1]
 
         try:
+            # 1. Load the DOT content into pygraphviz
+            A = pgv.AGraph(raw_dot_content)
+
+            # 2. Change shape of all nodes to 'box'
+            for node in A.nodes():
+                node.attr["shape"] = "box"
+
+            # 3. Update graph attributes for better layout
+            A.graph_attr.update(
+                K="0.2",
+                maxiter="50000",
+                mclimit="9999",  # allow more time for mincross optimization
+                nslimit="9999",  # allow more time for network simplex
+                nslimit1="9999",  # same for phase 3 placement
+                overlap="vpsc",
+                pack="true",
+                packmode="graph",
+                sep="+20,20",
+                esep="+2,2",
+                epsilon="1e-7",
+                rankdir="LR",
+                start="rand",  # better escape from local minima
+                mode="hier",  # hierarchical bias
+                ratio="auto",
+                splines="ortho",
+            )
+
+            # 4. Generate the final modified DOT string
+            final_dot_content = A.string()
+
+            # 5. Write the modified content to file
             with open(filepath, "w") as f:
-                f.write(content)
-            log.info(f"Successfully wrote DOT content to {filepath}")
+                f.write(final_dot_content)
+            log.debug(f" wrote DOT content to {filepath}")
+
         except Exception as e:
-            log.error(f"Failed to write file {filepath}: {e}")
+            log.error(f"Failed to process or write DOT file {filepath} using pygraphviz: {e}")
 
     def get_elkt_string(self, elk_graph):
         """Serializes the ELK graph directly to an ELKT string."""
-        log.info("Starting ELKT serialization.")
 
         # Create compliant copy for serialization
         graph_copy = self._create_deep_copy_and_rename(elk_graph)
@@ -238,20 +268,16 @@ class ElkUtils:
         try:
             with open(filepath, "w") as f:
                 f.write(content)
-            log.info(f"Successfully wrote ELKT content to {filepath}")
+            log.debug(f" wrote ELKT content to {filepath}")
         except Exception as e:
             log.error(f"Failed to write file {filepath}: {e}")
 
     def get_json_string(self, elk_graph):
         """Serializes the ELK graph directly to a JSON string using ElkGraphJson exporter."""
-        log.info("Starting JSON serialization.")
-
-        # Create compliant copy for serialization
-        graph_copy = self._create_deep_copy_and_rename(elk_graph)
 
         try:
             # 1. Initialize JSON Export Builder
-            export_builder = ElkGraphJson.forGraph(graph_copy)
+            export_builder = ElkGraphJson.forGraph(elk_graph)
 
             # 2. Configure options:
             export_builder.prettyPrint(True)  #
@@ -285,7 +311,7 @@ class ElkUtils:
         try:
             with open(filepath, "w") as f:
                 f.write(content)
-            log.info(f"Successfully wrote JSON content to {filepath}")
+            log.debug(f" wrote JSON content to {filepath}")
         except Exception as e:
             log.error(f"Failed to write file {filepath}: {e}")
 
@@ -294,7 +320,7 @@ if __name__ == "__main__":
     # --- Java Configuration ---
 
     # Configure logging for main execution
-    log.basicConfig(level=log.INFO, format="%(levelname)s: %(message)s")
+    log.basicConfig(level=log.debug, format="%(levelname)s: %(message)s")
 
     # Define temporary file paths
     dot_path = "output_test_graph.gv"
@@ -315,11 +341,11 @@ if __name__ == "__main__":
     print("----------------------\n")
 
     # 4. Test File Writing
-    log.info("--- Testing File Writes ---")
+    log.debug("--- Testing File Writes ---")
     elk_utils.write_dot_file(test_graph, dot_path)
     elk_utils.write_elkt_file(test_graph, elkt_path)
     elk_utils.write_json_file(test_graph, json_path)
-    log.info("---------------------------")
+    log.debug("---------------------------")
 
     # Optional: Cleanup temporary files
     # if os.path.exists(dot_path): os.remove(dot_path)
@@ -327,5 +353,5 @@ if __name__ == "__main__":
     # if os.path.exists(json_path): os.remove(json_path)
 
     if jpype.isJVMStarted():
-        log.info("Shutting down JVM...")
+        log.debug("Shutting down JVM...")
         shutdownJVM()

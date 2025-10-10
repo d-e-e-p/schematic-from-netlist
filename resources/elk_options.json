@@ -1,0 +1,373 @@
+[
+  {
+    "option": "ALGORITHM",
+    "targets": "parents",
+    "group": "",
+    "description": "Select a specific layout algorithm.",
+    "type": "Core"
+  },
+  {
+    "option": "RESOLVED_ALGORITHM",
+    "targets": "parents",
+    "group": "",
+    "description": "Meta data associated with the selected algorithm.",
+    "type": "Core"
+  },
+  {
+    "option": "ALIGNMENT",
+    "targets": "nodes",
+    "group": "",
+    "description": "Alignment of the selected node relative to other nodes;         the exact meaning depends on the used algorithm.",
+    "type": "Core"
+  },
+  {
+    "option": "ASPECT_RATIO",
+    "targets": "parents",
+    "group": "",
+    "description": "The desired aspect ratio of the drawing, that is the quotient of width by height.",
+    "type": "Core"
+  },
+  {
+    "option": "BEND_POINTS",
+    "targets": "edges",
+    "group": "",
+    "description": "A fixed list of bend points for the edge. This is used by the 'Fixed Layout' algorithm to         specify a pre-defined routing for an edge. The vector chain must include the source point,         any bend points, and the target point, so it must have at least two points.",
+    "type": "Core"
+  },
+  {
+    "option": "CONTENT_ALIGNMENT",
+    "targets": "parents",
+    "group": "",
+    "description": "Specifies how the content of a node are aligned. Each node can individually control the alignment of its          contents. I.e. if a node should be aligned top left in its parent node, the parent node should specify that          option.",
+    "type": "Core"
+  },
+  {
+    "option": "DEBUG_MODE",
+    "targets": "parents",
+    "group": "",
+    "description": "Whether additional debug information shall be generated.",
+    "type": "Core"
+  },
+  {
+    "option": "DIRECTION",
+    "targets": "parents",
+    "group": "",
+    "description": "Overall direction of edges: horizontal (right / left) or         vertical (down / up).",
+    "type": "Core"
+  },
+  {
+    "option": "EDGE_ROUTING",
+    "targets": "parents",
+    "group": "",
+    "description": "What kind of edge routing style should be applied for the content of a parent node.         Algorithms may also set this option to single edges in order to mark them as splines.         The bend point list of edges with this option set to SPLINES must be interpreted as control         points for a piecewise cubic spline.",
+    "type": "Core"
+  },
+  {
+    "option": "EXPAND_NODES",
+    "targets": "parents",
+    "group": "",
+    "description": "If active, nodes are expanded to fill the area of their parent.",
+    "type": "Core"
+  },
+  {
+    "option": "HIERARCHY_HANDLING",
+    "targets": "parents",
+    "group": "",
+    "description": "Determines whether separate layout runs are triggered for different compound nodes in a         hierarchical graph. Setting a node's hierarchy handling to `INCLUDE_CHILDREN` will lay         out that node and all of its descendants in a single layout run, until a descendant is         encountered which has its hierarchy handling set to `SEPARATE_CHILDREN`. In general,         `SEPARATE_CHILDREN` will ensure that a new layout run is triggered for a node with that         setting. Including multiple levels of hierarchy in a single layout run may allow         cross-hierarchical edges to be laid out properly. If the root node is set to `INHERIT`         (or not set at all), the default behavior is `SEPARATE_CHILDREN`.",
+    "type": "Core"
+  },
+  {
+    "option": "PADDING",
+    "targets": "parents",
+    "group": "",
+    "description": "The padding to be left to a parent element's border when placing child elements. This can         also serve as an output option of a layout algorithm if node size calculation is setup         appropriately.",
+    "type": "Core"
+  },
+  {
+    "option": "INTERACTIVE",
+    "targets": "parents",
+    "group": "",
+    "description": "Whether the algorithm should be run in interactive mode for the content of a parent node.         What this means exactly depends on how the specific algorithm interprets this option.         Usually in the interactive mode algorithms try to modify the current layout as little as         possible.",
+    "type": "Core"
+  },
+  {
+    "option": "INTERACTIVE_LAYOUT",
+    "targets": "parents",
+    "group": "",
+    "description": "Whether the graph should be changeable interactively and by setting constraints",
+    "type": "Core"
+  },
+  {
+    "option": "OMIT_NODE_MICRO_LAYOUT",
+    "targets": "parents",
+    "group": "",
+    "description": "Node micro layout comprises the computation of node dimensions (if requested), the placement of ports           and their labels, and the placement of node labels.           The functionality is implemented independent of any specific layout algorithm and shouldn't have any           negative impact on the layout algorithm's performance itself. Yet, if any unforeseen behavior occurs,          this option allows to deactivate the micro layout.",
+    "type": "Core"
+  },
+  {
+    "option": "PADDING",
+    "targets": "parents",
+    "group": "nodeLabels",
+    "description": "Define padding for node labels that are placed inside of a node.",
+    "type": "Core"
+  },
+  {
+    "option": "PORT_CONSTRAINTS",
+    "targets": "nodes",
+    "group": "",
+    "description": "Defines constraints of the position of the ports of a node.",
+    "type": "Core"
+  },
+  {
+    "option": "POSITION",
+    "targets": "nodes",
+    "group": "",
+    "description": "The position of a node, port, or label. This is used by the 'Fixed Layout' algorithm to         specify a pre-defined position.",
+    "type": "Core"
+  },
+  {
+    "option": "PRIORITY",
+    "targets": "nodes",
+    "group": "",
+    "description": "Defines the priority of an object; its meaning depends on the specific layout algorithm         and the context where it is used.",
+    "type": "Core"
+  },
+  {
+    "option": "RANDOM_SEED",
+    "targets": "parents",
+    "group": "",
+    "description": "Seed used for pseudo-random number generators to control the layout algorithm. If the         value is 0, the seed shall be determined pseudo-randomly (e.g. from the system time).",
+    "type": "Core"
+  },
+  {
+    "option": "SEPARATE_CONNECTED_COMPONENTS",
+    "targets": "parents",
+    "group": "",
+    "description": "Whether each connected component should be processed separately.",
+    "type": "Core"
+  },
+  {
+    "option": "JUNCTION_POINTS",
+    "targets": "edges",
+    "group": "",
+    "description": "This option is not used as option, but as output of the layout algorithms. It is         attached to edges and determines the points where junction symbols should be drawn in         order to represent hyperedges with orthogonal routing. Whether such points are computed         depends on the chosen layout algorithm and edge routing style. The points are put into         the vector chain with no specific order.",
+    "type": "Core"
+  },
+  {
+    "option": "COMMENT_BOX",
+    "targets": "nodes",
+    "group": "",
+    "description": "Whether the node should be regarded as a comment box instead of a regular node. In that         case its placement should be similar to how labels are handled. Any edges incident to a         comment box specify to which graph elements the comment is related.",
+    "type": "Core"
+  },
+  {
+    "option": "HYPERNODE",
+    "targets": "nodes",
+    "group": "",
+    "description": "Whether the node should be handled as a hypernode.",
+    "type": "Core"
+  },
+  {
+    "option": "LABEL_MANAGER",
+    "targets": "parents",
+    "group": "",
+    "description": "Label managers can shorten labels upon a layout algorithm's request.",
+    "type": "Core"
+  },
+  {
+    "option": "SOFTWRAPPING_FUZZINESS",
+    "targets": "labels",
+    "group": "",
+    "description": "Determines the amount of fuzziness to be used when performing softwrapping on labels.          The value expresses the percent of overhang that is permitted for each line.          If the next line would take up less space than this threshold, it is appended to the          current line instead of being placed in a new line.",
+    "type": "Core"
+  },
+  {
+    "option": "MARGINS",
+    "targets": "nodes",
+    "group": "",
+    "description": "Margins define additional space around the actual bounds of a graph element. For instance,         ports or labels being placed on the outside of a node's border might introduce such a         margin. The margin is used to guarantee non-overlap of other graph elements with those         ports or labels.",
+    "type": "Core"
+  },
+  {
+    "option": "NO_LAYOUT",
+    "targets": "nodes",
+    "group": "",
+    "description": "No layout is done for the associated element. This is used to mark parts of a diagram to         avoid their inclusion in the layout graph, or to mark parts of the layout graph to         prevent layout engines from processing them. If you wish to exclude the contents of a         compound node from automatic layout, while the node itself is still considered on its own         layer, use the 'Fixed Layout' algorithm for that node.",
+    "type": "Core"
+  },
+  {
+    "option": "SCALE_FACTOR",
+    "targets": "nodes",
+    "group": "",
+    "description": "The scaling factor to be applied to the corresponding node in recursive layout. It causes         the corresponding node's size to be adjusted, and its ports and labels to be sized and         placed accordingly after the layout of that node has been determined (and before the node         itself and its siblings are arranged). The scaling is not reverted afterwards, so the         resulting layout graph contains the adjusted size and position data. This option is         currently not supported if 'Layout Hierarchy' is set.",
+    "type": "Core"
+  },
+  {
+    "option": "CHILD_AREA_WIDTH",
+    "targets": "parents",
+    "group": "",
+    "description": "The width of the area occupied by the laid out children of a node.",
+    "type": "Core"
+  },
+  {
+    "option": "CHILD_AREA_HEIGHT",
+    "targets": "parents",
+    "group": "",
+    "description": "The height of the area occupied by the laid out children of a node.",
+    "type": "Core"
+  },
+  {
+    "option": "TOPDOWN_LAYOUT",
+    "targets": "parents",
+    "group": "",
+    "description": "Turns topdown layout on and off. If this option is enabled, hierarchical layout will be computed first for          the root node and then for its children recursively. Layouts are then scaled down to fit the area provided by          their parents. Graphs must follow a certain structure for topdown layout to work properly.           {@link TopdownNodeTypes.PARALLEL_NODE} nodes must have children of type           {@link TopdownNodeTypes.HIERARCHICAL_NODE} and must define {@link topdown.hierarchicalNodeWidth} and           {@link topdown.hierarchicalNodeAspectRatio} for their children. Furthermore they need to be laid out using an           algorithm  that is a {@link TopdownLayoutProvider}. Hierarchical nodes can also be parents of other hierarchical          nodes and can optionally use a {@link TopdownSizeApproximator} to dynamically set sizes during topdown layout.          In this case {@link topdown.hierarchicalNodeWidth} and {@link topdown.hierarchicalNodeAspectRatio} should be set          on the node itself rather than the parent. The values are then used by the size approximator as base values.          Hierarchical nodes require the layout option {@link nodeSize.fixedGraphSize} to be true to prevent the algorithm           used there from resizing the hierarchical node. This option is not supported if 'Hierarchy Handling' is set to           'INCLUDE_CHILDREN'",
+    "type": "Core"
+  },
+  {
+    "option": "SCALE_FACTOR",
+    "targets": "parents",
+    "group": "topdown",
+    "description": "The scaling factor to be applied to the nodes laid out within the node in recursive topdown              layout. The difference to 'Scale Factor' is that the node itself is not scaled. This value has to be set on               hierarchical nodes.",
+    "type": "Core"
+  },
+  {
+    "option": "ANIMATE",
+    "targets": "parents",
+    "group": "",
+    "description": "Whether the shift from the old layout to the new computed layout shall be animated.",
+    "type": "Core"
+  },
+  {
+    "option": "ANIM_TIME_FACTOR",
+    "targets": "parents",
+    "group": "",
+    "description": "Factor for computation of animation time. The higher the value, the longer the animation         time. If the value is 0, the resulting time is always equal to the minimum defined by         'Minimal Animation Time'.",
+    "type": "Core"
+  },
+  {
+    "option": "LAYOUT_ANCESTORS",
+    "targets": "parents",
+    "group": "",
+    "description": "Whether the hierarchy levels on the path from the selected element to the root of the         diagram shall be included in the layout process.",
+    "type": "Core"
+  },
+  {
+    "option": "MAX_ANIM_TIME",
+    "targets": "parents",
+    "group": "",
+    "description": "The maximal time for animations, in milliseconds.",
+    "type": "Core"
+  },
+  {
+    "option": "MIN_ANIM_TIME",
+    "targets": "parents",
+    "group": "",
+    "description": "The minimal time for animations, in milliseconds.",
+    "type": "Core"
+  },
+  {
+    "option": "PROGRESS_BAR",
+    "targets": "parents",
+    "group": "",
+    "description": "Whether a progress bar shall be displayed during layout computations.",
+    "type": "Core"
+  },
+  {
+    "option": "VALIDATE_GRAPH",
+    "targets": "parents",
+    "group": "",
+    "description": "Whether the graph shall be validated before any layout algorithm is applied. If this         option is enabled and at least one error is found, the layout process is aborted and a message         is shown to the user.",
+    "type": "Core"
+  },
+  {
+    "option": "VALIDATE_OPTIONS",
+    "targets": "parents",
+    "group": "",
+    "description": "Whether layout options shall be validated before any layout algorithm is applied. If this         option is enabled and at least one error is found, the layout process is aborted and a message         is shown to the user.",
+    "type": "Core"
+  },
+  {
+    "option": "ZOOM_TO_FIT",
+    "targets": "parents",
+    "group": "",
+    "description": "Whether the zoom level shall be set to view the whole diagram after layout.",
+    "type": "Core"
+  },
+  {
+    "option": "DIRECTION",
+    "targets": "edges",
+    "group": "priority",
+    "description": "Defines how important it is to have a certain edge point into the direction of the overall layout.              This option is evaluated during the cycle breaking phase.",
+    "type": "Layered"
+  },
+  {
+    "option": "DIRECTION_CONGRUENCY",
+    "targets": "parents",
+    "group": "",
+    "description": "Specifies how drawings of the same graph with different layout directions compare to each other:           either a natural reading direction is preserved or the drawings are rotated versions of each other.",
+    "type": "Layered"
+  },
+  {
+    "option": "FEEDBACK_EDGES",
+    "targets": "parents",
+    "group": "",
+    "description": "Whether feedback edges should be highlighted by routing around the nodes.",
+    "type": "Layered"
+  },
+  {
+    "option": "INTERACTIVE_REFERENCE_POINT",
+    "targets": "parents",
+    "group": "",
+    "description": "Determines which point of a node is considered by interactive layout phases.",
+    "type": "Layered"
+  },
+  {
+    "option": "MERGE_EDGES",
+    "targets": "parents",
+    "group": "",
+    "description": "Edges that have no ports are merged so they touch the connected nodes at the same points.         When this option is disabled, one port is created for each edge directly connected to a         node. When it is enabled, all such incoming edges share an input port, and all outgoing         edges share an output port.",
+    "type": "Layered"
+  },
+  {
+    "option": "MERGE_HIERARCHY_EDGES",
+    "targets": "parents",
+    "group": "",
+    "description": "If hierarchical layout is active, hierarchy-crossing edges use as few hierarchical ports         as possible. They are broken by the algorithm, with hierarchical ports inserted as         required. Usually, one such port is created for each edge at each hierarchy crossing point.         With this option set to true, we try to create as few hierarchical ports as possible in         the process. In particular, all edges that form a hyperedge can share a port.",
+    "type": "Layered"
+  },
+  {
+    "option": "ALLOW_NON_FLOW_PORTS_TO_SWITCH_SIDES",
+    "targets": "ports",
+    "group": "",
+    "description": "Specifies whether non-flow ports may switch sides if their node's port constraints are either FIXED_SIDE          or FIXED_ORDER. A non-flow port is a port on a side that is not part of the currently configured layout flow.          For instance, given a left-to-right layout direction, north and south ports would be considered non-flow ports.          Further note that the underlying criterium whether to switch sides or not solely relies on the          minimization of edge crossings. Hence, edge length and other aesthetics criteria are not addressed.",
+    "type": "Layered"
+  },
+  {
+    "option": "PORT_SORTING_STRATEGY",
+    "targets": "parents",
+    "group": "",
+    "description": "Only relevant for nodes with FIXED_SIDE port constraints. Determines the way a node's ports are           distributed on the sides of a node if their order is not prescribed. The option is set on parent nodes.",
+    "type": "Layered"
+  },
+  {
+    "option": "THOROUGHNESS",
+    "targets": "parents",
+    "group": "",
+    "description": "How much effort should be spent to produce a nice layout.",
+    "type": "Layered"
+  },
+  {
+    "option": "UNNECESSARY_BENDPOINTS",
+    "targets": "parents",
+    "group": "",
+    "description": "Adds bend points even if an edge does not change direction. If true, each long edge dummy         will contribute a bend point to its edges and hierarchy-crossing edges will always get a         bend point where they cross hierarchy boundaries. By default, bend points are only added         where an edge changes direction.",
+    "type": "Layered"
+  },
+  {
+    "option": "GENERATE_POSITION_AND_LAYER_IDS",
+    "targets": "parents",
+    "group": "",
+    "description": "If enabled position id and layer id are generated, which are usually only used internally         when setting the interactiveLayout option. This option should be specified on the root node.",
+    "type": "Layered"
+  }
+]

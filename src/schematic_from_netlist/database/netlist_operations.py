@@ -200,7 +200,7 @@ class NetlistOperationsMixin:
         nets_to_delete = [net for net in module.nets.values() if net.is_buffered_net]
 
         for inst in instances_to_delete:
-            logging.info(f" Deleting buffer instance {inst.name}")
+            logging.debug(f" Deleting buffer instance {inst.name}")
             for pin in inst.pins.values():
                 if pin.net:
                     pin.net.remove_pin(pin)
