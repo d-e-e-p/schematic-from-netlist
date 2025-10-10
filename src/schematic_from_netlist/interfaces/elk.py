@@ -78,24 +78,7 @@ class ElkInterface:
         self.keep_port_loc_property = Property("keep_port_loc ", False)
         self.elk_utils = ElkUtils()
 
-    def genid(self, obj, counter: int | None = None):
-        h = hash(obj)
-        if counter is not None:
-            return f"id{h}_{counter}"
-        return f"id{h}"
-
-    def id2hash(self, id_str: str) -> int:
-        match = re.match(r"id(\d+)(?:_\d+)?$", str(id_str))
-        if not match:
-            raise ValueError(f"Invalid ID format: {id_str}")
-        return match.group(1)
-
-    def id2name(self, id_str: str) -> str:
-        match = re.match(r"(\S+)(_idx\d+)$", str(id_str))
-        if not match:
-            raise ValueError(f"Invalid ID format: {id_str}")
-        return match.group(1)
-
+    # Main layout generation routines
     def generate_layout_figures(self):
         self.db._build_lookup_tables()
         sorted_modules = sorted(self.db.design.modules.values(), key=lambda m: m.depth, reverse=True)
@@ -119,22 +102,7 @@ class ElkInterface:
         self.extract_geometry(graph, module)
         self.evaluate_layout(module)
 
-    def get_node_size(self, inst):
-        self.size_node_base_w = 6
-        self.size_node_base_h = 18
-        self.size_factor_per_pin = 2  #  ie size_min_macro + size_factor_per_pin * degree
-        if inst.is_buffer:
-            return 1, 1
-        degree = len(inst.pins.keys())
-        if degree <= 3:
-            return self.size_node_base_w, self.size_node_base_h
-        extra = self.size_factor_per_pin * degree
-        w = self.size_node_base_w + extra
-        h = self.size_node_base_h + extra
-        w = round(w, 1)
-        h = round(h, 1)
-        return w, h
-
+    # Graph creation and layout
     def create_nodes(self, module, graph):
         nodes = {}
         ports = {}
@@ -177,17 +145,6 @@ class ElkInterface:
                     edge.getSources().add(src_port)
                     edge.getTargets().add(dst_port)
 
-                    """
-                    net_id = f"{net.name}_idx{net_index}"
-                    net_index += 1
-                    edge = ElkGraphUtil.createEdge(graph)
-                    edge.setProperty(CoreOptions.EDGE_THICKNESS, 0.0)
-                    edge.setProperty(CoreOptions.DIRECTION, Direction.UNDEFINED)
-                    edge.setIdentifier(net_id)
-                    edge.getSources().add(dst_port)
-                    edge.getTargets().add(src_port)
-                    """
-
     def layout_graph(self, graph, step: str = ""):
         graph.setProperty(CoreOptions.ALGORITHM, "layered")
         graph.setProperty(CoreOptions.ASPECT_RATIO, 2.0)
@@ -213,6 +170,7 @@ class ElkInterface:
         layout_engine.layout(graph, monitor)
         self.write_graph_to_file(graph, f"post_{step}")
 
+    # Geometry extraction and evaluation
     def extract_geometry(self, graph, module):
         def walk_graph_and_extract_data(node, module):
             is_root = node.getParent() is None
@@ -233,13 +191,9 @@ class ElkInterface:
                     pin.draw.fig = (
                         port.getX(),
                         port.getY(),
-                        # port.getX() + port.getWidth(),
-                        # port.getY() + port.getHeight(),
                     )
 
             for edge in node.getContainedEdges():
-                # src_pinname = edge.getSources().get(JInt(0)).getIdentifier()
-                # dst_pinname = edge.getTargets().get(JInt(0)).getIdentifier()
                 net_id = edge.getIdentifier()
                 net = module.nets[self.id2name(net_id)]
                 if not edge.isConnected():
@@ -256,13 +210,90 @@ class ElkInterface:
                         start = points[i]
                         end = points[i + 1]
                         net.draw.fig.append((start, end))
-                # log.info(f"Net {net.name} routing: {net.draw.fig=} ")
 
             for child in node.getChildren():
                 walk_graph_and_extract_data(child, module)
 
         walk_graph_and_extract_data(graph, module)
 
+    def evaluate_layout(self, module):
+        """
+        Evaluate the geometric quality of an ELK-generated layout.
+
+        Each net must have `net.draw.fig` as a list of (start, end) tuples: [((x1, y1), (x2, y2)), ...]
+
+        Returns a dictionary with:
+            - total_length
+            - mean_length
+            - num_segments
+            - num_crossings
+        """
+        segments = []
+        nets = []
+        disconnected_nets = 0
+
+        # Convert each net's drawn segments to shapely LineStrings
+        for net_name, net in module.nets.items():
+            if not hasattr(net, "draw") or not getattr(net.draw, "fig", None):
+                disconnected_nets += 1
+                continue
+
+            for start, end in net.draw.fig:
+                # Ignore degenerate zero-length segments
+                if start == end:
+                    continue
+                try:
+                    line = LineString([start, end])
+                    segments.append(line)
+                    nets.append(net_name)
+                except Exception as e:
+                    log.warning(f"Invalid line for net {net_name}: {start}->{end}, {e}")
+
+        if not segments:
+            return {
+                "total_length": 0.0,
+                "mean_length": 0.0,
+                "num_segments": 0,
+                "num_crossings": 0,
+                "disconnected_nets": disconnected_nets,
+            }
+
+        # --- Total wire length ---
+        total_length = sum(seg.length for seg in segments)
+        mean_length = total_length / len(segments)
+
+        # --- Build spatial index for fast crossing detection ---
+        tree = STRtree(segments)
+        crossings = 0
+
+        for i, seg in enumerate(segments):
+            for j in tree.query(seg):
+                if j <= i:
+                    continue
+                other = segments[j]
+                if seg.crosses(other):
+                    crossings += 1
+
+        # Each crossing counted twice (A→B, B→A)
+        num_crossings = crossings // 2
+
+        result = {
+            "total_length": total_length,
+            "mean_length": mean_length,
+            "num_segments": len(segments),
+            "num_crossings": num_crossings,
+            "disconnected_nets": disconnected_nets,
+        }
+
+        log.info(
+            f"Layout eval: {result['num_segments']} segments, "
+            f"{result['num_crossings']} crossings, "
+            f"total length={result['total_length']:.2f}"
+        )
+
+        return result
+
+    # File I/O and debugging
     def write_graph_to_file(self, graph, prefix: str) -> None:
         """
         Write ELK graph to files in JSON ELKT DOT formats.
@@ -283,6 +314,138 @@ class ElkInterface:
         dot_path.parent.mkdir(parents=True, exist_ok=True)
         self.elk_utils.write_dot_file(graph, dot_path)
 
+    def dump_layered_options(self, graph):
+        log.info(f"{'Option':50} {'Current':25} {'Default':25} {'Changed':8}")
+        log.info("=" * 110)
+
+        for name in dir(LayeredOptions):
+            # Skip private names and non-properties
+            if name.startswith("_"):
+                continue
+
+            try:
+                prop = getattr(LayeredOptions, name)
+            except Exception:
+                continue
+
+            # Check if it's an actual IProperty<?> instance
+            if not isinstance(prop, IProperty):
+                continue
+
+            if not name.isupper():
+                continue
+
+            # Retrieve current and default values
+            try:
+                current_val = graph.getProperty(prop)
+                default_val = prop.getDefault()
+                changed = current_val is not None and current_val != default_val
+                log.info(
+                    f"{name:50} {str(current_val or '(unset)'):25} {str(default_val or '(none)'):25} {'YES' if changed else 'NO':8}"
+                )
+            except Exception:
+                continue
+
+    def dump_elk_config_table(self, obj, filename: str = "data/csv/elk_settings.csv"):
+        """
+        Dump ELK layout option values (current + default) for a given ELK Options class
+        into a CSV file, merging with metadata from elk_options.json.
+        """
+        # Locate JSON metadata file
+        PACKAGE_ROOT = Path(__file__).parent.parent.parent.parent
+        json_file = PACKAGE_ROOT / "resources" / "elk_options.json"
+
+        if not json_file.exists():
+            raise FileNotFoundError(f"Missing {json_file}")
+
+        options = json.loads(json_file.read_text())
+
+        # Build lookup for quick metadata access
+        json_lookup = {opt["option"]: opt for opt in options}
+
+        # CSV output path
+        csv_path = Path(filename)
+        csv_path.parent.mkdir(parents=True, exist_ok=True)
+
+        fieldnames = [
+            "Type",
+            "Option",
+            "Object",
+            "Current",
+            "Default",
+            "Options",
+            "Group",
+            "Targets",
+            "Description",
+        ]
+
+        with csv_path.open("w", newline="", encoding="utf-8") as csvfile:
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+            writer.writeheader()
+
+            # Iterate through all uppercase properties of the given ELK Options class
+            for option in (LayeredOptions, CoreOptions):
+                match = re.search(r"\.(\w+)\'>$", str(option))
+                if match:
+                    option_name = match.group(1)
+                else:
+                    option_name = str(option)
+
+                for name in dir(option):
+                    if not name.isupper():
+                        continue
+
+                    try:
+                        prop = getattr(option, name)
+                    except Exception:
+                        continue
+
+                    if not isinstance(prop, IProperty):
+                        continue
+
+                    try:
+                        current_val = obj.getProperty(prop).toString()
+                        default_val = prop.getDefault().toString()
+                    except Exception:
+                        current_val = None
+                        default_val = None
+
+                    try:
+                        val_options = [val.toString() for val in obj.getProperty(prop).values()]
+                    except Exception:
+                        val_options = None
+
+                    # Metadata enrichment
+                    meta = json_lookup.get(name, {})
+                    obj_name = obj.toString()
+                    group = meta.get("group", "")
+                    targets = meta.get("targets", "")
+                    desc = meta.get("description", "")
+
+                    # Short form ID (tail of getId().toString())
+                    try:
+                        opt_id = prop.getId().toString().split(".")[-1]
+                    except Exception:
+                        opt_id = name
+
+                    # Write CSV row
+                    writer.writerow(
+                        {
+                            "Type": option_name,
+                            "Option": opt_id,
+                            "Object": obj_name,
+                            "Current": str(current_val or ""),
+                            "Default": str(default_val or ""),
+                            "Options": str(val_options or ""),
+                            "Group": group,
+                            "Targets": targets,
+                            "Description": desc,
+                        }
+                    )
+
+        log.info(f"Dumped ELK option data for {obj} → {csv_path}")
+
+    # Symbol and port handling
     def update_graph_with_symbols(self, module, graph):
         for node in graph.getChildren():
             node_id = node.getIdentifier()
@@ -421,210 +584,37 @@ class ElkInterface:
 
         return best_pins_loc, best_orientation
 
-    def evaluate_layout(self, module):
-        """
-        Evaluate the geometric quality of an ELK-generated layout.
+    # Utility functions
+    def genid(self, obj, counter: int | None = None):
+        h = hash(obj)
+        if counter is not None:
+            return f"id{h}_{counter}"
+        return f"id{h}"
 
-        Each net must have `net.draw.fig` as a list of (start, end) tuples: [((x1, y1), (x2, y2)), ...]
+    def id2hash(self, id_str: str) -> int:
+        match = re.match(r"id(\d+)(?:_\d+)?$", str(id_str))
+        if not match:
+            raise ValueError(f"Invalid ID format: {id_str}")
+        return match.group(1)
 
-        Returns a dictionary with:
-            - total_length
-            - mean_length
-            - num_segments
-            - num_crossings
-        """
-        segments = []
-        nets = []
-        disconnected_nets = 0
+    def id2name(self, id_str: str) -> str:
+        match = re.match(r"(\S+)(_idx\d+)$", str(id_str))
+        if not match:
+            raise ValueError(f"Invalid ID format: {id_str}")
+        return match.group(1)
 
-        # Convert each net's drawn segments to shapely LineStrings
-        for net_name, net in module.nets.items():
-            if not hasattr(net, "draw") or not getattr(net.draw, "fig", None):
-                disconnected_nets += 1
-                continue
-
-            for start, end in net.draw.fig:
-                # Ignore degenerate zero-length segments
-                if start == end:
-                    continue
-                try:
-                    line = LineString([start, end])
-                    segments.append(line)
-                    nets.append(net_name)
-                except Exception as e:
-                    log.warning(f"Invalid line for net {net_name}: {start}->{end}, {e}")
-
-        if not segments:
-            return {
-                "total_length": 0.0,
-                "mean_length": 0.0,
-                "num_segments": 0,
-                "num_crossings": 0,
-                "disconnected_nets": disconnected_nets,
-            }
-
-        # --- Total wire length ---
-        total_length = sum(seg.length for seg in segments)
-        mean_length = total_length / len(segments)
-
-        # --- Build spatial index for fast crossing detection ---
-        tree = STRtree(segments)
-        crossings = 0
-
-        for i, seg in enumerate(segments):
-            for j in tree.query(seg):
-                if j <= i:
-                    continue
-                other = segments[j]
-                if seg.crosses(other):
-                    crossings += 1
-
-        # Each crossing counted twice (A→B, B→A)
-        num_crossings = crossings // 2
-
-        result = {
-            "total_length": total_length,
-            "mean_length": mean_length,
-            "num_segments": len(segments),
-            "num_crossings": num_crossings,
-            "disconnected_nets": disconnected_nets,
-        }
-
-        log.info(
-            f"Layout eval: {result['num_segments']} segments, "
-            f"{result['num_crossings']} crossings, "
-            f"total length={result['total_length']:.2f}"
-        )
-
-        return result
-
-    def dump_layered_options(self, graph):
-        log.info(f"{'Option':50} {'Current':25} {'Default':25} {'Changed':8}")
-        log.info("=" * 110)
-
-        for name in dir(LayeredOptions):
-            # Skip private names and non-properties
-            if name.startswith("_"):
-                continue
-
-            try:
-                prop = getattr(LayeredOptions, name)
-            except Exception:
-                continue
-
-            # Check if it's an actual IProperty<?> instance
-            if not isinstance(prop, IProperty):
-                continue
-
-            if not name.isupper():
-                continue
-
-            # Retrieve current and default values
-            try:
-                current_val = graph.getProperty(prop)
-                default_val = prop.getDefault()
-                changed = current_val is not None and current_val != default_val
-                log.info(
-                    f"{name:50} {str(current_val or '(unset)'):25} {str(default_val or '(none)'):25} {'YES' if changed else 'NO':8}"
-                )
-            except Exception:
-                continue
-
-    def dump_elk_config_table(self, obj, filename: str = "data/csv/elk_settings.csv"):
-        """
-        Dump ELK layout option values (current + default) for a given ELK Options class
-        into a CSV file, merging with metadata from elk_options.json.
-        """
-        # Locate JSON metadata file
-        PACKAGE_ROOT = Path(__file__).parent.parent.parent.parent
-        json_file = PACKAGE_ROOT / "resources" / "elk_options.json"
-
-        if not json_file.exists():
-            raise FileNotFoundError(f"Missing {json_file}")
-
-        options = json.loads(json_file.read_text())
-
-        # Build lookup for quick metadata access
-        json_lookup = {opt["option"]: opt for opt in options}
-
-        # CSV output path
-        csv_path = Path(filename)
-        csv_path.parent.mkdir(parents=True, exist_ok=True)
-
-        fieldnames = [
-            "Type",
-            "Option",
-            "Object",
-            "Current",
-            "Default",
-            "Options",
-            "Group",
-            "Targets",
-            "Description",
-        ]
-
-        with csv_path.open("w", newline="", encoding="utf-8") as csvfile:
-            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-            writer.writeheader()
-
-            # Iterate through all uppercase properties of the given ELK Options class
-            for option in (LayeredOptions, CoreOptions):
-                match = re.search(r"\.(\w+)\'>$", str(option))
-                if match:
-                    option_name = match.group(1)
-                else:
-                    option_name = str(option)
-
-                for name in dir(option):
-                    if not name.isupper():
-                        continue
-
-                    try:
-                        prop = getattr(option, name)
-                    except Exception:
-                        continue
-
-                    if not isinstance(prop, IProperty):
-                        continue
-
-                    try:
-                        current_val = obj.getProperty(prop).toString()
-                        default_val = prop.getDefault().toString()
-                    except Exception:
-                        current_val = None
-                        default_val = None
-
-                    try:
-                        val_options = [val.toString() for val in obj.getProperty(prop).values()]
-                    except Exception:
-                        val_options = None
-
-                    # Metadata enrichment
-                    meta = json_lookup.get(name, {})
-                    obj_name = obj.toString()
-                    group = meta.get("group", "")
-                    targets = meta.get("targets", "")
-                    desc = meta.get("description", "")
-
-                    # Short form ID (tail of getId().toString())
-                    try:
-                        opt_id = prop.getId().toString().split(".")[-1]
-                    except Exception:
-                        opt_id = name
-
-                    # Write CSV row
-                    writer.writerow(
-                        {
-                            "Type": option_name,
-                            "Option": opt_id,
-                            "Object": obj_name,
-                            "Current": str(current_val or ""),
-                            "Default": str(default_val or ""),
-                            "Options": str(val_options or ""),
-                            "Group": group,
-                            "Targets": targets,
-                            "Description": desc,
-                        }
-                    )
-
-        log.info(f"Dumped ELK option data for {obj} → {csv_path}")
+    def get_node_size(self, inst):
+        self.size_node_base_w = 6
+        self.size_node_base_h = 18
+        self.size_factor_per_pin = 2  #  ie size_min_macro + size_factor_per_pin * degree
+        if inst.is_buffer:
+            return 1, 1
+        degree = len(inst.pins.keys())
+        if degree <= 3:
+            return self.size_node_base_w, self.size_node_base_h
+        extra = self.size_factor_per_pin * degree
+        w = self.size_node_base_w + extra
+        h = self.size_node_base_h + extra
+        w = round(w, 1)
+        h = round(h, 1)
+        return w, h
