@@ -147,7 +147,7 @@ class NetPhysical:
 # -----------------------------
 @dataclass
 class InstancePhysical(RectanglePhysical):
-    pass
+    rank: int = -1
 
 
 # -----------------------------

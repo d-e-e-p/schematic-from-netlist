@@ -4,16 +4,19 @@ import logging as log
 import math
 import os
 import re
+from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import jpype
 import jpype.imports
+import numpy as np
 from jpype import JClass, JDouble, JInt
 from shapely.affinity import rotate, scale, translate
 from shapely.geometry import LineString, Point, Polygon, box
 from shapely.strtree import STRtree
+from sklearn.decomposition import PCA
 from tabulate import tabulate
 
 from schematic_from_netlist.interfaces.elk_utils import ElkUtils
@@ -25,33 +28,33 @@ setup_elk()  # Initialize ELK JVM
 # ruff: noqa: E402
 # pyright: reportMissingImports=false
 
-from java.lang import Integer
+from java.lang import Double, Integer
+from org.eclipse.elk.alg.force.options import ForceMetaDataProvider, ForceModelStrategy, ForceOptions, StressOptions
 from org.eclipse.elk.alg.layered.options import (
     CrossingMinimizationStrategy,
     FixedAlignment,
+    LayeredMetaDataProvider,
     LayeredOptions,
     LayeringStrategy,
     NodePlacementStrategy,
+    OrderingStrategy,
     SelfLoopDistributionStrategy,
     WrappingStrategy,
 )
 
 # ELK Core Engine
 from org.eclipse.elk.core import RecursiveGraphLayoutEngine
+from org.eclipse.elk.core.data import LayoutMetaDataService
 
 # ELK Option classes for layout configuration
 from org.eclipse.elk.core.options import CoreOptions, Direction, EdgeRouting, PortAlignment, PortConstraints, PortSide
 from org.eclipse.elk.core.util import BasicProgressMonitor
-from org.eclipse.elk.graph import ElkEdge, ElkNode, ElkPort
 
 # ELK IO Utility
-from org.eclipse.elk.graph.json import ElkGraphJson
 from org.eclipse.elk.graph.properties import IProperty, Property
-from org.eclipse.elk.graph.text import ElkGraphStandaloneSetup, ElkGraphTextUtil
 
 # ELK Model classes for programmatic graph construction
 from org.eclipse.elk.graph.util import ElkGraphUtil
-from org.eclipse.xtext.serializer import ISerializer
 
 # Map LTSpice orientations to Shapely transform directives
 ORIENTATIONS = {
@@ -89,21 +92,28 @@ class ElkInterface:
     def generate_module_layout(self, module):
         log.info(f"Generating layout for module {module.name}")
 
-        graph = ElkGraphUtil.createGraph()
-        graph.setIdentifier(module.name)
-
-        nodes, ports = self.create_nodes(module, graph)
-        self.create_edges(module, graph, ports)
-
+        graph = self.create_graph(module, "pass1")
         self.layout_graph(graph, "pass1")
-        self.dump_elk_config_table(graph)
+
+        self.create_ranks_from_elk_graph(module, graph)
+        # self.dump_elk_config_table(graph)
         # self.update_graph_with_symbols(module, graph)
-        # self.layout_graph(graph, "pass2")
+        graph = self.create_graph(module, "pass2")
+        self.layout_graph(graph, "pass2")
         self.extract_geometry(graph, module)
         self.evaluate_layout(module)
 
+    def create_graph(self, module, stage):
+        graph = ElkGraphUtil.createGraph()
+        graph.setIdentifier(module.name)
+
+        nodes, ports = self.create_nodes(module, graph, stage)
+        self.create_edges(module, graph, nodes, ports, stage)
+        self.remove_floating_nodes(graph)
+        return graph
+
     # Graph creation and layout
-    def create_nodes(self, module, graph):
+    def create_nodes(self, module, graph, stage):
         nodes = {}
         ports = {}
         port_size = 0
@@ -113,41 +123,166 @@ class ElkInterface:
             width, height = self.get_node_size(inst)
             node.setWidth(width)
             node.setHeight(height)
+            if inst.draw.rank >= 0:
+                node.setProperty(LayeredOptions.LAYERING_LAYER_ID, inst.draw.rank)
+            # node.setProperty(CoreOptions.PORT_CONSTRAINTS, PortConstraints.FIXED_POS)
             nodes[inst.name] = node
+            """
             for pin in inst.pins.values():
                 port = ElkGraphUtil.createPort(node)
                 port.setIdentifier(pin.full_name)
                 port.setWidth(port_size)
                 port.setHeight(port_size)
+                port.setX(width / 2)
+                port.setY(height / 2)
                 ports[pin.full_name] = port
+            """
         return nodes, ports
 
-    def create_edges(self, module, graph, ports):
+    def create_edges(self, module, graph, nodes, ports, stage):
+        """
+        Create edges respecting rank-based hierarchy.
+        For multi-rank nets: chain from lowest to highest rank.
+        """
         edges = []
-        # TODO: deal with pin directions...
-        for net in module.nets.values():
-            net_index = 0
-            pins = list(net.pins.values())
-            if len(pins) > 1:
-                # sort by fanout of driver
-                sorted_pins = sorted(pins, key=lambda pin: len(pin.instance.pins.values()), reverse=True)
-                src = sorted_pins[0]
-                src_port = ports[src.full_name]
-                for dst in pins[1:]:
-                    dst_port = ports[dst.full_name]
 
-                    net_id = f"{net.name}_idx{net_index}"
-                    net_index += 1
-                    edge = ElkGraphUtil.createEdge(graph)
-                    edge.setProperty(CoreOptions.EDGE_THICKNESS, 0.0)
-                    edge.setProperty(CoreOptions.DIRECTION, Direction.UNDEFINED)
-                    edge.setIdentifier(net_id)
-                    edge.getSources().add(src_port)
-                    edge.getTargets().add(dst_port)
+        for net in module.nets.values():
+            if net.num_conn > self.db.fanout_threshold:
+                continue
+
+            pins = list(net.pins.values())
+            if len(pins) <= 1:
+                continue
+
+            # Group pins by rank
+            rank_to_pins = defaultdict(list)
+            unranked_pins = []
+
+            for pin in pins:
+                rank = getattr(pin.instance, "rank", -1)
+                if rank >= 0:
+                    rank_to_pins[rank].append(pin)
+                else:
+                    unranked_pins.append(pin)
+
+            # If no ranked pins, fall back to original behavior
+            if not rank_to_pins:
+                self._create_star_edges(net, pins, nodes, graph)
+                continue
+
+            # Sort ranks low to high
+            sorted_ranks = sorted(rank_to_pins.keys())
+
+            # Create chained connections between ranks
+            net_index = 0
+
+            for i in range(len(sorted_ranks)):
+                current_rank = sorted_ranks[i]
+                current_pins = rank_to_pins[current_rank]
+
+                if i == 0:
+                    # First rank: pick driver (pin with most fanout)
+                    current_pins_sorted = sorted(current_pins, key=lambda p: len(p.instance.pins.values()), reverse=True)
+                    driver = current_pins_sorted[0]
+                    current_sinks = current_pins_sorted[1:]  # Other pins in same rank
+                else:
+                    # Subsequent ranks: all pins are sinks from previous rank
+                    driver = None
+                    current_sinks = current_pins
+
+                # Connect to next rank(s)
+                if i < len(sorted_ranks) - 1:
+                    next_rank = sorted_ranks[i + 1]
+                    next_pins = rank_to_pins[next_rank]
+
+                    # Chain from current rank to next rank
+                    if driver:
+                        # From driver in current rank to all pins in next rank
+                        for dst_pin in next_pins:
+                            edge = self._create_one_edge(net, driver, dst_pin, nodes, graph, net_index)
+                            if edge:
+                                edges.append(edge)
+                                net_index += 1
+                    else:
+                        # From first pin in current rank to all pins in next rank
+                        src_pin = current_pins[0]
+                        for dst_pin in next_pins:
+                            edge = self._create_one_edge(net, src_pin, dst_pin, nodes, graph, net_index)
+                            if edge:
+                                edges.append(edge)
+                                net_index += 1
+
+                # Connect sinks within same rank (if driver exists)
+                if driver and current_sinks:
+                    for sink_pin in current_sinks:
+                        edge = self._create_one_edge(net, driver, sink_pin, nodes, graph, net_index)
+                        if edge:
+                            edges.append(edge)
+                            net_index += 1
+
+            # Handle unranked pins: connect them to the lowest rank
+            if unranked_pins and sorted_ranks:
+                lowest_rank_pins = rank_to_pins[sorted_ranks[0]]
+                src_pin = lowest_rank_pins[0]  # Pick first pin in lowest rank
+
+                for unranked_pin in unranked_pins:
+                    edge = self._create_one_edge(net, src_pin, unranked_pin, nodes, graph, net_index)
+                    if edge:
+                        edges.append(edge)
+                        net_index += 1
+
+        return edges
+
+    def _create_one_edge(self, net, src_pin, dst_pin, nodes, graph, net_index):
+        """Helper to create a single edge between two pins."""
+        src_node = nodes.get(src_pin.instance.name)
+        dst_node = nodes.get(dst_pin.instance.name)
+
+        if not src_node or not dst_node or src_node == dst_node:
+            return None
+
+        net_id = f"{net.name}_idx{net_index}"
+        edge = ElkGraphUtil.createEdge(graph)
+        edge.setProperty(CoreOptions.EDGE_THICKNESS, 0.0)
+        edge.setProperty(CoreOptions.DIRECTION, Direction.UNDEFINED)
+        edge.setIdentifier(net_id)
+        edge.getSources().add(src_node)
+        edge.getTargets().add(dst_node)
+
+        return edge
+
+    def _create_star_edges(self, net, pins, nodes, graph):
+        """Fallback: create star topology (original behavior)."""
+        net_index = 0
+        sorted_pins = sorted(pins, key=lambda pin: len(pin.instance.pins.values()), reverse=True)
+        src = sorted_pins[0]
+
+        for dst in sorted_pins[1:]:
+            self._create_one_edge(net, src, dst, nodes, graph, net_index)
+            net_index += 1
 
     def layout_graph(self, graph, step: str = ""):
-        graph.setProperty(CoreOptions.ALGORITHM, "layered")
+        if step == "pass1":
+            service = LayoutMetaDataService.getInstance()
+            provider = ForceMetaDataProvider()
+            service.registerLayoutMetaDataProviders(provider)
+            algorithms = service.getAlgorithmData()
+            log.debug([algo.getId() for algo in algorithms])
+            graph.setProperty(CoreOptions.ALGORITHM, "force")
+        elif step == "pass2":
+            service = LayoutMetaDataService.getInstance()
+            provider = LayeredMetaDataProvider()
+            service.registerLayoutMetaDataProviders(provider)
+            algorithms = service.getAlgorithmData()
+            log.debug([algo.getId() for algo in algorithms])
+            graph.setProperty(CoreOptions.ALGORITHM, "layered")
+
         graph.setProperty(CoreOptions.ASPECT_RATIO, 2.0)
+
+        graph.setProperty(ForceOptions.ITERATIONS, Integer(3000))  # default 300
+        # graph.setProperty(ForceOptions.SPACING_NODE_NODE, Double(80))  # default 80
+
+        graph.setProperty(LayeredOptions.LAYERING_STRATEGY, LayeringStrategy.NETWORK_SIMPLEX)
         graph.setProperty(LayeredOptions.EDGE_ROUTING, EdgeRouting.ORTHOGONAL)
         graph.setProperty(LayeredOptions.PORT_CONSTRAINTS, PortConstraints.FREE)
         graph.setProperty(LayeredOptions.ALLOW_NON_FLOW_PORTS_TO_SWITCH_SIDES, True)
@@ -161,6 +296,8 @@ class ElkInterface:
         graph.setProperty(LayeredOptions.SEPARATE_CONNECTED_COMPONENTS, False)  #
         graph.setProperty(LayeredOptions.THOROUGHNESS, Integer(1000))  #  num of minimizeCrossingsWithCounter loops
         graph.setProperty(LayeredOptions.WRAPPING_STRATEGY, WrappingStrategy.MULTI_EDGE)  #  bypoass chunks
+        graph.setProperty(LayeredOptions.GENERATE_POSITION_AND_LAYER_IDS, True)
+        graph.setProperty(LayeredOptions.CONSIDER_MODEL_ORDER_STRATEGY, OrderingStrategy.NONE)
 
         # Force ELK to ignore old coordinates
         self.write_graph_to_file(graph, f"pre_{step}")
@@ -215,6 +352,104 @@ class ElkInterface:
                 walk_graph_and_extract_data(child, module)
 
         walk_graph_and_extract_data(graph, module)
+
+    def remove_floating_nodes(self, graph):
+        """
+        Removes nodes from the graph that do not have any incident edges.
+        Assumes:
+          - graph.getContainedEdges() returns a list of edge dicts with 'sources' and 'targets'
+          - graph.getChildren() returns a list of child node dicts with 'id'
+        """
+        # Step 1: Build a set of node IDs that are connected to any edge
+        nodes_with_edges = set()
+        for edge in graph.getContainedEdges():
+            for node in edge.getSources() + edge.getTargets():
+                nodes_with_edges.add(node.getIdentifier())
+
+        # Step 2: mark nodes for no_layout
+        all_nodes = list(graph.getChildren())
+        for node in all_nodes:
+            if node.getIdentifier() not in nodes_with_edges:
+                # node.setProperty(CoreOptions.NO_LAYOUT, True)
+                node.setParent(None)
+
+    def create_ranks_from_elk_graph(self, module, graph):
+        """
+        Group nodes by their set of connected nets (net signature).
+        Nodes must share the same original nets to be in the same group.
+        """
+        # Map: net_id -> set of nodes connected to that net
+        net_to_nodes = defaultdict(set)
+
+        # Map: node -> set of net_ids it connects to
+        node_to_nets = defaultdict(set)
+
+        # Build the mappings
+        for edge in graph.getContainedEdges():
+            netname = self.id2name(edge.getIdentifier())
+            net = module.nets[netname]
+            if net.is_buffered_net:
+                netname = net.buffer_original_netname
+            for node in edge.getSources() + edge.getTargets():
+                net_to_nodes[netname].add(node)
+                node_to_nets[node].add(netname)
+
+        # Group nodes by their net signature (exact set of nets)
+        signature_to_nodes = defaultdict(list)
+
+        nodes = graph.getChildren()  # Get all nodes in the graph
+        for node in nodes:
+            # Use frozenset as key (immutable, order-independent)
+            net_signature = frozenset(node_to_nets[node])
+            signature_to_nodes[net_signature].append(node)
+
+        # Convert to list of groups
+        node_groups = list(signature_to_nodes.values())
+
+        # Get positions of nodes in each group for PCA
+        group_positions = []
+        for group in node_groups:
+            x_coords = []
+            y_coords = []
+            for node in group:
+                x = node.getX() if hasattr(node, "getX") else 0
+                y = node.getY() if hasattr(node, "getY") else 0
+                x_coords.append(x)
+                y_coords.append(y)
+
+            centroid_x = np.mean(x_coords)
+            centroid_y = np.mean(y_coords)
+            group_positions.append([centroid_x, centroid_y])
+
+        # Use PCA to determine ranks
+        if len(group_positions) > 1:
+            positions_array = np.array(group_positions)
+            pca = PCA(n_components=1)
+            pca_coords = pca.fit_transform(positions_array)
+
+            # Sort groups by PCA coordinate
+            sorted_indices = np.argsort(pca_coords[:, 0])
+            rank_mapping = {idx: rank for rank, idx in enumerate(sorted_indices)}
+
+            for group_idx, group in enumerate(node_groups):
+                rank = rank_mapping[group_idx]
+                for node in group:
+                    node.setProperty(LayeredOptions.LAYERING_LAYER_ID, rank)
+                    inst = module.instances[node.getIdentifier()]
+                    inst.draw.rank = rank
+                    log.info(f"Node {node.getIdentifier()} has rank {rank}")
+        else:
+            for node in node_groups[0]:
+                node.setProperty(LayeredOptions.LAYERING_LAYER_ID, 0)
+
+        # Debug output
+        print(f"\nFound {len(node_groups)} groups:")
+        for i, (signature, group) in enumerate(signature_to_nodes.items()):
+            node_ids = [node.getIdentifier() for node in group]
+            print(f"Group {i}: {node_ids}")
+            print(f"  Connected nets: {sorted(signature)}")
+
+        return node_groups, signature_to_nodes, net_to_nodes, node_to_nets
 
     def evaluate_layout(self, module):
         """
@@ -608,7 +843,7 @@ class ElkInterface:
         self.size_node_base_h = 18
         self.size_factor_per_pin = 2  #  ie size_min_macro + size_factor_per_pin * degree
         if inst.is_buffer:
-            return 1, 1
+            return 3, 9
         degree = len(inst.pins.keys())
         if degree <= 3:
             return self.size_node_base_w, self.size_node_base_h
