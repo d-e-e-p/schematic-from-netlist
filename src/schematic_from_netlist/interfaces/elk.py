@@ -32,6 +32,7 @@ from java.lang import Double, Integer
 from org.eclipse.elk.alg.force.options import ForceMetaDataProvider, ForceModelStrategy, ForceOptions, StressOptions
 from org.eclipse.elk.alg.layered.options import (
     CrossingMinimizationStrategy,
+    EdgeStraighteningStrategy,
     FixedAlignment,
     LayeredMetaDataProvider,
     LayeredOptions,
@@ -41,6 +42,7 @@ from org.eclipse.elk.alg.layered.options import (
     SelfLoopDistributionStrategy,
     WrappingStrategy,
 )
+from org.eclipse.elk.alg.spore.options import SporeCompactionOptions
 
 # ELK Core Engine
 from org.eclipse.elk.core import RecursiveGraphLayoutEngine
@@ -100,6 +102,13 @@ class ElkInterface:
         # self.update_graph_with_symbols(module, graph)
         graph = self.create_graph(module, "pass2")
         self.layout_graph(graph, "pass2")
+
+        for edge in graph.getContainedEdges():
+            edge.getSections().clear()
+            edge.getProperties().clear()
+
+        self.layout_graph(graph, "pass3")
+
         self.extract_geometry(graph, module)
         self.evaluate_layout(module)
 
@@ -125,6 +134,7 @@ class ElkInterface:
             node.setHeight(height)
             if inst.draw.rank >= 0:
                 node.setProperty(LayeredOptions.LAYERING_LAYER_ID, inst.draw.rank)
+                node.setProperty(LayeredOptions.PARTITIONING_PARTITION, Integer(inst.draw.rank))
             # node.setProperty(CoreOptions.PORT_CONSTRAINTS, PortConstraints.FIXED_POS)
             nodes[inst.name] = node
             """
@@ -244,7 +254,7 @@ class ElkInterface:
         net_id = f"{net.name}_idx{net_index}"
         edge = ElkGraphUtil.createEdge(graph)
         edge.setProperty(CoreOptions.EDGE_THICKNESS, 0.0)
-        edge.setProperty(CoreOptions.DIRECTION, Direction.UNDEFINED)
+        # edge.setProperty(CoreOptions.DIRECTION, Direction.UNDEFINED)
         edge.setIdentifier(net_id)
         edge.getSources().add(src_node)
         edge.getTargets().add(dst_node)
@@ -276,15 +286,26 @@ class ElkInterface:
             algorithms = service.getAlgorithmData()
             log.debug([algo.getId() for algo in algorithms])
             graph.setProperty(CoreOptions.ALGORITHM, "layered")
+            graph.setProperty(LayeredOptions.PARTITIONING_ACTIVATE, True)
+            graph.setProperty(CoreOptions.PORT_CONSTRAINTS, PortConstraints.FREE)
+        elif step == "pass3":
+            service = LayoutMetaDataService.getInstance()
+            provider = ForceMetaDataProvider()
+            service.registerLayoutMetaDataProviders(provider)
+            algorithms = service.getAlgorithmData()
+            log.debug([algo.getId() for algo in algorithms])
+            graph.setProperty(CoreOptions.ALGORITHM, "force")
+            graph.setProperty(ForceOptions.INTERACTIVE, True)
 
         graph.setProperty(CoreOptions.ASPECT_RATIO, 2.0)
 
         graph.setProperty(ForceOptions.ITERATIONS, Integer(3000))  # default 300
-        # graph.setProperty(ForceOptions.SPACING_NODE_NODE, Double(80))  # default 80
+        # graph.setProperty(ForceOptions.SPACING_NODE_NODE, Double(80))  # default 80 ?
+
+        graph.setProperty(SporeCompactionOptions.UNDERLYING_LAYOUT_ALGORITHM, "layered")
 
         graph.setProperty(LayeredOptions.LAYERING_STRATEGY, LayeringStrategy.NETWORK_SIMPLEX)
         graph.setProperty(LayeredOptions.EDGE_ROUTING, EdgeRouting.ORTHOGONAL)
-        graph.setProperty(LayeredOptions.PORT_CONSTRAINTS, PortConstraints.FREE)
         graph.setProperty(LayeredOptions.ALLOW_NON_FLOW_PORTS_TO_SWITCH_SIDES, True)
         graph.setProperty(LayeredOptions.COMPACTION_CONNECTED_COMPONENTS, True)
         graph.setProperty(LayeredOptions.CONSIDER_MODEL_ORDER_CROSSING_COUNTER_NODE_INFLUENCE, 0.001)
@@ -298,6 +319,11 @@ class ElkInterface:
         graph.setProperty(LayeredOptions.WRAPPING_STRATEGY, WrappingStrategy.MULTI_EDGE)  #  bypoass chunks
         graph.setProperty(LayeredOptions.GENERATE_POSITION_AND_LAYER_IDS, True)
         graph.setProperty(LayeredOptions.CONSIDER_MODEL_ORDER_STRATEGY, OrderingStrategy.NONE)
+        graph.setProperty(LayeredOptions.NODE_PLACEMENT_FAVOR_STRAIGHT_EDGES, True)
+        graph.setProperty(LayeredOptions.NODE_PLACEMENT_BK_EDGE_STRAIGHTENING, EdgeStraighteningStrategy.IMPROVE_STRAIGHTNESS)
+        # with unzipping enabled, ELK can insert an extra layer (or more),
+        graph.setProperty(LayeredOptions.LAYER_UNZIPPING_MINIMIZE_EDGE_LENGTH, True)
+        graph.setProperty(LayeredOptions.LAYER_UNZIPPING_LAYER_SPLIT, Integer(2))
 
         # Force ELK to ignore old coordinates
         self.write_graph_to_file(graph, f"pre_{step}")
@@ -842,6 +868,11 @@ class ElkInterface:
         self.size_node_base_w = 6
         self.size_node_base_h = 18
         self.size_factor_per_pin = 2  #  ie size_min_macro + size_factor_per_pin * degree
+
+        # get from a previous run...
+        if not inst.module.is_leaf:
+            return inst.module.draw.fig
+
         if inst.is_buffer:
             return 3, 9
         degree = len(inst.pins.keys())

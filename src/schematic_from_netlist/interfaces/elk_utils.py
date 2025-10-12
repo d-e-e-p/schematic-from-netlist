@@ -248,6 +248,7 @@ class ElkUtils:
             try:
                 # The ELKT serializer uses the copied, renamed ELK graph directly
                 elkt_str = self.elkt_serializer.serialize(graph_copy)
+                elkt_str = re.sub(r'^.*"resolvedAlgorithm".*\n?', "", elkt_str, flags=re.MULTILINE)
                 return f"--- Generated ELKT String ---\n{elkt_str}"
             except Exception as e:
                 return f"FATAL ERROR during ELKT serialization: {e}"
@@ -290,7 +291,7 @@ class ElkUtils:
             # 3. Finally generate JSON
             json_str = str(export_builder.toJson())
 
-            # 4. Apply regex substitution as requested
+            # 4. Apply regex substitution
             json_str = re.sub(r'^.*"resolvedAlgorithm".*\n?', "", json_str, flags=re.MULTILINE)
 
             return f"--- Generated JSON String ---\n{json_str}"
