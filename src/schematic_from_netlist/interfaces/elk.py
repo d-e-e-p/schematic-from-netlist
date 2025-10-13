@@ -96,21 +96,20 @@ class ElkInterface:
 
         graph = self.create_graph(module, "pass1")
         self.layout_graph(graph, "pass1")
+        self.evaluate_layout(module)
 
-        self.create_ranks_from_elk_graph(module, graph)
+        # self.create_ranks_from_elk_graph(module, graph)
         # self.dump_elk_config_table(graph)
         # self.update_graph_with_symbols(module, graph)
-        graph = self.create_graph(module, "pass2")
-        self.layout_graph(graph, "pass2")
+        # graph = self.create_graph(module, "pass2")
+        # self.layout_graph(graph, "pass2")
 
-        for edge in graph.getContainedEdges():
-            edge.getSections().clear()
-            edge.getProperties().clear()
-
-        self.layout_graph(graph, "pass3")
+        # for edge in graph.getContainedEdges():
+        #     edge.getSections().clear()
+        #     edge.getProperties().clear()
+        # self.layout_graph(graph, "pass3")
 
         self.extract_geometry(graph, module)
-        self.evaluate_layout(module)
 
     def create_graph(self, module, stage):
         graph = ElkGraphUtil.createGraph()
@@ -118,7 +117,11 @@ class ElkInterface:
 
         nodes, ports = self.create_nodes(module, graph, stage)
         self.create_edges(module, graph, nodes, ports, stage)
-        self.remove_floating_nodes(graph)
+        log.info(f" nodes = {[str(node) for node in graph.getChildren()]}")
+        log.info(f" edges = {[str(edge) for edge in graph.getContainedEdges()]}")
+        self.remove_floating_nodes(module, graph)
+        log.info(f" nodes = {[str(node) for node in graph.getChildren()]}")
+        log.info(f" edges = {[str(edge) for edge in graph.getContainedEdges()]}")
         return graph
 
     # Graph creation and layout
@@ -129,24 +132,32 @@ class ElkInterface:
         for inst in module.instances.values():
             node = ElkGraphUtil.createNode(graph)
             node.setIdentifier(inst.name)
-            width, height = self.get_node_size(inst)
+            # leaf? get from gv run. module? get from previous elk run and assume pin locs are still valid
+            (x1, y1, x2, y2) = inst.draw.efig
+            if inst.module.is_leaf:
+                (width, height) = (x2 - x1, y2 - y1)
+            else:
+                (width, height) = inst.module.draw.efig
+
             node.setWidth(width)
             node.setHeight(height)
+            node.setX(x1)
+            node.setY(y1)
+            node.setProperty(CoreOptions.PORT_CONSTRAINTS, PortConstraints.FIXED_POS)
             if inst.draw.rank >= 0:
                 node.setProperty(LayeredOptions.LAYERING_LAYER_ID, inst.draw.rank)
                 node.setProperty(LayeredOptions.PARTITIONING_PARTITION, Integer(inst.draw.rank))
             # node.setProperty(CoreOptions.PORT_CONSTRAINTS, PortConstraints.FIXED_POS)
             nodes[inst.name] = node
-            """
             for pin in inst.pins.values():
                 port = ElkGraphUtil.createPort(node)
                 port.setIdentifier(pin.full_name)
                 port.setWidth(port_size)
                 port.setHeight(port_size)
-                port.setX(width / 2)
-                port.setY(height / 2)
+                (x, y) = pin.draw.efig
+                port.setX(x - x1)
+                port.setY(y - y1)
                 ports[pin.full_name] = port
-            """
         return nodes, ports
 
     def create_edges(self, module, graph, nodes, ports, stage):
@@ -177,7 +188,7 @@ class ElkInterface:
 
             # If no ranked pins, fall back to original behavior
             if not rank_to_pins:
-                self._create_star_edges(net, pins, nodes, graph)
+                self._create_star_edges(net, pins, nodes, ports, graph)
                 continue
 
             # Sort ranks low to high
@@ -209,7 +220,7 @@ class ElkInterface:
                     if driver:
                         # From driver in current rank to all pins in next rank
                         for dst_pin in next_pins:
-                            edge = self._create_one_edge(net, driver, dst_pin, nodes, graph, net_index)
+                            edge = self._create_one_edge(net, driver, dst_pin, nodes, ports, graph, net_index)
                             if edge:
                                 edges.append(edge)
                                 net_index += 1
@@ -217,7 +228,7 @@ class ElkInterface:
                         # From first pin in current rank to all pins in next rank
                         src_pin = current_pins[0]
                         for dst_pin in next_pins:
-                            edge = self._create_one_edge(net, src_pin, dst_pin, nodes, graph, net_index)
+                            edge = self._create_one_edge(net, src_pin, dst_pin, nodes, ports, graph, net_index)
                             if edge:
                                 edges.append(edge)
                                 net_index += 1
@@ -225,7 +236,7 @@ class ElkInterface:
                 # Connect sinks within same rank (if driver exists)
                 if driver and current_sinks:
                     for sink_pin in current_sinks:
-                        edge = self._create_one_edge(net, driver, sink_pin, nodes, graph, net_index)
+                        edge = self._create_one_edge(net, driver, sink_pin, nodes, ports, graph, net_index)
                         if edge:
                             edges.append(edge)
                             net_index += 1
@@ -236,17 +247,17 @@ class ElkInterface:
                 src_pin = lowest_rank_pins[0]  # Pick first pin in lowest rank
 
                 for unranked_pin in unranked_pins:
-                    edge = self._create_one_edge(net, src_pin, unranked_pin, nodes, graph, net_index)
+                    edge = self._create_one_edge(net, src_pin, unranked_pin, nodes, ports, graph, net_index)
                     if edge:
                         edges.append(edge)
                         net_index += 1
 
         return edges
 
-    def _create_one_edge(self, net, src_pin, dst_pin, nodes, graph, net_index):
+    def _create_one_edge(self, net, src_pin, dst_pin, nodes, ports, graph, net_index):
         """Helper to create a single edge between two pins."""
-        src_node = nodes.get(src_pin.instance.name)
-        dst_node = nodes.get(dst_pin.instance.name)
+        src_node = ports.get(src_pin.full_name)
+        dst_node = ports.get(dst_pin.full_name)
 
         if not src_node or not dst_node or src_node == dst_node:
             return None
@@ -261,34 +272,29 @@ class ElkInterface:
 
         return edge
 
-    def _create_star_edges(self, net, pins, nodes, graph):
+    def _create_star_edges(self, net, pins, nodes, ports, graph):
         """Fallback: create star topology (original behavior)."""
         net_index = 0
         sorted_pins = sorted(pins, key=lambda pin: len(pin.instance.pins.values()), reverse=True)
         src = sorted_pins[0]
 
         for dst in sorted_pins[1:]:
-            self._create_one_edge(net, src, dst, nodes, graph, net_index)
+            self._create_one_edge(net, src, dst, nodes, ports, graph, net_index)
             net_index += 1
 
     def layout_graph(self, graph, step: str = ""):
         if step == "pass1":
-            service = LayoutMetaDataService.getInstance()
-            provider = ForceMetaDataProvider()
-            service.registerLayoutMetaDataProviders(provider)
-            algorithms = service.getAlgorithmData()
-            log.debug([algo.getId() for algo in algorithms])
-            graph.setProperty(CoreOptions.ALGORITHM, "force")
-        elif step == "pass2":
             service = LayoutMetaDataService.getInstance()
             provider = LayeredMetaDataProvider()
             service.registerLayoutMetaDataProviders(provider)
             algorithms = service.getAlgorithmData()
             log.debug([algo.getId() for algo in algorithms])
             graph.setProperty(CoreOptions.ALGORITHM, "layered")
-            graph.setProperty(LayeredOptions.PARTITIONING_ACTIVATE, True)
-            graph.setProperty(CoreOptions.PORT_CONSTRAINTS, PortConstraints.FREE)
-        elif step == "pass3":
+            graph.setProperty(LayeredOptions.PARTITIONING_ACTIVATE, False)
+            graph.setProperty(CoreOptions.PORT_CONSTRAINTS, PortConstraints.FIXED_POS)
+            graph.setProperty(LayeredOptions.NODE_PLACEMENT_STRATEGY, NodePlacementStrategy.INTERACTIVE)
+            graph.setProperty(LayeredOptions.LAYERING_STRATEGY, LayeringStrategy.INTERACTIVE)
+        elif step == "pass2":
             service = LayoutMetaDataService.getInstance()
             provider = ForceMetaDataProvider()
             service.registerLayoutMetaDataProviders(provider)
@@ -297,11 +303,14 @@ class ElkInterface:
             graph.setProperty(CoreOptions.ALGORITHM, "force")
             graph.setProperty(ForceOptions.INTERACTIVE, True)
 
-        graph.setProperty(CoreOptions.ASPECT_RATIO, 2.0)
+        # graph.setProperty(CoreOptions.ASPECT_RATIO, 2.0)
 
+        graph.setProperty(CoreOptions.DEBUG_MODE, True)
         graph.setProperty(ForceOptions.ITERATIONS, Integer(3000))  # default 300
         # graph.setProperty(ForceOptions.SPACING_NODE_NODE, Double(80))  # default 80 ?
 
+        graph.setProperty(LayeredOptions.MERGE_EDGES, True)
+        """
         graph.setProperty(SporeCompactionOptions.UNDERLYING_LAYOUT_ALGORITHM, "layered")
 
         graph.setProperty(LayeredOptions.LAYERING_STRATEGY, LayeringStrategy.NETWORK_SIMPLEX)
@@ -324,6 +333,7 @@ class ElkInterface:
         # with unzipping enabled, ELK can insert an extra layer (or more),
         graph.setProperty(LayeredOptions.LAYER_UNZIPPING_MINIMIZE_EDGE_LENGTH, True)
         graph.setProperty(LayeredOptions.LAYER_UNZIPPING_LAYER_SPLIT, Integer(2))
+        """
 
         # Force ELK to ignore old coordinates
         self.write_graph_to_file(graph, f"pre_{step}")
@@ -338,11 +348,11 @@ class ElkInterface:
         def walk_graph_and_extract_data(node, module):
             is_root = node.getParent() is None
             if is_root:
-                module.draw.fig = (node.getWidth(), node.getHeight())
+                module.draw.efig = (node.getWidth(), node.getHeight())
             else:
                 node_id = node.getIdentifier()
                 instance = module.instances[node_id]
-                instance.draw.fig = (
+                instance.draw.efig = (
                     node.getX(),
                     node.getY(),
                     node.getX() + node.getWidth(),
@@ -351,7 +361,7 @@ class ElkInterface:
                 for port in node.getPorts():
                     port_id = port.getIdentifier()
                     pin = module.pins[port_id]
-                    pin.draw.fig = (
+                    pin.draw.efig = (
                         port.getX(),
                         port.getY(),
                     )
@@ -372,14 +382,14 @@ class ElkInterface:
                     for i in range(len(points) - 1):
                         start = points[i]
                         end = points[i + 1]
-                        net.draw.fig.append((start, end))
+                        net.draw.efig.append((start, end))
 
             for child in node.getChildren():
                 walk_graph_and_extract_data(child, module)
 
         walk_graph_and_extract_data(graph, module)
 
-    def remove_floating_nodes(self, graph):
+    def remove_floating_nodes(self, module, graph):
         """
         Removes nodes from the graph that do not have any incident edges.
         Assumes:
@@ -390,7 +400,12 @@ class ElkInterface:
         nodes_with_edges = set()
         for edge in graph.getContainedEdges():
             for node in edge.getSources() + edge.getTargets():
+                portname = node.getIdentifier()
                 nodes_with_edges.add(node.getIdentifier())
+                # what if portname is actually a pin.full_name
+                if portname in module.pins:
+                    pin = module.pins[portname]
+                    nodes_with_edges.add(pin.instance.name)
 
         # Step 2: mark nodes for no_layout
         all_nodes = list(graph.getChildren())
@@ -481,7 +496,7 @@ class ElkInterface:
         """
         Evaluate the geometric quality of an ELK-generated layout.
 
-        Each net must have `net.draw.fig` as a list of (start, end) tuples: [((x1, y1), (x2, y2)), ...]
+        Each net must have `net.draw.efig` as a list of (start, end) tuples: [((x1, y1), (x2, y2)), ...]
 
         Returns a dictionary with:
             - total_length
@@ -499,7 +514,7 @@ class ElkInterface:
                 disconnected_nets += 1
                 continue
 
-            for start, end in net.draw.fig:
+            for start, end in net.draw.efig:
                 # Ignore degenerate zero-length segments
                 if start == end:
                     continue
@@ -871,7 +886,7 @@ class ElkInterface:
 
         # get from a previous run...
         if not inst.module.is_leaf:
-            return inst.module.draw.fig
+            return inst.module.draw.efig
 
         if inst.is_buffer:
             return 3, 9

@@ -278,7 +278,8 @@ class ElkUtils:
 
         try:
             # 1. Initialize JSON Export Builder
-            export_builder = ElkGraphJson.forGraph(elk_graph)
+            graph_copy = self._create_deep_copy_and_rename(elk_graph)
+            export_builder = ElkGraphJson.forGraph(graph_copy)
 
             # 2. Configure options:
             export_builder.prettyPrint(True)  #

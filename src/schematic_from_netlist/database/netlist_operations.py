@@ -484,8 +484,11 @@ class NetlistOperationsMixin:
     def clear_all_shapes(self):
         return self.design.draw.clear_all_shapes()
 
-    def fig2shape(self):
-        return self.design.draw.fig2shape()
+    def gfig2efig(self):
+        return self.design.draw.gfig2efig()
+
+    def efig2shape(self):
+        return self.design.draw.efig2shape()
 
     def geom2shape(self):
         return self.design.draw.geom2shape()

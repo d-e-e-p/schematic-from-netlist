@@ -9,6 +9,7 @@ from schematic_from_netlist.graph.graph_partition import HypergraphPartitioner
 from schematic_from_netlist.graph.group_maker import SteinerGroupMaker
 from schematic_from_netlist.graph.layout_optimizer import LayoutOptimizer
 from schematic_from_netlist.interfaces.elk import ElkInterface
+from schematic_from_netlist.interfaces.graphviz import Graphviz
 from schematic_from_netlist.interfaces.ltspice_writer import LTSpiceWriter
 from schematic_from_netlist.interfaces.verilog_parser import VerilogParser
 from schematic_from_netlist.utils.config import setup_logging
@@ -38,7 +39,14 @@ def load_netlist(netlist_file: str, debug: bool):
 
 def produce_graph(db):
     """Build Graphviz layouts for groups and top-level interconnect."""
+
+    gv = Graphviz(db)
     elk = ElkInterface(db)
+
+    # graphviz -> extract macro and port locations -> remove buffers -> elk for routing
+    gv.generate_layout_figures()
+    db.remove_multi_fanout_buffers()
+    db.gfig2efig()
     elk.generate_layout_figures()
 
 
