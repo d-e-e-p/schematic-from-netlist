@@ -95,6 +95,8 @@ class ElkInterface:
         log.info(f"Generating layout for module {module.name}")
 
         graph = self.create_graph(module, "pass1")
+        log.info(f" nodes = {[str(node) for node in graph.getChildren()]}")
+        log.info(f" edges = {[str(edge) for edge in graph.getContainedEdges()]}")
         self.layout_graph(graph, "pass1")
         self.evaluate_layout(module)
 
@@ -119,9 +121,7 @@ class ElkInterface:
         self.create_edges(module, graph, nodes, ports, stage)
         log.info(f" nodes = {[str(node) for node in graph.getChildren()]}")
         log.info(f" edges = {[str(edge) for edge in graph.getContainedEdges()]}")
-        self.remove_floating_nodes(module, graph)
-        log.info(f" nodes = {[str(node) for node in graph.getChildren()]}")
-        log.info(f" edges = {[str(edge) for edge in graph.getContainedEdges()]}")
+        # self.remove_floating_nodes(module, graph)
         return graph
 
     # Graph creation and layout
@@ -129,36 +129,61 @@ class ElkInterface:
         nodes = {}
         ports = {}
         port_size = 0
+
+        # create top level node
+        node = ElkGraphUtil.createNode(graph)
+        node.setIdentifier(module.name)
+        node.setWidth(1)
+        node.setHeight(1)
+        node.setX(1)
+        node.setY(1)
+        node.setProperty(CoreOptions.PORT_CONSTRAINTS, PortConstraints.FIXED_POS)
+        nodes[module.name] = node
+
         for inst in module.instances.values():
-            node = ElkGraphUtil.createNode(graph)
-            node.setIdentifier(inst.name)
             # leaf? get from gv run. module? get from previous elk run and assume pin locs are still valid
             (x1, y1, x2, y2) = inst.draw.efig
             if inst.module.is_leaf:
                 (width, height) = (x2 - x1, y2 - y1)
             else:
                 (width, height) = inst.module.draw.efig
-
-            node.setWidth(width)
-            node.setHeight(height)
-            node.setX(x1)
-            node.setY(y1)
-            node.setProperty(CoreOptions.PORT_CONSTRAINTS, PortConstraints.FIXED_POS)
-            if inst.draw.rank >= 0:
-                node.setProperty(LayeredOptions.LAYERING_LAYER_ID, inst.draw.rank)
-                node.setProperty(LayeredOptions.PARTITIONING_PARTITION, Integer(inst.draw.rank))
-            # node.setProperty(CoreOptions.PORT_CONSTRAINTS, PortConstraints.FIXED_POS)
-            nodes[inst.name] = node
+            port = ElkGraphUtil.createPort(node)
+            port.setWidth(width)
+            port.setHeight(height)
+            port.setX(x1)
+            port.setY(y1)
+            port.setIdentifier(inst.name)
             for pin in inst.pins.values():
-                port = ElkGraphUtil.createPort(node)
-                port.setIdentifier(pin.full_name)
-                port.setWidth(port_size)
-                port.setHeight(port_size)
-                (x, y) = pin.draw.efig
-                port.setX(x - x1)
-                port.setY(y - y1)
-                ports[pin.full_name] = port
+                if pin.draw.efig:
+                    port = ElkGraphUtil.createPort(node)
+                    port.setIdentifier(pin.full_name)
+                    port.setWidth(port_size)
+                    port.setHeight(port_size)
+                    (x, y) = pin.draw.efig
+                    port.setX(x)
+                    port.setY(y)
+                    direction = self.get_port_direction(pin.draw.efig, inst.draw.efig)
+                    port.setProperty(CoreOptions.PORT_SIDE, direction)
+                    ports[pin.full_name] = port
         return nodes, ports
+
+    def get_port_direction(self, pin_loc: Tuple[float, float], inst_loc: Tuple[float, float, float, float]) -> PortSide:
+        """
+        Return which side of the instance boundary the pin is closest to.
+        """
+        x1, y1, x2, y2 = inst_loc
+        x, y = pin_loc
+
+        distances = {
+            PortSide.WEST: abs(x - x1),
+            PortSide.EAST: abs(x2 - x),
+            PortSide.NORTH: abs(y - y1),
+            PortSide.SOUTH: abs(y2 - y),
+        }
+
+        # side with the smallest distance
+        closest_side: PortSide = min(distances, key=lambda s: distances[s])
+        return closest_side
 
     def create_edges(self, module, graph, nodes, ports, stage):
         """
@@ -269,7 +294,6 @@ class ElkInterface:
         edge.setIdentifier(net_id)
         edge.getSources().add(src_node)
         edge.getTargets().add(dst_node)
-
         return edge
 
     def _create_star_edges(self, net, pins, nodes, ports, graph):
@@ -346,6 +370,7 @@ class ElkInterface:
     # Geometry extraction and evaluation
     def extract_geometry(self, graph, module):
         def walk_graph_and_extract_data(node, module):
+            """
             is_root = node.getParent() is None
             if is_root:
                 module.draw.efig = (node.getWidth(), node.getHeight())
@@ -364,7 +389,8 @@ class ElkInterface:
                     pin.draw.efig = (
                         port.getX(),
                         port.getY(),
-                    )
+               for node in graph.getChildren():     )
+            """
 
             for edge in node.getContainedEdges():
                 net_id = edge.getIdentifier()
