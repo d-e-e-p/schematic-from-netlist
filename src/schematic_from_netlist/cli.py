@@ -5,10 +5,9 @@ import os
 import colorlog
 
 from schematic_from_netlist.graph.gen_sch_data import GenSchematicData
-from schematic_from_netlist.graph.graph_partition import HypergraphPartitioner
+from schematic_from_netlist.graph.global_router import GlobalRouter
 from schematic_from_netlist.graph.group_maker import SteinerGroupMaker
 from schematic_from_netlist.graph.layout_optimizer import LayoutOptimizer
-from schematic_from_netlist.interfaces.elk import ElkInterface
 from schematic_from_netlist.interfaces.graphviz import Graphviz
 from schematic_from_netlist.interfaces.ltspice_writer import LTSpiceWriter
 from schematic_from_netlist.interfaces.verilog_parser import VerilogParser
@@ -31,9 +30,6 @@ def load_netlist(netlist_file: str, debug: bool):
     db.dump_to_table("initial_parse")
     db.determine_design_hierarchy()
 
-    db.buffer_multi_fanout_nets()  # Insert fanout buffers
-    db.dump_to_table("after_initial_buffering")
-
     return db
 
 
@@ -41,13 +37,21 @@ def produce_graph(db):
     """Build Graphviz layouts for groups and top-level interconnect."""
 
     gv = Graphviz(db)
-    elk = ElkInterface(db)
+    router = GlobalRouter(db)
 
-    # graphviz -> extract macro and port locations -> remove buffers -> elk for routing
+    # graphviz -> extract macro and port locations -> remove buffers
+    db.buffer_multi_fanout_nets()  # Insert fanout buffers
+    db.dump_to_table("multi_fanout_insertion")
     gv.generate_layout_figures()
     db.remove_multi_fanout_buffers()
-    db.gfig2efig()
-    elk.generate_layout_figures()
+    db.fig2geom()
+    junctions = router.insert_routing_junctions()
+    db.insert_route_guide_buffers(junctions)
+    db.dump_to_table("route_guide_insertion")
+    db.geom2fig()
+    gv.generate_layout_figures()
+    db.remove_multi_fanout_buffers()
+    db.geom2shape()
 
 
 def generate_schematic(db, output_dir: str):

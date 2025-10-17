@@ -156,7 +156,7 @@ class Graphviz:
             is_leaf = not inst.module or inst.module.is_leaf
 
             if not is_leaf:
-                fig = inst.module.draw.gfig
+                fig = inst.module.draw.fig
                 attr["shape"] = "box"
                 attr["width"] = round(fig[0] / 72, 1)
                 attr["height"] = round(fig[1] / 72, 1)
@@ -528,7 +528,7 @@ class Graphviz:
         bb = A.graph_attr["bb"]
         if bb:
             xmin, ymin, xmax, ymax = map(float, bb.split(","))
-            module.draw.gfig = (abs(xmax - xmin), abs(ymax - ymin))
+            module.draw.fig = (abs(xmax - xmin), abs(ymax - ymin))
 
         for node in A.nodes():
             if node.name.startswith("stub_") or node.name.startswith("cluster_"):
@@ -544,7 +544,7 @@ class Graphviz:
                 ymin = y - h / 2
                 xmax = x + w / 2
                 ymax = y + h / 2
-                module.instances[node.name].draw.gfig = (xmin, ymin, xmax, ymax)
+                module.instances[node.name].draw.fig = (xmin, ymin, xmax, ymax)
 
         def parse_edge_pin_positions(edge):
             pos_string = edge.attr.get("pos")
@@ -585,11 +585,11 @@ class Graphviz:
             # with tail
             if head_pin and head_coord:
                 pin = module.pins.get(head_pin)
-                pin.draw.gfig = head_coord
+                pin.draw.fig = head_coord
             if tail_pin and tail_coord:
                 pin = module.pins.get(tail_pin)
-                pin.draw.gfig = tail_coord
+                pin.draw.fig = tail_coord
             if net_name:
-                module.nets[net_name].draw.gfig.extend(wire_segments)
+                module.nets[net_name].draw.fig.extend(wire_segments)
 
         log.info("Geometry extracted")

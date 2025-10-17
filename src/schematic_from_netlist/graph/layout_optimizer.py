@@ -47,12 +47,12 @@ class LayoutOptimizer:
         Place and orient a new macro shape to minimize distance to existing pins.
         """
         log.info(f"Optimizing instance {inst.name}")
-        log.info(f"  Initial geom: {inst.geom}, orient: {inst.orient}")
+        log.info(f"  Initial geom: {inst.draw.geom}, orient: {inst.draw.geom.orient}")
         for name, pin in inst.pins.items():
-            log.info(f"  Pin {name}: {pin.geom}")
+            log.info(f"  Pin {name}: {pin.draw.geom}")
 
-        old_geom = inst.geom
-        old_pins = [p.geom for p in inst.pins.values()]
+        old_geom = inst.draw.geom
+        old_pins = [p.draw.geom for p in inst.pins.values()]
         pin_names = list(inst.pins.keys())
         centroid = old_geom.centroid
 
@@ -83,10 +83,10 @@ class LayoutOptimizer:
         angle = orientations[best_orient]
         new_geom = translate(rotate(macro_box, angle, origin="center"), xoff=final_translation_x, yoff=final_translation_y)
 
-        inst.geom = new_geom
+        inst.draw.geom = new_geom
         inst.orient = best_orient
 
-        new_pin_geoms = [
+        new_pin.draw.geoms = [
             Point(
                 final_translation_x + best_rotated_pins_local[best_pin_map[0]].x,
                 final_translation_y + best_rotated_pins_local[best_pin_map[0]].y,
@@ -99,27 +99,27 @@ class LayoutOptimizer:
 
         for i, pin_name in enumerate(pin_names):
             pin = inst.pins[pin_name]
-            old_pin_geom = old_pins[i]
-            new_pin_geom = new_pin_geoms[i]
+            old_pin.draw.geom = old_pins[i]
+            new_pin.draw.geom = new_pin.draw.geoms[i]
 
             if pin.net:
                 log.info(
-                    f"  Net {pin.net.name} updated: {pin.net.geom} with new_segment={LineString([old_pin_geom, new_pin_geom])}"
+                    f"  Net {pin.net.name} updated: {pin.net.draw.geom} with new_segment={LineString([old_pin.draw.geom, new_pin.draw.geom])}"
                 )
-                new_segment = LineString([old_pin_geom, new_pin_geom])
-                if pin.net.geom and hasattr(pin.net.geom, "geoms"):
-                    existing_lines = list(pin.net.geom.geoms)
+                new_segment = LineString([old_pin.draw.geom, new_pin.draw.geom])
+                if pin.net.draw.geom and hasattr(pin.net.draw.geom, "geoms"):
+                    existing_lines = list(pin.net.draw.geom.geoms)
                 else:
                     existing_lines = []
-                pin.net.geom = MultiLineString(existing_lines + [new_segment])
+                pin.net.draw.geom = MultiLineString(existing_lines + [new_segment])
 
-            pin.geom = new_pin_geom
+            pin.draw.geom = new_pin.draw.geom
 
-        log.info(f"  Final geom: {inst.geom}, orient: {inst.orient}")
+        log.info(f"  Final geom: {inst.draw.geom}, orient: {inst.orient}")
         for name, pin in inst.pins.items():
-            log.info(f"  Pin {name}: {pin.geom}")
+            log.info(f"  Pin {name}: {pin.draw.geom}")
 
-    def _plot_net_geometry(self, net, geom, stage, old_geom=None, all_macros=None):
+    def _plot_net.draw.geometry(self, net, geom, stage, old_geom=None, all_macros=None):
         fig, ax = plt.subplots()
         ax.set_title(f"Net: {net.name} - Stage: {stage}")
         log.info(f"Plotting net {net.name} - Stage: {stage}")
@@ -180,9 +180,9 @@ class LayoutOptimizer:
 
     def beautify_routes(self):
         log.info("Starting route beautification...")
-        all_macros = {inst.name: inst.geom for inst in self.db.top_module.get_all_instances().values()}
+        all_macros = {inst.name: inst.draw.geom for inst in self.db.top_module.get_all_instances().values()}
         clearance = 2.0
-        routed_net_geoms = []
+        routed_net.draw.geoms = []
         epsilon = -1e-9  # A small negative buffer to shrink macros slightly
 
         # Sort nets by name for deterministic routing order
@@ -194,10 +194,10 @@ class LayoutOptimizer:
                 continue
 
             log.info(f"Beautifying net {net.name}")
-            self._plot_net_geometry(net, net.geom, "initial", all_macros=all_macros.values())
+            self._plot_net.draw.geometry(net, net.draw.geom, "initial", all_macros=all_macros.values())
 
             for pin in net.pins:
-                pin.geom = self._snap_to_grid(pin.geom)
+                pin.draw.geom = self._snap_to_grid(pin.draw.geom)
 
             # --- Obstacle Calculation ---
             # Find the macros connected to the current net's pins
@@ -215,8 +215,8 @@ class LayoutOptimizer:
                 obstacles.append(macro.buffer(epsilon))
 
             # Add all previously routed nets, buffered by clearance, as obstacles
-            if routed_net_geoms:
-                obstacles.append(unary_union(routed_net_geoms).buffer(clearance))
+            if routed_net.draw.geoms:
+                obstacles.append(unary_union(routed_net.draw.geoms).buffer(clearance))
 
             obstacle_union = unary_union(obstacles) if obstacles else None
             # --- End Obstacle Calculation ---
@@ -230,26 +230,26 @@ class LayoutOptimizer:
                 if isinstance(merged_geom, LineString):
                     merged_geom = MultiLineString([merged_geom])
 
-                self._plot_net_geometry(net, merged_geom, "after_astar", old_geom=net.geom, all_macros=all_macros.values())
+                self._plot_net.draw.geometry(net, merged_geom, "after_astar", old_geom=net.draw.geom, all_macros=all_macros.values())
                 self._check_connectivity(net, merged_geom)
-                net.geom = merged_geom
-                routed_net_geoms.append(merged_geom)  # Add to obstacles for the next net
+                net.draw.geom = merged_geom
+                routed_net.draw.geoms.append(merged_geom)  # Add to obstacles for the next net
             else:
                 log.warning(f"  Routing failed for net {net.name}, keeping original geometry.")
-                self._plot_net_geometry(net, net.geom, "final_failed", all_macros=all_macros.values())
+                self._plot_net.draw.geometry(net, net.draw.geom, "final_failed", all_macros=all_macros.values())
 
     def reroute_net_with_astar(self, net, obstacle_union):
         pins = list(net.pins)
-        pin_geoms = [p.geom for p in pins]
-        if len(pin_geoms) < 2:
+        pin.draw.geoms = [p.geom for p in pins]
+        if len(pin.draw.geoms) < 2:
             return None
 
         # Build a Minimum Spanning Tree (MST) to define the primary connection topology
         pin_graph = nx.Graph()
-        for i in range(len(pin_geoms)):
-            for j in range(i + 1, len(pin_geoms)):
-                p1 = pin_geoms[i]
-                p2 = pin_geoms[j]
+        for i in range(len(pin.draw.geoms)):
+            for j in range(i + 1, len(pin.draw.geoms)):
+                p1 = pin.draw.geoms[i]
+                p2 = pin.draw.geoms[j]
                 dist = abs(p1.x - p2.x) + abs(p1.y - p2.y)
                 pin_graph.add_edge(i, j, weight=dist)
         mst = nx.minimum_spanning_tree(pin_graph)
@@ -257,8 +257,8 @@ class LayoutOptimizer:
         # --- Pass 1: Route all MST edges independently ---
         routed_segments = []
         for u, v in mst.edges():
-            start_pin = pin_geoms[u]
-            end_pin = pin_geoms[v]
+            start_pin = pin.draw.geoms[u]
+            end_pin = pin.draw.geoms[v]
             path = self._astar_path(start_pin, end_pin, obstacle_union)
             if len(path) > 1:
                 routed_segments.append(LineString(path))
@@ -576,7 +576,7 @@ class LayoutOptimizer:
     def _get_pin_macro(self, pin):
         for inst in self.db.top_module.get_all_instances().values():
             if pin in inst.pins.values():
-                return inst.geom
+                return inst.draw.geom
         return None
 
     def _build_spatial_index(self, geoms):
@@ -595,6 +595,6 @@ class LayoutOptimizer:
 
         # Decompose the final, beautiful routes into simple segments for the writer
         for net in self.db.top_module.nets.values():
-            net.geom = self._decompose_into_segments(net.geom)
+            net.draw.geom = self._decompose_into_segments(net.draw.geom)
 
         self.db.geom2shape()

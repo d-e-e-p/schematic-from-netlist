@@ -153,6 +153,8 @@ class ElkInterface:
             port.setX(x1)
             port.setY(y1)
             port.setIdentifier(inst.name)
+            # NODE {id} {x1} {y1} {x2} {y2}
+            log.info(f"R NODE {inst.name} {x1} {y1} {x2} {y2}")
             for pin in inst.pins.values():
                 if pin.draw.efig:
                     port = ElkGraphUtil.createPort(node)
@@ -163,6 +165,8 @@ class ElkInterface:
                     port.setX(x)
                     port.setY(y)
                     direction = self.get_port_direction(pin.draw.efig, inst.draw.efig)
+                    # PORT {port id} {node id} {side} {x} {y}
+                    log.info(f"R PORT {pin.full_name} {inst.name} {direction} {x - x1} {y - y1}")
                     port.setProperty(CoreOptions.PORT_SIDE, direction)
                     ports[pin.full_name] = port
         return nodes, ports
@@ -294,6 +298,9 @@ class ElkInterface:
         edge.setIdentifier(net_id)
         edge.getSources().add(src_node)
         edge.getTargets().add(dst_node)
+        # PEDGEP {edge id} {source node id} {target node id} {source port id} {target port id}
+        log.info(f"R PEDGEP {net_id} {src_pin.instance.name} {dst_pin.instance.name} {src_pin.full_name} {dst_pin.full_name}")
+
         return edge
 
     def _create_star_edges(self, net, pins, nodes, ports, graph):

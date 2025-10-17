@@ -484,17 +484,20 @@ class NetlistOperationsMixin:
     def clear_all_shapes(self):
         return self.design.draw.clear_all_shapes()
 
-    def gfig2efig(self):
-        return self.design.draw.gfig2efig()
-
-    def efig2shape(self):
-        return self.design.draw.efig2shape()
+    def fig2shape(self):
+        return self.design.draw.fig2shape()
 
     def geom2shape(self):
         return self.design.draw.geom2shape()
 
     def shape2geom(self):
         return self.design.draw.shape2geom()
+
+    def fig2geom(self):
+        return self.design.draw.fig2geom()
+
+    def geom2fig(self):
+        return self.design.draw.geom2fig()
 
     def uniquify_module_names(self):
         """needed to have each ref having different shape"""

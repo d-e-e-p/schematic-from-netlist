@@ -7,34 +7,29 @@ if TYPE_CHECKING:
 
 from shapely.geometry import LineString, MultiLineString, Point, Polygon, box
 
-scaling_from_gv_to_elk = 0.24  # from graphviz to LTspice, about 72/0.24 = 300dpi
-scaling_from_elk_to_ltspice = 1.0  # from elk to LTspice,
+# TODO: scaling from gv should depend on pin-to-pin or wire-to-wire spacing
+scaling_from_gv_to_dr = 0.24  # from graphviz to LTspice, about 72/0.24 = 300dpi
+scaling_from_dr_to_ltspice = 1.0  # from dr to LTspice,
+
+# fig   : extracted from graphviz
+# shape : used by LTspice
+# geom  : used for shapely optimizations
 
 
 # --------------------------------------
 # Common geometry mixin for rectangle objects
 # --------------------------------------
 class RectanglePhysical:
-    gfig: Optional[Tuple[float, float, float, float]] = None
-    efig: Optional[Tuple[float, float, float, float]] = None
+    fig: Optional[Tuple[float, float, float, float]] = None
     shape: Optional[Tuple[int, int, int, int]] = None
     geom: Optional[Polygon] = None
 
-    def gfig2efig(self):
-        if self.gfig is None:
-            self.efig = None
-            return self.efig
-        s = scaling_from_gv_to_elk
-        x1, y1, x2, y2 = self.gfig
-        self.efig = (round(x1 * s, 1), round(y1 * s, 1), round(x2 * s, 1), round(y2 * s, 1))
-        return self.efig
-
-    def efig2shape(self):
-        if self.efig is None:
+    def fig2shape(self):
+        if self.fig is None:
             self.shape = None
-            return self.shape
-        s = scaling_from_elk_to_ltspice
-        x1, y1, x2, y2 = self.efig
+            return self.fig
+        s = scaling_from_gv_to_dr
+        x1, y1, x2, y2 = self.fig
         self.shape = (int(round(x1 * s)), int(round(y1 * s)), int(round(x2 * s)), int(round(y2 * s)))
         return self.shape
 
@@ -56,26 +51,16 @@ class RectanglePhysical:
 
 
 class PointPhysical:
-    gfig: Optional[Tuple[float, float]] = None
-    efig: Optional[Tuple[float, float]] = None
+    fig: Optional[Tuple[float, float]] = None
     shape: Optional[Tuple[int, int]] = None
     geom: Optional[Point] = None
 
-    def gfig2efig(self):
-        if self.gfig is None:
-            self.efig = None
-            return self.efig
-        s = scaling_from_gv_to_elk
-        x, y = self.gfig
-        self.efig = (round(x * s, 1), round(y * s, 1))
-        return self.efig
-
-    def efig2shape(self):
-        if self.efig is None:
+    def fig2shape(self):
+        if self.fig is None:
             self.shape = None
             return self.shape
-        s = scaling_from_elk_to_ltspice
-        x, y = self.efig
+        s = scaling_from_gv_to_dr
+        x, y = self.fig
         self.shape = (int(round(x * s)), int(round(y * s)))
         return self.shape
 
@@ -113,28 +98,23 @@ class PinPhysical(PointPhysical):
 # -----------------------------
 @dataclass
 class NetPhysical:
-    gfig: List[Tuple[Tuple[float, float], Tuple[float, float]]] = field(default_factory=list)
-    efig: List[Tuple[Tuple[float, float], Tuple[float, float]]] = field(default_factory=list)
+    fig: List[Tuple[Tuple[float, float], Tuple[float, float]]] = field(default_factory=list)
     shape: List[Tuple[Tuple[int, int], Tuple[int, int]]] = field(default_factory=list)
     geom: Optional[MultiLineString] = None
     buffer_patch_points: List[Tuple[Tuple[int, int], Tuple[int, int]]] = field(default_factory=list)
 
-    # don't bother to translate nets going from gv to elk
-    def gfig2efig(self):
-        pass
-
-    def efig2shape(self):
-        if not self.efig:
+    def fig2shape(self):
+        if not self.fig:
             self.shape = []
             return self.shape
 
         def scale_point(point: tuple[float, float]) -> tuple[int, int]:
             """Scale a single points (x,y)"""
-            s = scaling_from_elk_to_ltspice
+            s = scaling_from_gv_to_dr
             x, y = point
             return (int(round(x * s)), int(round(y * s)))
 
-        segments = self.efig
+        segments = self.fig
         for seg_start, seg_end in segments:
             pt_start = scale_point(seg_start)
             pt_end = scale_point(seg_end)
@@ -214,12 +194,12 @@ class DesignPhysical(RectanglePhysical):
                     if hasattr(obj, "draw"):
                         fn(obj.draw)
 
-    def gfig2efig(self):
-        self._for_each_draw_obj(lambda d: d.gfig2efig())
-
-    def efig2shape(self):
+    def fig2shape(self):
         self.clear_all_shapes()
-        self._for_each_draw_obj(lambda d: d.efig2shape())
+        self._for_each_draw_obj(lambda d: d.fig2shape())
+
+    def shape2fig(self):
+        self._for_each_draw_obj(lambda d: d.geom2shape())
 
     def geom2shape(self):
         self.clear_all_shapes()
@@ -227,3 +207,11 @@ class DesignPhysical(RectanglePhysical):
 
     def shape2geom(self):
         self._for_each_draw_obj(lambda d: d.shape2geom())
+
+    def fig2geom(self):
+        self.fig2shape()
+        self.shape2geom()
+
+    def geom2fig(self):
+        self.geom2shape()
+        self.shape2fig()
