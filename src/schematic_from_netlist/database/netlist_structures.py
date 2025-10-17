@@ -268,6 +268,9 @@ class Module:
                 all_pins.update(child.get_all_pins(True))
         return all_pins
 
+    def __hash__(self):
+        return hash(self.name) & 0xFFFFFFFF
+
 
 # -----------------------------
 # Module

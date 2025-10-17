@@ -21,8 +21,7 @@ class GenSchematicData:
         self.block_moat_size_in_gridlines = 0
 
     def generate_schematic(self):
-        self.db.clear_all_shapes()
-        self.db.efig2shape()
+        self.db.fig2shape()
         self.mark_multi_fanout_buffers()
         # self.find_block_bounding_boxes()
         # self.find_net_shapes()

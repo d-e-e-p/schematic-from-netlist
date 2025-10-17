@@ -10,6 +10,7 @@ from typing import Dict, List, Optional
 
 from tabulate import tabulate
 
+from schematic_from_netlist.graph.global_router import Junction
 from schematic_from_netlist.graph.graph_partition import Edge, HypergraphData
 
 from .netlist_structures import Design, Instance, Module, Net, Pin, PinDirection
@@ -213,6 +214,23 @@ class NetlistOperationsMixin:
             original_net = module.nets.get(original_net_name)
             original_net.draw.shape.extend(net.draw.shape)
             del module.nets[net.name]
+
+    def insert_route_guide_buffers(self, junctions):
+        logging.info(f"Inserting route guide buffers ")
+        """
+        for module, topos in junctions.items():
+            for topo in topos:
+                logging.info(f"Junction for module {module.name} {topo.net.name=} {topo.net.num_conn=}")
+                for junction in topo.junctions:
+                    logging.info(f"Inserting {junction.name=} at {junction.location}")
+                    for child in junction.children:
+                        if isinstance(child, Junction):
+                            logging.info(f"Inserting J {child.name=} ")
+                        elif isinstance(child, Pin):
+                            logging.info(f"Inserting P {child.name=} ")
+        """
+        breakpoint()
+        exit()
 
     def create_buffering_for_groups(self, module, net, ordering, collections):
         """deal with fanout routing"""
