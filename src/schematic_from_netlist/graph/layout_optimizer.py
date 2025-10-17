@@ -119,7 +119,7 @@ class LayoutOptimizer:
         for name, pin in inst.pins.items():
             log.info(f"  Pin {name}: {pin.draw.geom}")
 
-    def _plot_net.draw.geometry(self, net, geom, stage, old_geom=None, all_macros=None):
+    def _plot_net_geom(self, net, geom, stage, old_geom=None, all_macros=None):
         fig, ax = plt.subplots()
         ax.set_title(f"Net: {net.name} - Stage: {stage}")
         log.info(f"Plotting net {net.name} - Stage: {stage}")
@@ -230,7 +230,9 @@ class LayoutOptimizer:
                 if isinstance(merged_geom, LineString):
                     merged_geom = MultiLineString([merged_geom])
 
-                self._plot_net.draw.geometry(net, merged_geom, "after_astar", old_geom=net.draw.geom, all_macros=all_macros.values())
+                self._plot_net.draw.geometry(
+                    net, merged_geom, "after_astar", old_geom=net.draw.geom, all_macros=all_macros.values()
+                )
                 self._check_connectivity(net, merged_geom)
                 net.draw.geom = merged_geom
                 routed_net.draw.geoms.append(merged_geom)  # Add to obstacles for the next net
