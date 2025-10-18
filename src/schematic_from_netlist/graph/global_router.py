@@ -88,7 +88,7 @@ class GlobalRouter:
                     geoms.extend(list(i.draw.geom.geoms))
         return unary_union(geoms) if geoms else Polygon()
 
-    def _get_halo_geometries(self, macros: Polygon, buffer_dist: float = 5.0) -> Polygon:
+    def _get_halo_geometries(self, macros: Polygon, buffer_dist: int = 10) -> Polygon:
         """Get halo geometries around macros."""
         if macros.is_empty:
             return Polygon()
@@ -249,9 +249,7 @@ class GlobalRouter:
 
                     candidate_paths = self._generate_candidate_paths(p1, p2, halos)
                     for path_geom in candidate_paths:
-                        cost = self._calculate_path_cost(
-                            path_geom, macros, halos, congestion_idx, other_nets_geoms
-                        )
+                        cost = self._calculate_path_cost(path_geom, macros, halos, congestion_idx, other_nets_geoms)
                         if cost < min_cost:
                             min_cost = cost
                             best_path = path_geom
@@ -267,9 +265,7 @@ class GlobalRouter:
 
             corner = self._get_l_path_corner(best_path)
             junction_name = f"J_{net.name}_{len(topology.junctions)}"
-            junction = Junction(
-                name=junction_name, location=corner, children={best_new_pin, best_connection_point}
-            )
+            junction = Junction(name=junction_name, location=corner, children={best_new_pin, best_connection_point})
 
             topology.junctions.append(junction)
             tree_connection_points.add(junction)
@@ -374,7 +370,7 @@ class GlobalRouter:
                         restricted_area = unary_union([macros, halos])
                         if not restricted_area.boundary.is_empty:
                             new_loc = nearest_points(new_loc, restricted_area.boundary)[1]
-                    
+
                     j.location = new_loc
 
     def _rebuild_net_geometry(self, topology: Topology):
@@ -387,17 +383,24 @@ class GlobalRouter:
                     end_point = child.draw.geom
                     if not isinstance(end_point, Point):
                         end_point = end_point.centroid
+                    end_point = (end_point.x, end_point.y)
                 else:  # Junction
                     end_point = child.location
                 new_geoms.append(LineString([start_point, end_point]))
 
         if new_geoms:
-            # unary_union handles any duplicate lines
             merged_geom = linemerge(unary_union(new_geoms))
+
+            # Normalize to MultiLineString
+            if isinstance(merged_geom, LineString):
+                merged_geom = MultiLineString([merged_geom])
+            elif not isinstance(merged_geom, MultiLineString):
+                # handle any other unexpected geometry types
+                merged_geom = MultiLineString([g for g in new_geoms if isinstance(g, LineString)])
+
             topology.net.draw.geom = merged_geom
         else:
             topology.net.draw.geom = None
-
 
     def _log_junction_summary(self):
         """Log detailed summary of inserted junctions."""

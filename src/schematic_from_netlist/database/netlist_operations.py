@@ -292,8 +292,6 @@ class NetlistOperationsMixin:
                     else:
                         logging.info(f" unknown child type {type(child)}")
 
-        exit()
-
     def create_buffering_for_groups(self, module, net, ordering, collections):
         """deal with fanout routing"""
         original_net_name = net.name

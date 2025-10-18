@@ -233,7 +233,8 @@ class Graphviz:
         with warnings.catch_warnings():
             # warnings.filterwarnings("ignore", category=RuntimeWarning)
             # A.draw(f"data/png/post_{module.name}.png", format="png")
-            log.info(f"TODO add png generation")
+            log.info(f"TODO : fix png generation")
+            os.system(f"neato -v -y -n2 -Tpng -o data/png/post_{module.name}.png data/dot/post_{module.name}.dot")
 
     def build_graphviz_data(self):
         """
@@ -498,6 +499,7 @@ class Graphviz:
             # sep="+2,2",
             sep="+20,20",
             esep="+2,2",
+            nodesep="+2,2",  # minimum space between two adjacent nodes in the same rank,
             epsilon="1e-7",
             rankdir="LR",
             start="rand",  # better escape from local minima
@@ -506,7 +508,7 @@ class Graphviz:
             splines="ortho",
         )
 
-        A.node_attr.update(fillcolor="white", margin="0,0", width="0.4", height="0.3", fixedsize="true")
+        A.node_attr.update(fillcolor="white", margin="0,0", width="0.4", height="0.3", fixedsize="true", label="")
 
         A.edge_attr.update(len="0.3", weight="1.5")
         A.edge_attr.update(
