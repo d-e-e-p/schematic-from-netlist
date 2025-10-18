@@ -23,7 +23,7 @@ from schematic_from_netlist.database.netlist_structures import Module, Net, Pin
 from schematic_from_netlist.graph.geom_utils import Geom
 
 # Pattern Route parameters
-ROUTE_WEIGHTS = {"wirelength": 1.0, "congestion": 20.0, "halo": 300.0, "crossing": 5.0, "macro": 500.0}
+ROUTE_WEIGHTS = {"wirelength": 1.0, "congestion": 2.0, "halo": 5.0, "crossing": 5.0, "macro": 1000.0}
 MAX_PATH_COST = 100.0  # Mean path cost multiplier for pruning
 GRID_SPACING = 1.0  # Track spacing for snapping
 MAX_FANOUT = 15  # Maximum junction fanout
@@ -346,7 +346,7 @@ class GlobalRouter:
         self._optimize_junction_locations(topology, macros, halos)
 
         # 7. Slide junctions to reduce cost
-        self._slide_junctions(topology, macros, halos, congestion_idx, other_nets_geoms)
+        self._slide_junctions(topology, macros, halos, congestion_idx, other_nets_geoms, module)
 
         # 8. Finalize net geometry
         self._rebuild_net_geometry(topology)
@@ -442,7 +442,14 @@ class GlobalRouter:
                     j.location = new_loc
 
     def _slide_junctions(
-        self, topology: Topology, macros: Polygon, halos: Polygon, congestion_idx, other_nets_geoms, search_step_size: int = 4
+        self,
+        topology: Topology,
+        macros: Polygon,
+        halos: Polygon,
+        congestion_idx,
+        other_nets_geoms,
+        module: Module,
+        search_step_size: int = 4,
     ):
         """
         Post-processing step to slide each junction in all directions to see if cost is reduced.
@@ -452,10 +459,13 @@ class GlobalRouter:
         max_iterations = 1000  # To prevent infinite loops
         for i in range(max_iterations):
             cost_reduced = False
-            for junction in topology.junctions:
+            for j_idx, junction in enumerate(topology.junctions):
                 initial_location = junction.location
                 min_cost = self._calculate_total_cost(topology, macros, halos, congestion_idx, other_nets_geoms)
                 best_location = initial_location
+
+                # Store costs for heatmap
+                tried_locations_costs = {(initial_location.x, initial_location.y): min_cost}
 
                 # Explore surrounding spots
                 for dx in range(-search_step_size, search_step_size + 1, search_step_size):
@@ -464,21 +474,55 @@ class GlobalRouter:
                             continue
 
                         new_location = Point(initial_location.x + dx, initial_location.y + dy)
+
+                        # Disallow placement in macros or halos
+                        if new_location.within(macros) or new_location.within(halos):
+                            tried_locations_costs[(new_location.x, new_location.y)] = float("inf")
+                            continue
+
                         junction.location = new_location
 
                         # Recalculate cost with the new junction location
-                        current_cost = self._calculate_total_cost(topology, macros, halos, congestion_idx, other_nets_geoms)
+                        plot_filename_prefix = f"slide_{i}_{j_idx}_{int(new_location.x)}_{int(new_location.y)}_"
+                        current_cost = self._calculate_total_cost(
+                            topology,
+                            macros,
+                            halos,
+                            congestion_idx,
+                            other_nets_geoms,
+                            debug_plot=True,
+                            module=module,
+                            plot_filename_prefix=plot_filename_prefix,
+                        )
+                        tried_locations_costs[(new_location.x, new_location.y)] = current_cost
                         log.info(f"  Trying {new_location} (cost {current_cost} / {min_cost})")
 
                         if current_cost < min_cost:
                             min_cost = current_cost
                             best_location = new_location
                         # self._plot_junction_summary(f"_slide_junctions_{i}_", str(current_cost))
+
+                # Generate heatmap for the junction's tried locations
+                self._plot_junction_move_heatmap(
+                    module,
+                    topology,
+                    junction,
+                    tried_locations_costs,
+                    best_location,
+                    min_cost,
+                    macros,
+                    halos,
+                    f"slide_{i}_{j_idx}_{junction.name}",
+                )
+
                 # If a better location is found, move the junction
                 if best_location != initial_location:
                     junction.location = best_location
                     cost_reduced = True
                     log.info(f"  Moved junction {junction.name} to {best_location} (cost reduced)")
+                else:
+                    # Restore original location if no improvement
+                    junction.location = initial_location
 
             if not cost_reduced:
                 log.info(f"Junction sliding for net {topology.net.name} converged after {i + 1} iterations.")
@@ -486,9 +530,20 @@ class GlobalRouter:
         else:
             log.warning(f"Junction sliding for net {topology.net.name} did not converge after {max_iterations} iterations.")
 
-    def _calculate_total_cost(self, topology: Topology, macros: Polygon, halos: Polygon, congestion_idx, other_nets_geoms):
+    def _calculate_total_cost(
+        self,
+        topology: Topology,
+        macros: Polygon,
+        halos: Polygon,
+        congestion_idx,
+        other_nets_geoms,
+        debug_plot: bool = False,
+        module: Optional[Module] = None,
+        plot_filename_prefix: str = "",
+    ):
         """Calculate the total cost of all paths in a topology."""
         total_cost = 0.0
+        paths_with_metrics = []
         for junction in topology.junctions:
             p1 = junction.location
             for child in junction.children:
@@ -506,7 +561,193 @@ class GlobalRouter:
                 path = LineString([p1, p2])
                 metrics = self._calculate_path_cost(path, macros, halos, congestion_idx, other_nets_geoms)
                 total_cost += metrics.total_cost
+                paths_with_metrics.append((path, metrics))
+
+        if debug_plot and module:
+            timestamp = time.strftime("%Y%m%d-%H%M%S")
+            filename = f"{plot_filename_prefix}{module.name}_{topology.net.name}_{timestamp}.png"
+            self._plot_cost_calculation(module, topology, paths_with_metrics, macros, halos, filename)
+
         return total_cost
+
+    def _plot_junction_move_heatmap(
+        self,
+        module: Module,
+        topology: Topology,
+        moved_junction: Junction,
+        tried_locations_costs: Dict[Tuple[float, float], float],
+        best_location: Point,
+        min_cost: float,
+        macros: Polygon,
+        halos: Polygon,
+        filename_prefix: str,
+    ):
+        """Generate a heatmap of junction move costs."""
+        out_dir = "data/images/heatmaps"
+        os.makedirs(out_dir, exist_ok=True)
+
+        fig, ax = plt.subplots(figsize=(12, 12))
+        ax.set_aspect("equal", adjustable="box")
+        ax.set_title(f"Junction Move Heatmap: {moved_junction.name} in {topology.net.name}")
+
+        # --- Draw macros and halos ---
+        if not macros.is_empty:
+            if isinstance(macros, MultiPolygon):
+                for sub in macros.geoms:
+                    x, y = sub.exterior.xy
+                    ax.fill(x, y, color="lightgrey", alpha=0.6)
+            else:
+                x, y = macros.exterior.xy
+                ax.fill(x, y, color="lightgrey", alpha=0.6)
+        if not halos.is_empty:
+            if isinstance(halos, MultiPolygon):
+                for sub in halos.geoms:
+                    x, y = sub.exterior.xy
+                    ax.plot(x, y, color="blue", ls="--", lw=1)
+            else:
+                x, y = halos.exterior.xy
+                ax.plot(x, y, color="blue", ls="--", lw=1)
+
+        # --- Draw other junctions and pins for context ---
+        for junction in topology.junctions:
+            if junction is not moved_junction:
+                jx, jy = junction.location.x, junction.location.y
+                ax.scatter(jx, jy, c="grey", s=50, marker="x")
+        pins = [p for p in topology.net.pins.values() if hasattr(p.draw, "geom") and p.draw.geom is not None]
+        for pin in pins:
+            pgeom = pin.draw.geom
+            px, py = (pgeom.x, pgeom.y) if isinstance(pgeom, Point) else (pgeom.centroid.x, pgeom.centroid.y)
+            ax.scatter(px, py, c="black", s=20, marker="o")
+
+        # --- Prepare heatmap data ---
+        locations = []
+        costs_perc = []
+        if min_cost > 0:
+            for loc, cost in tried_locations_costs.items():
+                locations.append(loc)
+                if cost == float("inf"):
+                    # Use a high value for invalid spots, maybe max of others + 50%
+                    valid_costs = [c for c in tried_locations_costs.values() if c != float("inf")]
+                    max_perc = max([((c - min_cost) / min_cost) * 100 for c in valid_costs]) if valid_costs else 100
+                    costs_perc.append(max_perc + 50)
+                else:
+                    percentage_increase = ((cost - min_cost) / min_cost) * 100
+                    costs_perc.append(percentage_increase)
+
+        if not locations:
+            log.warning("No locations to plot for heatmap.")
+            plt.close(fig)
+            return
+
+        x_coords = [loc[0] for loc in locations]
+        y_coords = [loc[1] for loc in locations]
+
+        # --- Plot heatmap ---
+        sc = ax.scatter(x_coords, y_coords, c=costs_perc, cmap="viridis_r", s=120, alpha=0.9, edgecolors="k", linewidth=0.5)
+        cbar = plt.colorbar(sc, ax=ax, label="Cost increase (%) over best")
+        cbar.set_alpha(1)
+
+        # Annotate points with cost percentage
+        for i, txt in enumerate(costs_perc):
+            ax.annotate(f"{txt:.0f}%", (x_coords[i], y_coords[i]), textcoords="offset points", xytext=(0, 10), ha="center", fontsize=7)
+
+        # Mark best location
+        ax.scatter(best_location.x, best_location.y, c="red", s=200, marker="*", label="Best Location")
+        ax.legend()
+
+        fig.tight_layout()
+        timestamp = time.strftime("%Y%m%d-%H%M%S")
+        filename = f"{filename_prefix}_{timestamp}.png"
+        full_path = os.path.join(out_dir, filename)
+        plt.savefig(full_path, dpi=200)
+        plt.close(fig)
+        log.info(f"Saved junction move heatmap -> {full_path}")
+
+    def _plot_cost_calculation(
+        self, module: Module, topology: Topology, paths_with_metrics: list, macros: Polygon, halos: Polygon, filename: str
+    ):
+        """
+        Generate a debug plot for cost calculation, showing paths and their cost components.
+        """
+        out_dir = "data/images/cost_debug"
+        os.makedirs(out_dir, exist_ok=True)
+
+        fig, ax = plt.subplots(figsize=(12, 12))
+        ax.set_aspect("equal", adjustable="box")
+        ax.set_title(f"Cost Calculation for Net: {topology.net.name} in {module.name}")
+        ax.set_xlabel("X")
+        ax.set_ylabel("Y")
+
+        # --- Draw macros ---
+        if not macros.is_empty:
+            if isinstance(macros, MultiPolygon):
+                for sub in macros.geoms:
+                    x, y = sub.exterior.xy
+                    ax.fill(x, y, color="lightgrey", alpha=0.6)
+            else:
+                x, y = macros.exterior.xy
+                ax.fill(x, y, color="lightgrey", alpha=0.6)
+
+        # --- Draw halos ---
+        if not halos.is_empty:
+            if isinstance(halos, MultiPolygon):
+                for sub in halos.geoms:
+                    x, y = sub.exterior.xy
+                    ax.plot(x, y, color="blue", ls="--", lw=1)
+            else:
+                x, y = halos.exterior.xy
+                ax.plot(x, y, color="blue", ls="--", lw=1)
+
+        # --- Draw paths and labels ---
+        total_cost_for_plot = 0
+        for path, metrics in paths_with_metrics:
+            x, y = path.xy
+            ax.plot(x, y, color="red", lw=2)
+            total_cost_for_plot += metrics.total_cost
+
+            # Add labels for cost components
+            label_pos = path.interpolate(0.5, normalized=True)
+            label_text = (
+                f"wl: {metrics.cost_wirelength:.1f}\n"
+                f"macro: {metrics.cost_macro:.1f}\n"
+                f"halo: {metrics.cost_halo:.1f}\n"
+                f"cong: {metrics.cost_congestion:.1f}\n"
+                f"pen: {metrics.cost_macro_junction_penalty + metrics.cost_halo_junction_penalty:.1f}\n"
+                f"TOTAL: {metrics.total_cost:.1f}"
+            )
+            ax.text(
+                label_pos.x,
+                label_pos.y,
+                label_text,
+                fontsize=8,
+                color="darkgreen",
+                bbox=dict(facecolor="white", alpha=0.7, edgecolor="none", pad=0.2),
+            )
+
+        # --- Draw junctions and pins ---
+        for junction in topology.junctions:
+            jx, jy = junction.location.x, junction.location.y
+            ax.scatter(jx, jy, c="blue", s=80, marker="x")
+            ax.text(jx + 0.5, jy + 0.5, junction.name, fontsize=7, color="blue")
+
+        pins = [p for p in topology.net.pins.values() if hasattr(p.draw, "geom") and p.draw.geom is not None]
+        for pin in pins:
+            pgeom = pin.draw.geom
+            if isinstance(pgeom, Point):
+                px, py = pgeom.x, pgeom.y
+            else:
+                px, py = pgeom.centroid.x, pgeom.centroid.y
+            ax.scatter(px, py, c="black", s=20, marker="o")
+            ax.text(px + 0.5, py + 0.5, pin.full_name, fontsize=6, color="black")
+
+        ax.set_title(f"Cost Calculation for Net: {topology.net.name} in {module.name}\nTotal Cost: {total_cost_for_plot:.2f}")
+        fig.tight_layout()
+
+        # Save figure
+        full_path = os.path.join(out_dir, filename)
+        plt.savefig(full_path, dpi=200)
+        plt.close(fig)
+        log.info(f"Saved cost debug plot for net {topology.net.name} -> {full_path}")
 
     def _rebuild_net_geometry(self, topology: Topology):
         """Recreate the net's geometry from the final junction and pin locations."""
