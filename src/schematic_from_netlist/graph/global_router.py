@@ -94,18 +94,56 @@ class GlobalRouter:
         for module in self.db.design.modules.values():
             if module.is_leaf:
                 continue
-            sorted_nets = sorted(module.nets.values(), key=lambda net: net.num_conn)
-            log.info(f"Processing module {module.name} with {len(sorted_nets)} nets")
 
+            log.info(f"Processing module {module.name} with {len(module.nets)} nets in stages.")
+
+            # --- Pre-computation for the whole module ---
+            macros = self._get_macro_geometries(module)
+            halos = self._get_halo_geometries(macros)
+            sorted_nets = sorted(
+                [n for n in module.nets.values() if 2 < n.num_conn < self.db.fanout_threshold],
+                key=lambda net: net.num_conn,
+            )
+
+            # --- Data structures to hold intermediate results ---
+            net_topologies: Dict[Net, Topology] = {}
+            net_pin_macros: Dict[Net, Dict[Pin, Polygon]] = {}
+
+            # --- STAGE 1: Initial Topology Generation ---
+            log.info(f"--- Stage 1: Initial Topology Generation for {len(sorted_nets)} nets ---")
             for net in sorted_nets:
-                if 2 < net.num_conn < self.db.fanout_threshold:
-                    log.info(f"Processing net {net.name} with {net.num_conn} connections")
-                    topo = self.process_net(module, net)
-                    if topo:
-                        log.info(f"Created topology for net {net.name} with {len(topo.junctions)} junctions")
-                        self.junctions[module].append(topo)
-                    else:
-                        log.warning(f"No topology created for net {net.name}")
+                net.draw.geom = None  # Clear existing geometry
+                congestion_idx, other_nets_geoms = self._build_congestion_index(module, net)
+                topo, pin_macros = self._create_initial_topology(net, macros, halos, congestion_idx, other_nets_geoms)
+                if topo:
+                    net_topologies[net] = topo
+                    net_pin_macros[net] = pin_macros
+                    self._rebuild_net_geometry(topo)  # Update geometry for next net
+
+            # --- STAGE 2: Pruning Junctions ---
+            log.info(f"--- Stage 2: Pruning Junctions ---")
+            for topo in net_topologies.values():
+                self._prune_redundant_junctions(topo)
+                self._rebuild_net_geometry(topo)
+
+            # --- STAGE 3: Optimizing Junction Locations ---
+            log.info(f"--- Stage 3: Optimizing Junction Locations ---")
+            for net, topo in net_topologies.items():
+                self._optimize_junction_locations(topo, macros, halos, net_pin_macros[net])
+                self._rebuild_net_geometry(topo)
+
+            # --- STAGE 4: Sliding Junctions (Congestion-Aware) ---
+            log.info(f"--- Stage 4: Sliding Junctions (Congestion-Aware) ---")
+            for net, topo in net_topologies.items():
+                congestion_idx, other_nets_geoms = self._build_congestion_index(module, net)
+                self._slide_junctions(topo, macros, halos, congestion_idx, other_nets_geoms, module, net_pin_macros[net])
+                self._rebuild_net_geometry(topo)
+
+            # --- STAGE 5: Finalize Routes ---
+            log.info(f"--- Stage 5: Finalizing Routes and Pin Locations ---")
+            for net, topo in net_topologies.items():
+                self._finalize_routes_and_pin_locations(topo, module, net_pin_macros[net])
+                self.junctions[module].append(topo)
 
         log.info(f"Total junctions created: {sum(len(v) for v in self.junctions.values())}")
 
@@ -393,48 +431,32 @@ class GlobalRouter:
 
         return metrics, crossing_points
 
-    def process_net(self, module: Module, net: Net) -> Optional[Topology]:
-        """Process a single net using Pattern Route-based routing.
-
-        Args:
-            module: Parent module containing the net
-            net: Net to process
-
-        Returns:
-            Topology object with junctions and routes, or None if skipped
-        """
-        # 0. Remove existing geometry
-        net.draw.geom = None
-
+    def _create_initial_topology(
+        self, net: Net, macros: Polygon, halos: Polygon, congestion_idx, other_nets_geoms
+    ) -> Tuple[Optional[Topology], Optional[Dict[Pin, Polygon]]]:
+        """Creates the initial MST-based topology for a single net."""
         pins = [p for p in net.pins.values() if hasattr(p.draw, "geom") and p.draw.geom is not None]
         if len(pins) < 3:
-            return None
+            return None, None
 
-        log.debug(f"Routing net {net.name} with {len(pins)} pins.")
-
-        # 1. Pre-computation
-        macros = self._get_macro_geometries(module)
-        halos = self._get_halo_geometries(macros)
-        congestion_idx, other_nets_geoms = self._build_congestion_index(module, net)
+        log.debug(f"Creating initial topology for net {net.name} with {len(pins)} pins.")
 
         # For pins inside macros, route to the macro center
         pin_macros: Dict[Pin, Polygon] = {}
         for p in pins:
-            if p.instance.draw.geom:
-                macro = p.instance.draw.geom
+            if macro := p.instance.draw.geom:
                 pin_macros[p] = macro
                 p.draw.geom = macro.centroid
             else:
-                log.warning(f"instance {p.instance.name} of pin {p.name} has no geometry")
+                log.warning(f"Pin {p.name} instance {p.instance.name} has no geom .")
 
-        # 2. Initialize MST algorithm (Prim's)
+        # Initialize MST algorithm (Prim's)
         unconnected_pins = set(pins)
         start_pin = unconnected_pins.pop()
-
-        tree_connection_points = {start_pin}  # Pins and Junctions in the current tree
+        tree_connection_points = {start_pin}
         topology = Topology(net=net)
 
-        # 3. Greedy merge loop
+        # Greedy merge loop
         while unconnected_pins:
             min_cost = float("inf")
             best_path = None
@@ -446,7 +468,6 @@ class GlobalRouter:
                     p1 = conn_point.draw.geom if isinstance(conn_point, Pin) else conn_point.location
                     if not isinstance(p1, Point):
                         p1 = p1.centroid
-
                     p2 = new_pin.draw.geom
                     if not isinstance(p2, Point):
                         p2 = p2.centroid
@@ -465,36 +486,52 @@ class GlobalRouter:
                             best_connection_point = conn_point
 
             if best_path is None:
-                log.warning(f"Could not find a path for net {net.name}, skipping.")
-                return None
+                log.warning(f"Could not find a path for net {net.name}, skipping initial topology.")
+                return None, None
 
-            # 4. Add new pin and junction to the tree
+            # Add new pin and junction to the tree
             unconnected_pins.remove(best_new_pin)
-
             corner = self._get_l_path_corner(best_path)
             junction_name = f"J_{net.name}_{len(topology.junctions)}"
             junction = Junction(name=junction_name, location=corner, children={best_new_pin, best_connection_point})
-
             topology.junctions.append(junction)
             tree_connection_points.add(junction)
 
-            # If the connection point was a pin, remove it from the set of available connection points
             if isinstance(best_connection_point, Pin):
                 tree_connection_points.remove(best_connection_point)
 
-        # 5. Prune redundant junctions
-        self._prune_redundant_junctions(topology)
+        return topology, pin_macros
 
-        # 6. Post-process junction locations
-        self._optimize_junction_locations(topology, macros, halos, pin_macros)
+    def _rebuild_net_geometry(self, topology: Topology):
+        """Rebuilds the net's geometry based on its current topology of junctions and pins."""
+        new_geoms = []
+        for junction in topology.junctions:
+            start_point = junction.location
+            for child in junction.children:
+                if isinstance(child, Pin):
+                    end_point = child.draw.geom
+                    if not isinstance(end_point, Point):
+                        end_point = end_point.centroid
+                else:  # Junction
+                    end_point = child.location
 
-        # 7. Slide junctions to reduce cost
-        self._slide_junctions(topology, macros, halos, congestion_idx, other_nets_geoms, module, pin_macros)
+                # Generate orthogonal path to the final pin location (or other junction)
+                l_paths = self._generate_l_paths(start_point, end_point)
+                if l_paths:
+                    new_geoms.append(l_paths[0])
+                elif start_point.distance(end_point) > 1e-9:
+                    new_geoms.append(LineString([start_point, end_point]))
 
-        # 8. Finalize net geometry and update pin locations
-        self._finalize_routes_and_pin_locations(topology, module, pin_macros)
-
-        return topology
+        if new_geoms:
+            merged_geom = linemerge(unary_union(new_geoms))
+            if isinstance(merged_geom, LineString):
+                topology.net.draw.geom = MultiLineString([merged_geom])
+            elif isinstance(merged_geom, MultiLineString):
+                topology.net.draw.geom = merged_geom
+            else:
+                topology.net.draw.geom = MultiLineString([g for g in new_geoms if isinstance(g, LineString)])
+        else:
+            topology.net.draw.geom = None
 
     def _prune_redundant_junctions(self, topology: Topology):
         """Remove junctions with degree <= 2, as they are redundant."""
@@ -694,6 +731,7 @@ class GlobalRouter:
                 log.debug(f"  Moved junction {junction.name} to {new_location}")
 
             # Generate intermediate cost calculation plot
+            log.info(f"calculating cost and dumping to prefix slide_iter_{i}_ for module:{module.name} net:{topology.net.name}")
             self._calculate_total_cost(
                 topology,
                 macros,
@@ -872,7 +910,9 @@ class GlobalRouter:
         fig.tight_layout()
 
         # Save figure
-        filename = f"{plot_filename_prefix or ''}{module.name}_{topology.net.name}_cost.png"
+        safe_module_name = module.name.replace("/", "_")
+        safe_net_name = topology.net.name.replace("/", "_")
+        filename = f"{plot_filename_prefix or ''}{safe_module_name}_{safe_net_name}_cost.png"
         full_path = os.path.join(out_dir, filename)
         plt.savefig(full_path, dpi=200)
         plt.close(fig)
