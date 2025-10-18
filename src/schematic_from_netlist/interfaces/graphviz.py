@@ -234,7 +234,7 @@ class Graphviz:
             # warnings.filterwarnings("ignore", category=RuntimeWarning)
             # A.draw(f"data/png/post_{module.name}.png", format="png")
             log.info(f"TODO : fix png generation")
-            os.system(f"neato -v -y -n2 -Tpng -o data/png/post_{module.name}.png data/dot/post_{module.name}.dot")
+            os.system(f"neato -y -n2 -Tpng -o data/png/post_{module.name}.png data/dot/post_{module.name}.dot")
 
     def build_graphviz_data(self):
         """
