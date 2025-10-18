@@ -10,24 +10,21 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple
 
+import matplotlib.pyplot as plt
 import numpy as np
 import shapely
 from rtree import index
-from shapely.geometry import LineString, MultiLineString, Point, Polygon, box
+from shapely.geometry import LineString, MultiLineString, MultiPolygon, Point, Polygon, box
 from shapely.ops import linemerge, snap, unary_union
 from shapely.strtree import STRtree
+from tabulate import tabulate
 
 from schematic_from_netlist.database.netlist_structures import Module, Net, Pin
 from schematic_from_netlist.graph.geom_utils import Geom
 
 # Pattern Route parameters
-ROUTE_WEIGHTS = {
-    'wirelength': 1.0,
-    'congestion': 2.0,
-    'halo': 3.0,
-    'crossing': 1.5
-}
-MAX_PATH_COST = 10.0  # Mean path cost multiplier for pruning
+ROUTE_WEIGHTS = {"wirelength": 1.0, "congestion": 2.0, "halo": 3.0, "crossing": 5.0}
+MAX_PATH_COST = 100.0  # Mean path cost multiplier for pruning
 GRID_SPACING = 1.0  # Track spacing for snapping
 MAX_FANOUT = 15  # Maximum junction fanout
 
@@ -54,68 +51,30 @@ class GlobalRouter:
         self.db = db
         self.junctions: Dict[Module, List[Topology]] = defaultdict(list)
 
-    def _log_junction_summary(self, junctions):
-        """Log detailed summary of inserted junctions."""
-        from tabulate import tabulate
-        
-        summary = []
-        for module, topos in junctions.items():
-            for topo in topos:
-                # Count unique children
-                unique_children = set()
-                for junction in topo.junctions:
-                    unique_children.update(child for child in junction.children 
-                                        if isinstance(child, Pin))  # Only count pin connections
-                
-                row = [
-                    module.name,
-                    topo.net.name,
-                    topo.net.num_conn,
-                    len(topo.junctions),
-                    len(unique_children)
-                ]
-                summary.append(row)
-                
-                # Log detailed junction info
-                for junction in topo.junctions:
-                    log.info(f"Inserting {junction.name=} at {junction.location}")
-                    for child in junction.children:
-                        if isinstance(child, Junction):
-                            log.info(f"  Connected to junction {child.name}")
-                        elif isinstance(child, Pin):
-                            log.info(f"  Connected to pin {child.name}")
-                        else:
-                            log.info(f"  Connected to unknown child type {type(child)}")
-        
-        # Log summary table
-        headers = ["Module", "Net", "Connections", "Junctions", "Children"]
-        log.info("Junction Insertion Summary:\n" + tabulate(summary, headers=headers, tablefmt="pipe"))
-
     def insert_routing_junctions(self):
         # Process groups
         for module in self.db.design.modules.values():
+            if module.is_leaf:
+                continue
             sorted_nets = sorted(module.nets.values(), key=lambda net: net.num_conn)
             log.info(f"Processing module {module.name} with {len(sorted_nets)} nets")
-            
+
             for net in sorted_nets:
-                log.info(f"Processing net {net.name} with {net.num_conn} connections")
-                
                 if 2 < net.num_conn < self.db.fanout_threshold:
-                    log.info(f"Net {net.name} is within fanout threshold ({self.db.fanout_threshold})")
+                    log.info(f"Processing net {net.name} with {net.num_conn} connections")
                     topo = self.process_net(module, net)
                     if topo:
                         log.info(f"Created topology for net {net.name} with {len(topo.junctions)} junctions")
                         self.junctions[module].append(topo)
                     else:
                         log.warning(f"No topology created for net {net.name}")
-                else:
-                    log.info(f"Skipping net {net.name} - fanout {net.num_conn} outside threshold")
-                    
+
         log.info(f"Total junctions created: {sum(len(v) for v in self.junctions.values())}")
-        
+
         # Log detailed junction summary
-        self._log_junction_summary(self.junctions)
-        
+        self._log_junction_summary()
+        self._plot_junction_summary()
+
         return self.junctions
 
     def process_net(self, module: Module, net: Net) -> Optional[Topology]:
@@ -131,16 +90,10 @@ class GlobalRouter:
         # Stage 0 - Preprocessing
         net.draw.geom = None  # Clear old geometry
         pins = [p.draw.geom for p in net.pins.values()]
-        log.info(f"Processing net {net.name} with {len(pins)} pins")
-        
-        if len(pins) < 2:
-            log.warning(f"Skipping net {net.name} - only {len(pins)} pins")
-            return None
 
         # Get macro and halo trees for obstacle avoidance
         all_macros = [i.draw.geom for i in module.get_all_instances().values()]
-        log.info(f"Found {len(all_macros)} macros in module {module.name}")
-        
+
         macro_tree = STRtree(all_macros)
         halo_tree = STRtree([m.buffer(2) for m in all_macros])  # 2-track halo
         log.info(f"Created STRtrees with {len(macro_tree.geometries)} macros and {len(halo_tree.geometries)} halos")
@@ -152,7 +105,7 @@ class GlobalRouter:
         # Stage 1 - Pattern Route Generation
         routes = self._generate_pattern_routes(pins, macro_tree, cost_map)
         log.info(f"Generated {len(routes)} candidate routes")
-        
+
         if not routes:
             log.warning("No valid routes found")
             return None
@@ -221,36 +174,33 @@ class GlobalRouter:
     def _generate_pattern_routes(self, pins, macro_tree, cost_map) -> List[Tuple]:
         """Generate L/Z-shaped pattern routes between pin pairs."""
         routes = []
-        
+
         # Generate all unique pin pairs
         for i, src in enumerate(pins):
             for j, dst in enumerate(pins):
                 if i >= j:
                     continue
-                    
+
                 log.debug(f"Processing pin pair: {src} -> {dst}")
-                
+
                 # Generate L-shaped paths
-                l_paths = [
-                    self._create_l_path(src, dst, 'horizontal'),
-                    self._create_l_path(src, dst, 'vertical')
-                ]
-                
+                l_paths = [self._create_l_path(src, dst, "horizontal"), self._create_l_path(src, dst, "vertical")]
+
                 # Generate Z-shaped path if needed
                 z_path = self._create_z_path(src, dst)
                 if z_path:
                     l_paths.append(z_path)
-                    
+
                 # Evaluate and select best path
                 best_path = None
-                min_cost = float('inf')
+                min_cost = float("inf")
                 valid_paths = 0
-                
+
                 for path in l_paths:
                     if path is None:
                         log.debug("Skipping invalid path")
                         continue
-                        
+
                     # Check for macro intersections
                     intersecting_macros = macro_tree.query(path)
                     if len(intersecting_macros) > 0:
@@ -262,16 +212,16 @@ class GlobalRouter:
                             log.debug(f"Using detour path: {detour_path}")
                         else:
                             continue
-                            
+
                     # Calculate path cost
                     cost = self._calculate_path_cost(path, cost_map)
                     log.debug(f"Path cost: {cost} for {path}")
-                    
+
                     if cost < min_cost:
                         min_cost = cost
                         best_path = path
                         valid_paths += 1
-                            
+
                 if best_path:
                     if min_cost < MAX_PATH_COST * self._mean_path_cost(cost_map):
                         log.debug(f"Selected best path: {best_path} with cost {min_cost}")
@@ -280,7 +230,7 @@ class GlobalRouter:
                         log.debug(f"Path cost {min_cost} exceeds threshold")
                 else:
                     log.debug(f"No valid path found between {src} and {dst}")
-                    
+
         log.info(f"Generated {len(routes)} candidate routes from {len(pins)} pins")
         return routes
 
@@ -291,23 +241,23 @@ class GlobalRouter:
             macros = [macro_tree.geometries[i] for i in macro_indices]
             # Create a union of the macro geometries
             macro_union = unary_union(macros)
-            
+
             # Try horizontal detour
             mid1 = Point(src.x, dst.y + 5)  # Go up
             mid2 = Point(dst.x, dst.y + 5)
             path = LineString([src, mid1, mid2, dst])
-            
+
             if path.is_valid:
                 return path
-                
+
             # Try vertical detour
             mid1 = Point(src.x + 5, src.y)  # Go right
             mid2 = Point(src.x + 5, dst.y)
             path = LineString([src, mid1, mid2, dst])
-            
+
             if path.is_valid:
                 return path
-                
+
             return None
         except Exception as e:
             log.error(f"Error creating detour path: {e}")
@@ -406,15 +356,15 @@ class GlobalRouter:
         try:
             x1, y1 = src.x, src.y
             x2, y2 = dst.x, dst.y
-            
+
             # Add small offset to avoid exact overlaps
             offset = 0.1
-            
-            if direction == 'horizontal':
+
+            if direction == "horizontal":
                 mid = Point(x2, y1 + offset)
             else:
                 mid = Point(x1 + offset, y2)
-                
+
             path = LineString([src, mid, dst])
             if not path.is_valid:
                 log.warning(f"Invalid L-path generated: {path}")
@@ -429,11 +379,11 @@ class GlobalRouter:
         try:
             x1, y1 = src.x, src.y
             x2, y2 = dst.x, dst.y
-            
+
             # Only create Z path if both coordinates differ significantly
             if abs(x1 - x2) > GRID_SPACING and abs(y1 - y2) > GRID_SPACING:
-                mid1 = Point(x1 + (x2 - x1)/2, y1)
-                mid2 = Point(x1 + (x2 - x1)/2, y2)
+                mid1 = Point(x1 + (x2 - x1) / 2, y1)
+                mid2 = Point(x1 + (x2 - x1) / 2, y2)
                 path = LineString([src, mid1, mid2, dst])
                 if not path.is_valid:
                     log.warning(f"Invalid Z-path generated: {path}")
@@ -446,50 +396,50 @@ class GlobalRouter:
 
     def _sample_path_points(self, path: LineString, spacing: float = 1.0) -> List[Point]:
         """Sample points along a path at regular intervals.
-        
+
         Args:
             path: LineString to sample
             spacing: Distance between sample points
-            
+
         Returns:
             List of sampled points
         """
         points = []
         length = path.length
         distance = 0.0
-        
+
         while distance <= length:
             point = path.interpolate(distance)
             points.append(point)
             distance += spacing
-            
+
         return points
 
     def _calculate_path_cost(self, path: LineString, cost_map) -> float:
         """Calculate total cost for a path using the cost map."""
         # Sample points along the path
         samples = self._sample_path_points(path)
-        
+
         # Accumulate costs
         total_cost = 0.0
         for pt in samples:
             x, y = int(pt.x), int(pt.y)
             if 0 <= x < cost_map.shape[1] and 0 <= y < cost_map.shape[0]:
                 total_cost += cost_map[y, x]
-                
+
         # Add length penalty
-        total_cost += ROUTE_WEIGHTS['wirelength'] * path.length
-        
+        total_cost += ROUTE_WEIGHTS["wirelength"] * path.length
+
         return total_cost
 
     def _create_cost_map(self, module, macro_tree, halo_tree) -> np.ndarray:
         """Create a 2D cost map based on macro and halo locations.
-        
+
         Args:
             module: Module containing the net
             macro_tree: STRtree of macro geometries
             halo_tree: STRtree of halo geometries
-            
+
         Returns:
             2D numpy array of costs
         """
@@ -497,15 +447,15 @@ class GlobalRouter:
         pins = [p.draw.geom for p in module.get_all_pins().values()]
         if not pins:
             return np.zeros((1, 1))
-            
+
         bbox = unary_union(pins).bounds
         min_x, min_y, max_x, max_y = bbox
-        
+
         # Create grid with some padding
         width = int(max_x - min_x) + 10
         height = int(max_y - min_y) + 10
         cost_map = np.zeros((height, width))
-        
+
         # Add macro costs
         for macro in macro_tree.geometries:
             x1, y1, x2, y2 = macro.bounds
@@ -513,8 +463,8 @@ class GlobalRouter:
             y1 = max(0, int(y1 - min_y))
             x2 = min(width, int(x2 - min_x))
             y2 = min(height, int(y2 - min_y))
-            cost_map[y1:y2, x1:x2] += ROUTE_WEIGHTS['halo'] * 10  # High cost for macros
-            
+            cost_map[y1:y2, x1:x2] += ROUTE_WEIGHTS["halo"] * 10  # High cost for macros
+
         # Add halo costs
         for halo in halo_tree.geometries:
             x1, y1, x2, y2 = halo.bounds
@@ -522,67 +472,64 @@ class GlobalRouter:
             y1 = max(0, int(y1 - min_y))
             x2 = min(width, int(x2 - min_x))
             y2 = min(height, int(y2 - min_y))
-            cost_map[y1:y2, x1:x2] += ROUTE_WEIGHTS['halo']
-            
+            cost_map[y1:y2, x1:x2] += ROUTE_WEIGHTS["halo"]
+
         return cost_map
 
     def _form_junction_tree(self, net: Net, pins: List[Point], routes: List[Tuple]) -> Topology:
         """Form a junction tree from the generated routes.
-        
+
         Args:
             net: The net being routed
             pins: List of pin points
             routes: List of (src, dst, path, cost) tuples
-            
+
         Returns:
             Topology object with junctions and connections
         """
         # Create initial topology with all pins
         topology = Topology(net=net)
-        
+
         # Create a junction tree that shares junctions between connections
         junctions = {}  # Map of location to junction
-        
+
         def get_junction(location):
             """Get or create a junction at the given location."""
             if location not in junctions:
-                junction = Junction(
-                    name=f"J{len(junctions)}",
-                    location=location
-                )
+                junction = Junction(name=f"J{len(junctions)}", location=location)
                 junctions[location] = junction
                 topology.junctions.append(junction)
             return junctions[location]
-        
+
         # Create junctions at pin locations
         for pin in net.pins.values():
             junction = get_junction((pin.draw.geom.x, pin.draw.geom.y))
             junction.children.add(pin)
-            
+
         # Create intermediate junctions along routes
         for src, dst, path, cost in routes:
             # Get source and destination junctions
             src_junction = get_junction((src.x, src.y))
             dst_junction = get_junction((dst.x, dst.y))
-            
+
             # Create intermediate junction at midpoint
             mid_point = path.interpolate(0.5, normalized=True)
             mid_junction = get_junction((mid_point.x, mid_point.y))
-            
+
             # Connect junctions
             src_junction.children.add(mid_junction)
             dst_junction.children.add(mid_junction)
             mid_junction.children.add(src_junction)
             mid_junction.children.add(dst_junction)
-            
+
         # Merge junctions that are too close
         merged = True
         while merged:
             merged = False
             junctions = topology.junctions
-            
+
             for i, j1 in enumerate(junctions):
-                for j2 in junctions[i+1:]:
+                for j2 in junctions[i + 1 :]:
                     if Point(j1.location).distance(Point(j2.location)) < GRID_SPACING * 2:
                         # Merge j2 into j1
                         j1.children.update(j2.children)
@@ -591,12 +538,12 @@ class GlobalRouter:
                             if j2 in junction.children:
                                 junction.children.remove(j2)
                                 junction.children.add(j1)
-                        del topology.junctions[i+1]
+                        del topology.junctions[i + 1]
                         merged = True
                         break
                 if merged:
                     break
-                    
+
         return topology
 
     def _mean_path_cost(self, cost_map) -> float:
@@ -609,7 +556,7 @@ class GlobalRouter:
         for junction in topology.junctions:
             # Convert junction location to Point
             j_point = Point(junction.location)
-            
+
             for child in junction.children:
                 if isinstance(child, Pin):  # Pin connection
                     lines.append(LineString([j_point, child.draw.geom]))
@@ -622,23 +569,131 @@ class GlobalRouter:
                 merged = linemerge(lines)
                 if merged.is_empty:
                     return
-                    
+
                 # Snap to grid
                 if isinstance(merged, LineString):
-                    snapped = snap(merged, Point(0,0).buffer(GRID_SPACING), GRID_SPACING)
+                    snapped = snap(merged, Point(0, 0).buffer(GRID_SPACING), GRID_SPACING)
                 else:  # MultiLineString
-                    snapped = MultiLineString([
-                        snap(line, Point(0,0).buffer(GRID_SPACING), GRID_SPACING)
-                        for line in merged.geoms
-                    ])
-                    
+                    snapped = MultiLineString([snap(line, Point(0, 0).buffer(GRID_SPACING), GRID_SPACING) for line in merged.geoms])
+
                 net.draw.geom = snapped
 
                 # Record final metrics
-                topology.metrics.update({
-                    "wirelength": sum(line.length for line in lines),
-                    "num_junctions": len(topology.junctions)
-                })
+                topology.metrics.update(
+                    {"wirelength": sum(line.length for line in lines), "num_junctions": len(topology.junctions)}
+                )
             except Exception as e:
                 log.error(f"Error assembling geometry: {e}")
                 return
+
+    def _log_junction_summary(self):
+        """Log detailed summary of inserted junctions."""
+        for module, topos in self.junctions.items():
+            log.info(f"module {module.name=} size {module.draw.geom}")
+            for topo in topos:
+                # Log detailed junction info
+                for junction in topo.junctions:
+                    log.info(f"Inserting {junction.name=} in {topo.net.name} at {junction.location}")
+                    for child in junction.children:
+                        if isinstance(child, Junction):
+                            log.info(f"  Connected to junction {child.name} at {child.location}")
+                        elif isinstance(child, Pin):
+                            log.info(f"  Connected to pin {child.full_name} at {child.draw.geom}")
+                        else:
+                            log.info(f"  Connected to unknown child type {type(child)}")
+
+        summary = []
+        for module, topos in self.junctions.items():
+            for topo in topos:
+                # Count unique children
+                unique_children = set()
+                for junction in topo.junctions:
+                    unique_children.update(
+                        child for child in junction.children if isinstance(child, Pin)
+                    )  # Only count pin connections
+
+                row = [module.name, topo.net.name, topo.net.num_conn, len(topo.junctions), len(unique_children)]
+                summary.append(row)
+
+        # Log summary table
+        headers = ["Module", "Net", "Connections", "Junctions", "Children"]
+        log.info("Junction Insertion Summary:\n" + tabulate(summary, headers=headers, tablefmt="pipe"))
+
+    def _plot_junction_summary(self):
+        """
+        Generate per-module schematic overview plots showing macros, pins, junctions, and existing net geometries.
+
+        Args:
+            junctions: Dict[Module, List[Topology]]
+        """
+        out_dir = "data/images"
+        os.makedirs(out_dir, exist_ok=True)
+
+        cmap = plt.get_cmap("tab20")  # color map for nets
+
+        for module, topos in self.junctions.items():
+            fig, ax = plt.subplots(figsize=(10, 10))
+            ax.set_aspect("equal", adjustable="box")
+            ax.set_title(f"Module: {module.name}")
+
+            # --- Draw macros ---
+            all_macros = [i.draw.geom for i in module.get_all_instances().values() if i.draw.geom]
+            for m in all_macros:
+                if isinstance(m, (Polygon, MultiPolygon)):
+                    if isinstance(m, MultiPolygon):
+                        for sub in m.geoms:
+                            x, y = sub.exterior.xy
+                            ax.fill(x, y, color="lightgrey", alpha=0.6)
+                    else:
+                        x, y = m.exterior.xy
+                        ax.fill(x, y, color="lightgrey", alpha=0.6)
+
+            # --- Draw junctions, pins, and nets ---
+            for idx, topo in enumerate(topos):
+                color = cmap(idx % 20)  # assign color per net
+
+                # Plot net geometry if exists
+                if topo.net.draw.geom:
+                    geom = topo.net.draw.geom
+                    if isinstance(geom, LineString):
+                        geom = [geom]
+                    elif isinstance(geom, MultiLineString):
+                        geom = list(geom.geoms)
+                    for line in geom:
+                        x, y = line.xy
+                        ax.plot(x, y, color=color, lw=1.5)
+                    # Label the net at first point
+                    first_line = geom[0]
+                    ax.text(first_line.coords[0][0], first_line.coords[0][1], topo.net.name, fontsize=8, color=color)
+
+                # Plot junctions
+                for junction in topo.junctions:
+                    jx, jy = junction.location
+                    ax.scatter(jx, jy, c=color, s=80, marker="x")
+                    ax.text(jx + 0.5, jy + 0.5, junction.name, fontsize=7, color=color)
+
+                    # Draw connections to children
+                    for child in junction.children:
+                        if isinstance(child, Pin) and hasattr(child.draw, "geom") and child.draw.geom:
+                            pgeom = child.draw.geom
+                            if isinstance(pgeom, Point):
+                                px, py = pgeom.x, pgeom.y
+                            else:
+                                px, py = pgeom.centroid.x, pgeom.centroid.y
+                            ax.plot([jx, px], [jy, py], color=color, lw=1)
+                            ax.scatter(px, py, c="black", s=20, marker="o")
+                            ax.text(px + 0.5, py + 0.5, child.full_name, fontsize=6, color="black")
+                        elif isinstance(child, Junction):
+                            cx, cy = child.location
+                            ax.plot([jx, cx], [jy, cy], color=color, lw=1, ls="--")
+
+            ax.set_xlabel("X")
+            ax.set_ylabel("Y")
+            fig.tight_layout()
+
+            # Save figure
+            fname = os.path.join(out_dir, f"{module.name}_junctions.png")
+            plt.savefig(fname, dpi=200)
+            plt.close(fig)
+
+            log.info(f"Saved schematic plot for module {module.name} → {fname}")

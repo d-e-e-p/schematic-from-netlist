@@ -229,7 +229,6 @@ class NetlistOperationsMixin:
                         elif isinstance(child, Pin):
                             logging.info(f"Inserting P {child.name=} ")
         """
-        breakpoint()
         exit()
 
     def create_buffering_for_groups(self, module, net, ordering, collections):
