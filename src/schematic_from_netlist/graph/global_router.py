@@ -15,6 +15,7 @@ import numpy as np
 import shapely
 from rtree import index
 from shapely.geometry import LineString, MultiLineString, MultiPoint, MultiPolygon, Point, Polygon, box
+from shapely.geometry.base import BaseGeometry
 from shapely.ops import linemerge, nearest_points, snap, unary_union
 from shapely.strtree import STRtree
 from tabulate import tabulate
@@ -123,7 +124,7 @@ class GlobalRouter:
                 )
                 if topo:
                     net_topologies[net] = topo
-                    net_pin_macros[net] = pin_macros
+                    net_pin_macros[net] = pin_macros or {}
                     self._rebuild_net_geometry(topo)  # Update geometry for next net
 
             # --- STAGE 2: Pruning Junctions ---
@@ -228,7 +229,7 @@ class GlobalRouter:
             log.warning(f"Found {violations} crossing/overlap violations.")
         log.info(f"--- End of Diagnosis ---")
 
-    def _get_macro_geometries(self, module: Module) -> Polygon:
+    def _get_macro_geometries(self, module: Module):
         """Get all macro geometries in a module."""
         geoms = []
         for i in module.get_all_instances().values():
@@ -239,7 +240,7 @@ class GlobalRouter:
                     geoms.extend(list(i.draw.geom.geoms))
         return unary_union(geoms) if geoms else Polygon()
 
-    def _get_halo_geometries(self, macros: Polygon, buffer_dist: int = 10) -> Polygon:
+    def _get_halo_geometries(self, macros, buffer_dist: int = 10) -> Polygon:
         """Get halo geometries around macros."""
         if macros.is_empty:
             return Polygon()
@@ -304,9 +305,11 @@ class GlobalRouter:
 
         return h_tracks, v_tracks
 
-    def _generate_candidate_paths(self, p1: Point, p2: Point, halos: Polygon) -> List[LineString]:
+    def _generate_candidate_paths(self, p1: Point | None, p2: Point | None, halos: Polygon | BaseGeometry) -> List[LineString]:
         """Generate candidate L-shaped paths, including escape routes from halos."""
         paths = []
+        if not p1 or not p2:
+            return paths
 
         # 1. Basic L-paths
         paths.extend(self._generate_l_paths(p1, p2))
@@ -358,8 +361,8 @@ class GlobalRouter:
     def _calculate_path_cost(
         self,
         path: LineString,
-        macros: Polygon,
-        halos: Polygon,
+        macros: Polygon | BaseGeometry,
+        halos: Polygon | BaseGeometry,
         congestion_idx: index.Index,
         other_nets_geoms: List[LineString],
         h_tracks: Dict[float, List[Tuple[float, float]]],
@@ -495,7 +498,14 @@ class GlobalRouter:
         return metrics, crossing_points
 
     def _create_initial_topology(
-        self, net: Net, macros: Polygon, halos: Polygon, congestion_idx, other_nets_geoms, h_tracks, v_tracks
+        self,
+        net: Net,
+        macros: Polygon | BaseGeometry,
+        halos: Polygon | BaseGeometry,
+        congestion_idx,
+        other_nets_geoms,
+        h_tracks,
+        v_tracks,
     ) -> Tuple[Optional[Topology], Optional[Dict[Pin, Polygon]]]:
         """Creates the initial MST-based topology for a single net."""
         pins = [p for p in net.pins.values() if hasattr(p.draw, "geom") and p.draw.geom is not None]
@@ -529,11 +539,7 @@ class GlobalRouter:
             for new_pin in unconnected_pins:
                 for conn_point in tree_connection_points:
                     p1 = conn_point.draw.geom if isinstance(conn_point, Pin) else conn_point.location
-                    if not isinstance(p1, Point):
-                        p1 = p1.centroid
                     p2 = new_pin.draw.geom
-                    if not isinstance(p2, Point):
-                        p2 = p2.centroid
 
                     candidate_paths = self._generate_candidate_paths(p1, p2, halos)
                     for path_geom in candidate_paths:
@@ -561,7 +567,8 @@ class GlobalRouter:
                 return None, None
 
             # Add new pin and junction to the tree
-            unconnected_pins.remove(best_new_pin)
+            if best_new_pin:
+                unconnected_pins.remove(best_new_pin)
             corner = self._get_l_path_corner(best_path)
             junction_name = f"J_{net.name}_{len(topology.junctions)}"
             junction = Junction(name=junction_name, location=corner, children={best_new_pin, best_connection_point})
@@ -647,8 +654,8 @@ class GlobalRouter:
     def _optimize_junction_locations(
         self,
         topology: Topology,
-        macros: Polygon,
-        halos: Polygon,
+        macros: Polygon | BaseGeometry,
+        halos: Polygon | BaseGeometry,
         pin_macros: Dict[Pin, Polygon],
         passes: int = 3,
     ):
@@ -702,8 +709,8 @@ class GlobalRouter:
     def _slide_junctions(
         self,
         topology: Topology,
-        macros: Polygon,
-        halos: Polygon,
+        macros: Polygon | BaseGeometry,
+        halos: Polygon | BaseGeometry,
         congestion_idx,
         other_nets_geoms,
         module: Module,
