@@ -23,7 +23,8 @@ from schematic_from_netlist.database.netlist_structures import Module, Net, Pin
 from schematic_from_netlist.graph.geom_utils import Geom
 
 # Pattern Route parameters
-ROUTE_WEIGHTS = {"wirelength": 1.0, "congestion": 2.0, "halo": 5.0, "crossing": 5.0, "macro": 1000.0}
+ROUTE_WEIGHTS = {"wirelength": 1.0, "congestion": 2.0, "halo": 5.0, "crossing": 5.0, "macro": 1000.0, "track": 20.0}
+JUNCTION_SPACING_PENALTY = 2000.0  # Cost for placing junctions too close to each other
 MAX_PATH_COST = 100.0  # Mean path cost multiplier for pruning
 GRID_SPACING = 1.0  # Track spacing for snapping
 MAX_FANOUT = 15  # Maximum junction fanout
@@ -61,6 +62,7 @@ class Metrics:
     cost_halo: float = 0.0
     cost_congestion: float = 0.0
     cost_crossing: float = 0.0
+    cost_track_overlap: float = 0.0
     cost_macro_junction_penalty: float = 0.0
     cost_halo_junction_penalty: float = 0.0
 
@@ -79,6 +81,7 @@ class Metrics:
             f"halo={self.cost_halo:.1f}, "
             f"cong={self.cost_congestion:.1f}, "
             f"cross={self.cost_crossing:.1f}, "
+            f"track={self.cost_track_overlap:.1f}, "
             f"pen={self.cost_macro_junction_penalty + self.cost_halo_junction_penalty:.1f}, "
             f"total={self.total_cost:.1f}"
         )
@@ -114,7 +117,10 @@ class GlobalRouter:
             for net in sorted_nets:
                 net.draw.geom = None  # Clear existing geometry
                 congestion_idx, other_nets_geoms = self._build_congestion_index(module, net)
-                topo, pin_macros = self._create_initial_topology(net, macros, halos, congestion_idx, other_nets_geoms)
+                h_tracks, v_tracks = self._build_track_occupancy(other_nets_geoms)
+                topo, pin_macros = self._create_initial_topology(
+                    net, macros, halos, congestion_idx, other_nets_geoms, h_tracks, v_tracks
+                )
                 if topo:
                     net_topologies[net] = topo
                     net_pin_macros[net] = pin_macros
@@ -136,7 +142,19 @@ class GlobalRouter:
             log.info(f"--- Stage 4: Sliding Junctions (Congestion-Aware) ---")
             for net, topo in net_topologies.items():
                 congestion_idx, other_nets_geoms = self._build_congestion_index(module, net)
-                self._slide_junctions(topo, macros, halos, congestion_idx, other_nets_geoms, module, net_pin_macros[net])
+                h_tracks, v_tracks = self._build_track_occupancy(other_nets_geoms)
+                self._slide_junctions(
+                    topo,
+                    macros,
+                    halos,
+                    congestion_idx,
+                    other_nets_geoms,
+                    module,
+                    net_pin_macros[net],
+                    net_topologies,
+                    h_tracks,
+                    v_tracks,
+                )
                 self._rebuild_net_geometry(topo)
 
             # --- STAGE 5: Finalize Routes ---
@@ -247,6 +265,45 @@ class GlobalRouter:
                     i += 1
         return congestion_idx, other_nets_geoms
 
+    def _build_track_occupancy(
+        self, geoms: List[LineString]
+    ) -> Tuple[Dict[float, List[Tuple[float, float]]], Dict[float, List[Tuple[float, float]]]]:
+        h_tracks = defaultdict(list)
+        v_tracks = defaultdict(list)
+
+        for line in geoms:
+            coords = list(line.coords)
+            for i in range(len(coords) - 1):
+                p1 = Point(coords[i])
+                p2 = Point(coords[i + 1])
+
+                # Use a tolerance for floating point comparisons
+                if abs(p1.y - p2.y) < 1e-9:  # Horizontal
+                    h_tracks[p1.y].append(tuple(sorted((p1.x, p2.x))))
+                elif abs(p1.x - p2.x) < 1e-9:  # Vertical
+                    v_tracks[p1.x].append(tuple(sorted((p1.y, p2.y))))
+
+        # Helper to merge intervals
+        def merge_intervals(intervals):
+            if not intervals:
+                return []
+            intervals.sort()
+            merged = [intervals[0]]
+            for current in intervals[1:]:
+                last = merged[-1]
+                if current[0] <= last[1]:
+                    merged[-1] = (last[0], max(last[1], current[1]))
+                else:
+                    merged.append(current)
+            return merged
+
+        for y in h_tracks:
+            h_tracks[y] = merge_intervals(h_tracks[y])
+        for x in v_tracks:
+            v_tracks[x] = merge_intervals(v_tracks[x])
+
+        return h_tracks, v_tracks
+
     def _generate_candidate_paths(self, p1: Point, p2: Point, halos: Polygon) -> List[LineString]:
         """Generate candidate L-shaped paths, including escape routes from halos."""
         paths = []
@@ -305,6 +362,8 @@ class GlobalRouter:
         halos: Polygon,
         congestion_idx: index.Index,
         other_nets_geoms: List[LineString],
+        h_tracks: Dict[float, List[Tuple[float, float]]],
+        v_tracks: Dict[float, List[Tuple[float, float]]],
         p1_macro_to_ignore: Optional[Polygon] = None,
         p2_macro_to_ignore: Optional[Polygon] = None,
     ) -> Tuple[Metrics, List[Point]]:
@@ -338,12 +397,39 @@ class GlobalRouter:
                     # Overlap detected. Penalize based on length.
                     intersecting_crossings += math.ceil(intersection.length / GRID_SPACING)
 
+        # Compute track overlap
+        track_overlap_length = 0.0
+        path_coords = list(path.coords)
+        for i in range(len(path_coords) - 1):
+            p1 = Point(path_coords[i])
+            p2 = Point(path_coords[i + 1])
+
+            if abs(p1.y - p2.y) < 1e-9:  # Horizontal segment
+                y = p1.y
+                seg_x1, seg_x2 = sorted((p1.x, p2.x))
+                if y in h_tracks:
+                    for track_x1, track_x2 in h_tracks[y]:
+                        overlap_start = max(seg_x1, track_x1)
+                        overlap_end = min(seg_x2, track_x2)
+                        if overlap_start < overlap_end:
+                            track_overlap_length += overlap_end - overlap_start
+            elif abs(p1.x - p2.x) < 1e-9:  # Vertical segment
+                x = p1.x
+                seg_y1, seg_y2 = sorted((p1.y, p2.y))
+                if x in v_tracks:
+                    for track_y1, track_y2 in v_tracks[x]:
+                        overlap_start = max(seg_y1, track_y1)
+                        overlap_end = min(seg_y2, track_y2)
+                        if overlap_start < overlap_end:
+                            track_overlap_length += overlap_end - overlap_start
+
         # Weighted cost components
         cost_wirelength = ROUTE_WEIGHTS["wirelength"] * wirelength
         cost_macro = ROUTE_WEIGHTS["macro"] * macro_overlap
         cost_halo = ROUTE_WEIGHTS["halo"] * halo_overlap
         cost_congestion = ROUTE_WEIGHTS["congestion"] * intersecting_length
         cost_crossing = ROUTE_WEIGHTS["crossing"] * intersecting_crossings
+        cost_track_overlap = ROUTE_WEIGHTS["track"] * track_overlap_length
 
         # Junction penalties
         cost_macro_junction_penalty = 0.0
@@ -377,6 +463,7 @@ class GlobalRouter:
             + cost_halo
             + cost_congestion
             + cost_crossing
+            + cost_track_overlap
             + cost_macro_junction_penalty
             + cost_halo_junction_penalty
         )
@@ -392,6 +479,7 @@ class GlobalRouter:
             cost_halo=cost_halo,
             cost_congestion=cost_congestion,
             cost_crossing=cost_crossing,
+            cost_track_overlap=cost_track_overlap,
             cost_macro_junction_penalty=cost_macro_junction_penalty,
             cost_halo_junction_penalty=cost_halo_junction_penalty,
             total_cost=total_cost,
@@ -407,7 +495,7 @@ class GlobalRouter:
         return metrics, crossing_points
 
     def _create_initial_topology(
-        self, net: Net, macros: Polygon, halos: Polygon, congestion_idx, other_nets_geoms
+        self, net: Net, macros: Polygon, halos: Polygon, congestion_idx, other_nets_geoms, h_tracks, v_tracks
     ) -> Tuple[Optional[Topology], Optional[Dict[Pin, Polygon]]]:
         """Creates the initial MST-based topology for a single net."""
         pins = [p for p in net.pins.values() if hasattr(p.draw, "geom") and p.draw.geom is not None]
@@ -452,7 +540,15 @@ class GlobalRouter:
                         p1_macro = pin_macros.get(conn_point) if isinstance(conn_point, Pin) else None
                         p2_macro = pin_macros.get(new_pin)
                         metrics, _ = self._calculate_path_cost(
-                            path_geom, macros, halos, congestion_idx, other_nets_geoms, p1_macro, p2_macro
+                            path_geom,
+                            macros,
+                            halos,
+                            congestion_idx,
+                            other_nets_geoms,
+                            h_tracks,
+                            v_tracks,
+                            p1_macro,
+                            p2_macro,
                         )
                         if metrics.total_cost < min_cost:
                             min_cost = metrics.total_cost
@@ -612,6 +708,9 @@ class GlobalRouter:
         other_nets_geoms,
         module: Module,
         pin_macros: Dict[Pin, Polygon],
+        all_topologies: Dict[Net, Topology],
+        h_tracks,
+        v_tracks,
     ):
         """
         Post-processing step to slide each junction in all directions to see if cost is reduced.
@@ -622,8 +721,15 @@ class GlobalRouter:
         """
         log.debug(f"Starting junction sliding for net {topology.net.name}")
 
+        # Build an STRtree of all junctions from OTHER nets for quick spatial queries
+        other_junction_points = []
+        for net, topo in all_topologies.items():
+            if net is not topology.net:
+                for j in topo.junctions:
+                    other_junction_points.append(j.location)
+        junction_tree = STRtree(other_junction_points) if other_junction_points else None
+
         max_iterations = 10  # To prevent infinite loops
-        index = 0
         for i in range(max_iterations):
             proposed_moves = {}
             cost_reduced_this_iter = False
@@ -637,6 +743,8 @@ class GlobalRouter:
                     congestion_idx,
                     other_nets_geoms,
                     pin_macros,
+                    h_tracks,
+                    v_tracks,
                     module=module,
                 )
                 best_location = initial_location
@@ -656,19 +764,20 @@ class GlobalRouter:
                         connected_points.append(geom.centroid)
 
                 if not connected_points:
-                    search_step_size = 4
+                    search_step_size = 2
                 else:
                     x_coords = [p.x for p in connected_points]
                     y_coords = [p.y for p in connected_points]
                     span_x = max(x_coords) - min(x_coords) if x_coords else 0
                     span_y = max(y_coords) - min(y_coords) if y_coords else 0
                     span = max(span_x, span_y)
-                    search_step_size = max(4, int(span / 20))
+                    search_step_size = max(2, int(span / 10))  # More aggressive step size
                 # ---
 
-                # Explore surrounding spots
-                for dx in range(-search_step_size, search_step_size + 1, search_step_size):
-                    for dy in range(-search_step_size, search_step_size + 1, search_step_size):
+                # Explore surrounding spots in a wider range
+                search_range = 2 * search_step_size
+                for dx in range(-search_range, search_range + 1, search_step_size):
+                    for dy in range(-search_range, search_range + 1, search_step_size):
                         if dx == 0 and dy == 0:
                             continue
                         new_location = Point(initial_location.x + dx, initial_location.y + dy)
@@ -683,8 +792,15 @@ class GlobalRouter:
                             congestion_idx,
                             other_nets_geoms,
                             pin_macros,
+                            h_tracks,
+                            v_tracks,
                             module=module,
                         )
+
+                        # Add junction spacing penalty
+                        if junction_tree:
+                            nearby_junctions = junction_tree.query(new_location.buffer(4))
+                            current_cost += JUNCTION_SPACING_PENALTY * len(nearby_junctions)
 
                         if current_cost < min_cost:
                             min_cost = current_cost
@@ -696,22 +812,6 @@ class GlobalRouter:
                 if best_location != initial_location:
                     proposed_moves[junction] = best_location
                     cost_reduced_this_iter = True
-
-                log.info(
-                    f"DEBUG TEMPcalculating cost and dumping to prefix slide_iter_{i}_ for module:{module.name} net:{topology.net.name}"
-                )
-                self._calculate_total_cost(
-                    topology,
-                    macros,
-                    halos,
-                    congestion_idx,
-                    other_nets_geoms,
-                    pin_macros,
-                    debug_plot=True,
-                    module=module,
-                    plot_filename_prefix=f"temp_slide_iter_{i}_{index}_",
-                )
-                index += 1
 
             if not cost_reduced_this_iter:
                 log.debug(f"Junction sliding for net {topology.net.name} converged after {i} iterations.")
@@ -731,6 +831,8 @@ class GlobalRouter:
                 congestion_idx,
                 other_nets_geoms,
                 pin_macros,
+                h_tracks,
+                v_tracks,
                 debug_plot=True,
                 module=module,
                 plot_filename_prefix=f"slide_iter_{i}_",
@@ -747,6 +849,8 @@ class GlobalRouter:
         congestion_idx,
         other_nets_geoms,
         pin_macros: Dict[Pin, Polygon],
+        h_tracks,
+        v_tracks,
         debug_plot: bool = False,
         module: Optional[Module] = None,
         plot_filename_prefix: str | None = None,
@@ -792,7 +896,15 @@ class GlobalRouter:
                 if not candidate_paths:
                     path = LineString([p1, p2])
                     metrics, new_crossings = self._calculate_path_cost(
-                        path, macros, halos, congestion_idx, other_nets_geoms, p1_macro_to_ignore, p2_macro_to_ignore
+                        path,
+                        macros,
+                        halos,
+                        congestion_idx,
+                        other_nets_geoms,
+                        h_tracks,
+                        v_tracks,
+                        p1_macro_to_ignore,
+                        p2_macro_to_ignore,
                     )
                     total_cost += metrics.total_cost
                     if debug_plot:
@@ -806,6 +918,8 @@ class GlobalRouter:
                     halos,
                     congestion_idx,
                     other_nets_geoms,
+                    h_tracks,
+                    v_tracks,
                     p1_macro_to_ignore,
                     p2_macro_to_ignore,
                 )
@@ -815,6 +929,8 @@ class GlobalRouter:
                     halos,
                     congestion_idx,
                     other_nets_geoms,
+                    h_tracks,
+                    v_tracks,
                     p1_macro_to_ignore,
                     p2_macro_to_ignore,
                 )
@@ -943,6 +1059,7 @@ class GlobalRouter:
         macros = self._get_macro_geometries(module)
         halos = self._get_halo_geometries(macros)
         congestion_idx, other_nets_geoms = self._build_congestion_index(module, topology.net)
+        h_tracks, v_tracks = self._build_track_occupancy(other_nets_geoms)
 
         # 1. First pass: Update pin locations for pins inside macros
         for junction in topology.junctions:
@@ -958,10 +1075,24 @@ class GlobalRouter:
                         continue
 
                     metrics1, _ = self._calculate_path_cost(
-                        l_paths[0], macros, halos, congestion_idx, other_nets_geoms, p2_macro_to_ignore=macro
+                        l_paths[0],
+                        macros,
+                        halos,
+                        congestion_idx,
+                        other_nets_geoms,
+                        h_tracks,
+                        v_tracks,
+                        p2_macro_to_ignore=macro,
                     )
                     metrics2, _ = self._calculate_path_cost(
-                        l_paths[1], macros, halos, congestion_idx, other_nets_geoms, p2_macro_to_ignore=macro
+                        l_paths[1],
+                        macros,
+                        halos,
+                        congestion_idx,
+                        other_nets_geoms,
+                        h_tracks,
+                        v_tracks,
+                        p2_macro_to_ignore=macro,
                     )
                     best_path_to_center = l_paths[0] if metrics1.total_cost <= metrics2.total_cost else l_paths[1]
 
