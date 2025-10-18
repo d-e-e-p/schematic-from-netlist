@@ -449,17 +449,46 @@ class GlobalRouter:
         congestion_idx,
         other_nets_geoms,
         module: Module,
-        search_step_size: int = 4,
     ):
         """
         Post-processing step to slide each junction in all directions to see if cost is reduced.
         Greedy search all surrounding spots, take a step and repeat until no reduction for any junction.
+        Step size is determined dynamically based on the span of the junction's connections.
         """
         log.info(f"Starting junction sliding for net {topology.net.name}")
-        max_iterations = 1000  # To prevent infinite loops
+
+        # Build adjacency list for the whole topology
+        adj = defaultdict(set)
+        for j in topology.junctions:
+            for child in j.children:
+                adj[j].add(child)
+                adj[child].add(j)
+
+        max_iterations = 10  # To prevent infinite loops
         for i in range(max_iterations):
             cost_reduced = False
             for j_idx, junction in enumerate(topology.junctions):
+                # --- Calculate dynamic search step size ---
+                connected_points = []
+                for neighbor in adj[junction]:
+                    geom = neighbor.draw.geom if isinstance(neighbor, Pin) else neighbor.location
+                    if isinstance(geom, Point):
+                        connected_points.append(geom)
+                    elif geom:
+                        connected_points.append(geom.centroid)
+
+                if not connected_points:
+                    search_step_size = 1  # Default if no connections
+                else:
+                    x_coords = [p.x for p in connected_points]
+                    y_coords = [p.y for p in connected_points]
+                    span_x = max(x_coords) - min(x_coords) if x_coords else 0
+                    span_y = max(y_coords) - min(y_coords) if y_coords else 0
+                    span = max(span_x, span_y)
+                    search_step_size = max(1, int(span / 20))
+                log.info(f"Junction {junction.name}: span=({span_x:.1f}, {span_y:.1f}), step_size={search_step_size})")
+                # ---
+
                 initial_location = junction.location
                 min_cost = self._calculate_total_cost(topology, macros, halos, congestion_idx, other_nets_geoms)
                 best_location = initial_location
@@ -492,7 +521,7 @@ class GlobalRouter:
                             other_nets_geoms,
                             debug_plot=True,
                             module=module,
-                            plot_filename_prefix=plot_filename_prefix,
+                            plot_filename_prefix=None,
                         )
                         tried_locations_costs[(new_location.x, new_location.y)] = current_cost
                         log.info(f"  Trying {new_location} (cost {current_cost} / {min_cost})")
@@ -539,7 +568,7 @@ class GlobalRouter:
         other_nets_geoms,
         debug_plot: bool = False,
         module: Optional[Module] = None,
-        plot_filename_prefix: str = "",
+        plot_filename_prefix: str | None = None,
     ):
         """Calculate the total cost of all paths in a topology."""
         total_cost = 0.0
@@ -563,7 +592,7 @@ class GlobalRouter:
                 total_cost += metrics.total_cost
                 paths_with_metrics.append((path, metrics))
 
-        if debug_plot and module:
+        if debug_plot and module and plot_filename_prefix:
             timestamp = time.strftime("%Y%m%d-%H%M%S")
             filename = f"{plot_filename_prefix}{module.name}_{topology.net.name}_{timestamp}.png"
             self._plot_cost_calculation(module, topology, paths_with_metrics, macros, halos, filename)
@@ -649,7 +678,9 @@ class GlobalRouter:
 
         # Annotate points with cost percentage
         for i, txt in enumerate(costs_perc):
-            ax.annotate(f"{txt:.0f}%", (x_coords[i], y_coords[i]), textcoords="offset points", xytext=(0, 10), ha="center", fontsize=7)
+            ax.annotate(
+                f"{txt:.0f}%", (x_coords[i], y_coords[i]), textcoords="offset points", xytext=(0, 10), ha="center", fontsize=7
+            )
 
         # Mark best location
         ax.scatter(best_location.x, best_location.y, c="red", s=200, marker="*", label="Best Location")

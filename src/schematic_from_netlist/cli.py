@@ -42,14 +42,14 @@ def produce_graph(db):
     # graphviz -> extract macro and port locations -> remove buffers
     db.buffer_multi_fanout_nets()  # Insert fanout buffers
     db.dump_to_table("multi_fanout_insertion")
-    gv.generate_layout_figures()
+    gv.generate_layout_figures(phase="initial")
     db.remove_multi_fanout_buffers()
     db.fig2geom()
     junctions = router.insert_routing_junctions()
     db.insert_route_guide_buffers(junctions)
     db.dump_to_table("route_guide_insertion")
     db.geom2fig()
-    gv.generate_layout_figures()
+    gv.generate_layout_figures(phase="placed")
     db.remove_multi_fanout_buffers()
     db.geom2shape()
 

@@ -27,14 +27,23 @@ class RectanglePhysical:
     def fig2shape(self):
         if self.fig is None:
             self.shape = None
-            return self.fig
+            return self.shape
         s = scaling_from_gv_to_dr
         x1, y1, x2, y2 = self.fig
         self.shape = (int(round(x1 * s)), int(round(y1 * s)), int(round(x2 * s)), int(round(y2 * s)))
         return self.shape
 
+    def shape2fig(self):
+        if self.shape is None:
+            self.fig = None
+            return self.fig
+        s = scaling_from_gv_to_dr
+        x1, y1, x2, y2 = self.shape
+        self.fig = (round(x1 / s, 2), round(y1 / s, 2), round(x2 / s, 2), round(y2 / s, 2))
+        return self.fig
+
     def shape2geom(self):
-        if not self.shape or len(self.shape) != 4:
+        if not self.shape:
             self.geom = None
             return None
         x1, y1, x2, y2 = self.shape
@@ -63,6 +72,15 @@ class PointPhysical:
         x, y = self.fig
         self.shape = (int(round(x * s)), int(round(y * s)))
         return self.shape
+
+    def shape2fig(self):
+        if self.shape is None:
+            self.fig = None
+            return self.fig
+        s = scaling_from_gv_to_dr
+        x, y = self.shape
+        self.fig = (round(x / s, 2), round(y / s, 2))
+        return self.fig
 
     def shape2geom(self):
         if self.shape is None:
@@ -121,6 +139,9 @@ class NetPhysical:
             if pt_start != pt_end:
                 self.shape.append((pt_start, pt_end))
         return self.shape
+
+    def shape2fig(self):
+        pass  # don't bother with routing back into fig
 
     def shape2geom(self):
         if not self.shape:
@@ -199,7 +220,7 @@ class DesignPhysical(RectanglePhysical):
         self._for_each_draw_obj(lambda d: d.fig2shape())
 
     def shape2fig(self):
-        self._for_each_draw_obj(lambda d: d.geom2shape())
+        self._for_each_draw_obj(lambda d: d.shape2fig())
 
     def geom2shape(self):
         self.clear_all_shapes()

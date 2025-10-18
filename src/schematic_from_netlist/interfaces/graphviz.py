@@ -81,15 +81,17 @@ class Graphviz:
     def __init__(self, db):
         self.db = db
         self.output_dir = "data/json"
+        self.phase = "initial"
 
-    def generate_layout_figures(self):
+    def generate_layout_figures(self, phase: str = "initial"):
+        self.phase = phase
         sorted_modules = sorted(self.db.design.modules.values(), key=lambda m: m.depth, reverse=True)
         for module in sorted_modules:
             if not module.is_leaf:
                 self.generate_module_layout(module)
 
     def generate_module_layout(self, module):
-        log.info(f"Generating layout for module {module.name}")
+        log.info(f"Generating layout for module {module.name} phase {self.phase}")
         os.makedirs("data/png", exist_ok=True)
 
         A = pgv.AGraph(directed=True, strict=False, ratio="auto")
@@ -172,6 +174,15 @@ class Graphviz:
                 size_node = scale_macro_size(degree)
                 attr["width"] = size_node
                 attr["height"] = size_node
+
+            if self.phase != "initial":
+                if fig := inst.draw.fig:
+                    # attr["pos"] = f"{fig[0] / 72},{fig[1] / 72}"
+                    attr["pos"] = f"{fig[0]},{fig[1]}"
+                else:
+                    log.error(f"No figure for instance {inst.name}")
+                    breakpoint()
+
             A.add_node(inst.name, **attr)
 
     def add_ranks(self, A, module):
@@ -223,18 +234,28 @@ class Graphviz:
     def run_graphviz(self, A, module):
         # Layout and extract size
         os.makedirs("data/dot", exist_ok=True)
-        A.write(f"data/dot/pre_{module.name}.dot")
+        os.makedirs("data/png", exist_ok=True)
+        predot = f"data/dot/pre_{self.phase}_{module.name}.dot"
+        postdot = f"data/dot/post_{self.phase}_{module.name}.dot"
+        postpng = f"data/png/post_{self.phase}_{module.name}.png"
+        A.write(predot)
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", category=RuntimeWarning)
             log.info(f"Running graphviz for module {module.name}")
-            A.layout(prog="dot", args="-vy")
-            log.info(f"Done graphviz for module {module.name}")
-        A.write(f"data/dot/post_{module.name}.dot")
+            if self.phase == "initial":
+                A.layout(prog="dot", args="-vy")
+                A.write(postdot)
+            else:
+                # assume placed dot
+                os.system(f"neato -y -n2 -Tdot -o {postdot} {predot}")
+                A = pgv.AGraph(postdot, strict=False)
+
+            log.info(f"Ran graphviz for module {module.name} with result in {postdot}")
         with warnings.catch_warnings():
             # warnings.filterwarnings("ignore", category=RuntimeWarning)
             # A.draw(f"data/png/post_{module.name}.png", format="png")
             log.info(f"TODO : fix png generation")
-            os.system(f"neato -y -n2 -Tpng -o data/png/post_{module.name}.png data/dot/post_{module.name}.dot")
+            os.system(f"neato -y -n2 -Tpng -o {postpng} {postdot}")
 
     def build_graphviz_data(self):
         """
@@ -499,7 +520,7 @@ class Graphviz:
             # sep="+2,2",
             sep="+20,20",
             esep="+2,2",
-            nodesep="+2,2",  # minimum space between two adjacent nodes in the same rank,
+            nodesep="0.5,0.5",  # minimum space between two adjacent nodes in the same rank,
             epsilon="1e-7",
             rankdir="LR",
             start="rand",  # better escape from local minima
@@ -528,8 +549,9 @@ class Graphviz:
         """Extracts geometry from the graph."""
 
         log.info("Extracting geometry...")
-        bb = A.graph_attr["bb"]
-        if bb:
+        log.info(f"{A.graph_attr.keys()=}")
+        if "bb" in A.graph_attr.keys():
+            bb = A.graph_attr["bb"]
             xmin, ymin, xmax, ymax = map(float, bb.split(","))
             module.draw.fig = (abs(xmax - xmin), abs(ymax - ymin))
 
@@ -594,5 +616,8 @@ class Graphviz:
                 pin.draw.fig = tail_coord
             if net_name:
                 module.nets[net_name].draw.fig.extend(wire_segments)
+
+        if not module.draw.fig:
+            self.calc_bounding_box(module)
 
         log.info("Geometry extracted")

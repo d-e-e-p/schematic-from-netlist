@@ -8,6 +8,7 @@ from collections import defaultdict
 # from pprint import pprint
 from typing import Dict, List, Optional
 
+from shapely.geometry import box
 from tabulate import tabulate
 
 from schematic_from_netlist.graph.global_router import Junction
@@ -237,16 +238,21 @@ class NetlistOperationsMixin:
                 buffer_inst = module.add_instance(buffer_name, stub_module, module_ref)
                 buffer_inst.is_buffer = True
                 buffer_inst.buffer_original_netname = topo.net.name
-                buffer_inst.draw.geom = junction.location
+                pt = junction.location  # shapely Point
+
+                # box size
+                hsize = 1.0
+                # Create box centered on the point
+                buffer_inst.draw.geom = box(pt.x - hsize, pt.y - hsize, pt.x + hsize, pt.y + hsize)
                 junc_name_to_inst[junction.name] = buffer_inst
 
         # pass 2 : connect pins and junctions
         for topo in topos:
             for junction in topo.junctions:
                 original_net_name = topo.net.name
-                logging.info(f"Inserting {junction.name=} in {original_net_name} at {junction.location}")
 
                 buf_src = junc_name_to_inst[junction.name]
+                logging.info(f"Inserting {junction.name=} in {original_net_name} at {junction.location} -> {buf_src.name}")
 
                 i = 0
                 for child in junction.children:
