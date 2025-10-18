@@ -65,7 +65,7 @@ class ParseJson:
                 geom_db.ports[text_data] = (x, y)
 
                 # Extract wire points
-                text_data = edge["label"]
+                text_data = edge["xlabel"]
                 points_data = edge["_draw_"][-1]["points"]
                 geom_db.nets[text_data] = points_data
 
@@ -118,7 +118,7 @@ class Graphviz:
                     A.add_edge(
                         src.instance.name,
                         dst.instance.name,
-                        label=net.name,
+                        xlabel=net.name,
                         headlabel=dst.full_name,
                         taillabel=src.full_name,
                         weight=weight,
@@ -131,7 +131,7 @@ class Graphviz:
                     A.add_edge(
                         pin.instance.name,
                         stub_name,
-                        label=net.name,
+                        xlabel=net.name,
                         headlabel=pin.full_name,
                         taillabel=pin.full_name,
                         weight=weight,
@@ -165,6 +165,7 @@ class Graphviz:
                 attr["shape"] = "circle"
                 attr["width"] = size_buffer
                 attr["height"] = size_buffer
+                attr["xlabel"] = inst.name
             else:
                 attr["shape"] = "box"
                 degree = len(inst.pins)
@@ -279,7 +280,7 @@ class Graphviz:
                             A.add_edge(
                                 src.instance.name,
                                 dst.instance.name,
-                                label=net.name,
+                                xlabel=net.name,
                                 headlabel=dst.full_name,
                                 taillabel=src.full_name,
                             )
@@ -290,7 +291,7 @@ class Graphviz:
                         A.add_edge(
                             pin.instance.name,
                             stub_name,
-                            label=net.name,
+                            xlabel=net.name,
                             headlabel=pin.full_name,
                             taillabel=pin.full_name,
                         )
@@ -400,7 +401,7 @@ class Graphviz:
                 A.add_edge(
                     src_cluster,
                     dst_cluster,
-                    label=net.name,
+                    xlabel=net.name,
                     headlabel=f"cluster{dst_partition}/{net.name}",
                     taillabel=f"cluster{src_partition}/{net.name}",
                 )
@@ -580,7 +581,7 @@ class Graphviz:
             tail_coord, head_coord, wire_segments = parse_edge_pin_positions(edge)
             tail_pin = edge.attr.get("taillabel")
             head_pin = edge.attr.get("headlabel")
-            net_name = edge.attr.get("label")
+            net_name = edge.attr.get("xlabel")
             # order is important because for open nets head and tail labels are the same, and we need to overwrite
             # with tail
             if head_pin and head_coord:
