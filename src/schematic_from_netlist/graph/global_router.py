@@ -257,7 +257,7 @@ class GlobalRouter:
             total_cost=total_cost,
         )
 
-        log.info(
+        log.debug(
             f"cost: wl={cost_wirelength:.1f}, macro={cost_macro:.1f}, halo={cost_halo:.1f}, "
             f"congestion={cost_congestion:.1f}, penalties={cost_macro_junction_penalty + cost_halo_junction_penalty:.1f}, "
             f"total={total_cost:.1f}"
@@ -455,7 +455,7 @@ class GlobalRouter:
         Greedy search all surrounding spots, take a step and repeat until no reduction for any junction.
         Step size is determined dynamically based on the span of the junction's connections.
         """
-        log.info(f"Starting junction sliding for net {topology.net.name}")
+        log.debug(f"Starting junction sliding for net {topology.net.name}")
 
         # Build adjacency list for the whole topology
         adj = defaultdict(set)
@@ -486,7 +486,7 @@ class GlobalRouter:
                     span_y = max(y_coords) - min(y_coords) if y_coords else 0
                     span = max(span_x, span_y)
                     search_step_size = max(1, int(span / 20))
-                log.info(f"Junction {junction.name}: span=({span_x:.1f}, {span_y:.1f}), step_size={search_step_size})")
+                log.debug(f"Junction {junction.name}: span=({span_x:.1f}, {span_y:.1f}), step_size={search_step_size})")
                 # ---
 
                 initial_location = junction.location
@@ -524,7 +524,7 @@ class GlobalRouter:
                             plot_filename_prefix=None,
                         )
                         tried_locations_costs[(new_location.x, new_location.y)] = current_cost
-                        log.info(f"  Trying {new_location} (cost {current_cost} / {min_cost})")
+                        log.debug(f"  Trying {new_location} (cost {current_cost} / {min_cost})")
 
                         if current_cost < min_cost:
                             min_cost = current_cost
@@ -548,13 +548,13 @@ class GlobalRouter:
                 if best_location != initial_location:
                     junction.location = best_location
                     cost_reduced = True
-                    log.info(f"  Moved junction {junction.name} to {best_location} (cost reduced)")
+                    log.debug(f"  Moved junction {junction.name} to {best_location} (cost reduced)")
                 else:
                     # Restore original location if no improvement
                     junction.location = initial_location
 
             if not cost_reduced:
-                log.info(f"Junction sliding for net {topology.net.name} converged after {i + 1} iterations.")
+                log.debug(f"Junction sliding for net {topology.net.name} converged after {i + 1} iterations.")
                 break
         else:
             log.warning(f"Junction sliding for net {topology.net.name} did not converge after {max_iterations} iterations.")
@@ -692,7 +692,7 @@ class GlobalRouter:
         full_path = os.path.join(out_dir, filename)
         plt.savefig(full_path, dpi=200)
         plt.close(fig)
-        log.info(f"Saved junction move heatmap -> {full_path}")
+        log.debug(f"Saved junction move heatmap -> {full_path}")
 
     def _plot_cost_calculation(
         self, module: Module, topology: Topology, paths_with_metrics: list, macros: Polygon, halos: Polygon, filename: str
@@ -778,7 +778,7 @@ class GlobalRouter:
         full_path = os.path.join(out_dir, filename)
         plt.savefig(full_path, dpi=200)
         plt.close(fig)
-        log.info(f"Saved cost debug plot for net {topology.net.name} -> {full_path}")
+        log.debug(f"Saved cost debug plot for net {topology.net.name} -> {full_path}")
 
     def _rebuild_net_geometry(self, topology: Topology):
         """Recreate the net's geometry from the final junction and pin locations."""
@@ -812,21 +812,21 @@ class GlobalRouter:
     def _log_junction_summary(self):
         """Log detailed summary of inserted junctions."""
         for module, topos in self.junctions.items():
-            log.info(f"module {module.name=} size {module.draw.geom}")
+            log.debug(f"module {module.name=} size {module.draw.geom}")
             macros = self._get_macro_geometries(module)
             if not macros.is_empty:
-                log.info(f"  Macro blockages at: {macros.wkt}")
+                log.debug(f"  Macro blockages at: {macros.wkt}")
             for topo in topos:
                 # Log detailed junction info
                 for junction in topo.junctions:
-                    log.info(f"Inserting {junction.name=} in {topo.net.name} at {junction.location}")
+                    log.debug(f"Inserting {junction.name=} in {topo.net.name} at {junction.location}")
                     for child in junction.children:
                         if isinstance(child, Junction):
-                            log.info(f"  Connected to junction {child.name} at {child.location}")
+                            log.debug(f"  Connected to junction {child.name} at {child.location}")
                         elif isinstance(child, Pin):
-                            log.info(f"  Connected to pin {child.full_name} at {child.draw.geom}")
+                            log.debug(f"  Connected to pin {child.full_name} at {child.draw.geom}")
                         else:
-                            log.info(f"  Connected to unknown child type {type(child)}")
+                            log.debug(f"  Connected to unknown child type {type(child)}")
 
         summary = []
         for module, topos in self.junctions.items():

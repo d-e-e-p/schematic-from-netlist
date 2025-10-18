@@ -252,18 +252,18 @@ class NetlistOperationsMixin:
                 original_net_name = topo.net.name
 
                 buf_src = junc_name_to_inst[junction.name]
-                logging.info(f"Inserting {junction.name=} in {original_net_name} at {junction.location} -> {buf_src.name}")
+                logging.debug(f"Inserting {junction.name=} in {original_net_name} at {junction.location} -> {buf_src.name}")
 
                 i = 0
                 for child in junction.children:
                     if isinstance(child, Junction):
-                        logging.info(f" {buf_src.name} -> {child.name}")
+                        logging.debug(f" {buf_src.name} -> {child.name}")
                         new_net_name = f"{original_net_name}{self.inserted_net_suffix}{i}"
 
                         new_net = module.add_net(new_net_name)
                         new_net.is_buffered_net = True
                         new_net.buffer_original_netname = original_net_name
-                        logging.info(f": created net {new_net.name} derived from {new_net.buffer_original_netname}")
+                        logging.debug(f": created net {new_net.name} derived from {new_net.buffer_original_netname}")
 
                         buf_dst = junc_name_to_inst[child.name]
 
@@ -279,13 +279,13 @@ class NetlistOperationsMixin:
                         i += 1
 
                     elif isinstance(child, Pin):
-                        logging.info(f" {buf_src.name}  -> {child.full_name}")
+                        logging.debug(f" {buf_src.name}  -> {child.full_name}")
                         new_net_name = f"{original_net_name}{self.inserted_net_suffix}{i}"
 
                         new_net = module.add_net(new_net_name)
                         new_net.is_buffered_net = True
                         new_net.buffer_original_netname = original_net_name
-                        logging.info(f": created net {new_net.name} derived from {new_net.buffer_original_netname}")
+                        logging.debug(f": created net {new_net.name} derived from {new_net.buffer_original_netname}")
 
                         new_net.connect_pin(child)
 
@@ -296,7 +296,10 @@ class NetlistOperationsMixin:
                         i += 1
 
                     else:
-                        logging.info(f" unknown child type {type(child)}")
+                        logging.warning(
+                            f"in {junction.name=} in {original_net_name} at {junction.location} -> {buf_src.name}"
+                            f" : unknown child type {type(child)}"
+                        )
 
     def create_buffering_for_groups(self, module, net, ordering, collections):
         """deal with fanout routing"""
