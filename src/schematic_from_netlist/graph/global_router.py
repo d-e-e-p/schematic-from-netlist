@@ -355,45 +355,20 @@ class GlobalRouter:
             if corner.within(halos):
                 cost_halo_junction_penalty = 500.0
 
-        # Subtract costs for segments inside specified macros
+        # Zero out wirelength and macro overlap costs for segments inside their own macro
         for macro_to_ignore in [p1_macro_to_ignore, p2_macro_to_ignore]:
             if macro_to_ignore:
                 internal_segment = path.intersection(macro_to_ignore)
                 if internal_segment.length > 0:
-                    # Recalculate costs for the internal segment and subtract them
                     internal_wirelength = internal_segment.length
-                    internal_macro_overlap = internal_segment.intersection(macros).length
-                    internal_halo_overlap = internal_segment.intersection(halos).length
-                    internal_intersecting_length = 0.0
-                    internal_crossings = 0
 
-                    possible_internal_intersections = [
-                        other_nets_geoms[i] for i in congestion_idx.intersection(internal_segment.bounds)
-                    ]
-                    for geom in possible_internal_intersections:
-                        if internal_segment.intersects(geom):
-                            internal_intersecting_length += internal_segment.intersection(geom).length
-                            intersection = internal_segment.intersection(geom)
-                            if isinstance(intersection, Point):
-                                internal_crossings += 1
-                            elif isinstance(intersection, MultiPoint):
-                                internal_crossings += len(intersection.geoms)
-                            elif isinstance(intersection, (LineString, MultiLineString)):
-                                internal_crossings += math.ceil(intersection.length / GRID_SPACING)
-
-                    # Subtract costs
+                    # Subtract wirelength and macro overlap cost for the internal segment
                     cost_wirelength -= ROUTE_WEIGHTS["wirelength"] * internal_wirelength
-                    cost_macro -= ROUTE_WEIGHTS["macro"] * internal_macro_overlap
-                    cost_halo -= ROUTE_WEIGHTS["halo"] * internal_halo_overlap
-                    cost_congestion -= ROUTE_WEIGHTS["congestion"] * internal_intersecting_length
-                    cost_crossing -= ROUTE_WEIGHTS["crossing"] * internal_crossings
+                    cost_macro -= ROUTE_WEIGHTS["macro"] * internal_wirelength
 
-                    # Update raw metrics as well
+                    # Update raw metrics as well for logging consistency
                     wirelength -= internal_wirelength
-                    macro_overlap -= internal_macro_overlap
-                    halo_overlap -= internal_halo_overlap
-                    intersecting_length -= internal_intersecting_length
-                    intersecting_crossings -= internal_crossings
+                    macro_overlap -= internal_wirelength
 
         # Total cost
         total_cost = (
@@ -648,6 +623,7 @@ class GlobalRouter:
         log.debug(f"Starting junction sliding for net {topology.net.name}")
 
         max_iterations = 10  # To prevent infinite loops
+        index = 0
         for i in range(max_iterations):
             proposed_moves = {}
             cost_reduced_this_iter = False
@@ -680,14 +656,14 @@ class GlobalRouter:
                         connected_points.append(geom.centroid)
 
                 if not connected_points:
-                    search_step_size = 1
+                    search_step_size = 4
                 else:
                     x_coords = [p.x for p in connected_points]
                     y_coords = [p.y for p in connected_points]
                     span_x = max(x_coords) - min(x_coords) if x_coords else 0
                     span_y = max(y_coords) - min(y_coords) if y_coords else 0
                     span = max(span_x, span_y)
-                    search_step_size = max(1, int(span / 20))
+                    search_step_size = max(4, int(span / 20))
                 # ---
 
                 # Explore surrounding spots
@@ -720,6 +696,22 @@ class GlobalRouter:
                 if best_location != initial_location:
                     proposed_moves[junction] = best_location
                     cost_reduced_this_iter = True
+
+                log.info(
+                    f"DEBUG TEMPcalculating cost and dumping to prefix slide_iter_{i}_ for module:{module.name} net:{topology.net.name}"
+                )
+                self._calculate_total_cost(
+                    topology,
+                    macros,
+                    halos,
+                    congestion_idx,
+                    other_nets_geoms,
+                    pin_macros,
+                    debug_plot=True,
+                    module=module,
+                    plot_filename_prefix=f"temp_slide_iter_{i}_{index}_",
+                )
+                index += 1
 
             if not cost_reduced_this_iter:
                 log.debug(f"Junction sliding for net {topology.net.name} converged after {i} iterations.")
@@ -792,11 +784,16 @@ class GlobalRouter:
                 if not isinstance(p2, Point):
                     p2 = p2.centroid
 
+                p1_macro_to_ignore = pin_macros.get(u) if isinstance(u, Pin) else None
+                p2_macro_to_ignore = pin_macros.get(v) if isinstance(v, Pin) else None
+
                 candidate_paths = self._generate_l_paths(p1, p2)
 
                 if not candidate_paths:
                     path = LineString([p1, p2])
-                    metrics, new_crossings = self._calculate_path_cost(path, macros, halos, congestion_idx, other_nets_geoms)
+                    metrics, new_crossings = self._calculate_path_cost(
+                        path, macros, halos, congestion_idx, other_nets_geoms, p1_macro_to_ignore, p2_macro_to_ignore
+                    )
                     total_cost += metrics.total_cost
                     if debug_plot:
                         paths_with_metrics.append((path, metrics))
@@ -804,10 +801,22 @@ class GlobalRouter:
                     continue
 
                 metrics1, crossings1 = self._calculate_path_cost(
-                    candidate_paths[0], macros, halos, congestion_idx, other_nets_geoms
+                    candidate_paths[0],
+                    macros,
+                    halos,
+                    congestion_idx,
+                    other_nets_geoms,
+                    p1_macro_to_ignore,
+                    p2_macro_to_ignore,
                 )
                 metrics2, crossings2 = self._calculate_path_cost(
-                    candidate_paths[1], macros, halos, congestion_idx, other_nets_geoms
+                    candidate_paths[1],
+                    macros,
+                    halos,
+                    congestion_idx,
+                    other_nets_geoms,
+                    p1_macro_to_ignore,
+                    p2_macro_to_ignore,
                 )
 
                 if metrics1.total_cost < metrics2.total_cost:
