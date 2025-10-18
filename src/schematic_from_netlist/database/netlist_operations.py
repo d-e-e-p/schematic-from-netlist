@@ -142,11 +142,11 @@ class NetlistOperationsMixin:
         stub_module = Module(name=module_ref)
         stub_module.is_leaf = True
 
-        logging.info(f"instrumentation: in {module.name} Found {len(nets_to_buffer)} nets to buffer.")
+        logging.info(f"in {module.name} Found {len(nets_to_buffer)} nets to buffer.")
         for net in nets_to_buffer:
             original_net_name = net.name
             net.draw.shape = []
-            logging.debug(f"instrumentation: in {module.name} Buffering net {original_net_name} with {net.num_conn} connections.")
+            logging.debug(f"in {module.name} Buffering net {original_net_name} with {net.num_conn} connections.")
             i = 0
             buffer_name = f"{self.inserted_buf_prefix}{i}_{original_net_name}"
             buffer_inst = module.add_instance(buffer_name, stub_module, module_ref)
@@ -159,12 +159,12 @@ class NetlistOperationsMixin:
                 new_net = module.add_net(new_net_name)
                 new_net.is_buffered_net = True
                 new_net.buffer_original_netname = original_net_name
-                logging.debug(f"instrumentation: created net {new_net.name} derived from {new_net.buffer_original_netname}")
+                logging.debug(f"created net {new_net.name} derived from {new_net.buffer_original_netname}")
 
                 buf_inout_pin = buffer_inst.add_pin(f"IO{i}", PinDirection.INOUT)
                 new_net.connect_pin(buf_inout_pin)
 
-                logging.debug(f"instrumentation: Moving pin {pin.full_name} from {net.name} to {new_net.name}")
+                logging.debug(f"moving pin {pin.full_name} from {net.name} to {new_net.name}")
                 net.remove_pin(pin)
                 new_net.connect_pin(pin)
 
@@ -217,18 +217,81 @@ class NetlistOperationsMixin:
 
     def insert_route_guide_buffers(self, junctions):
         logging.info(f"Inserting route guide buffers ")
-        """
         for module, topos in junctions.items():
-            for topo in topos:
-                logging.info(f"Junction for module {module.name} {topo.net.name=} {topo.net.num_conn=}")
-                for junction in topo.junctions:
-                    logging.info(f"Inserting {junction.name=} at {junction.location}")
-                    for child in junction.children:
-                        if isinstance(child, Junction):
-                            logging.info(f"Inserting J {child.name=} ")
-                        elif isinstance(child, Pin):
-                            logging.info(f"Inserting P {child.name=} ")
-        """
+            self.insert_route_guide_buffers_for_module(module, topos)
+
+    def insert_route_guide_buffers_for_module(self, module, topos):
+        module_ref = "FANOUT_BUFFER"
+        stub_module = Module(name=module_ref)
+        stub_module.is_leaf = True
+
+        junc_name_to_inst = {}
+
+        # pass 1 : create junctions
+        i = 0
+        for topo in topos:
+            for junction in topo.junctions:
+                original_net_name = topo.net.name
+                buffer_name = f"{self.inserted_buf_prefix}{i}_{original_net_name}"
+                i += 1
+                buffer_inst = module.add_instance(buffer_name, stub_module, module_ref)
+                buffer_inst.is_buffer = True
+                buffer_inst.buffer_original_netname = topo.net.name
+                buffer_inst.draw.geom = junction.location
+                junc_name_to_inst[junction.name] = buffer_inst
+
+        # pass 2 : connect pins and junctions
+        for topo in topos:
+            for junction in topo.junctions:
+                original_net_name = topo.net.name
+                logging.info(f"Inserting {junction.name=} in {original_net_name} at {junction.location}")
+
+                buf_src = junc_name_to_inst[junction.name]
+
+                i = 0
+                for child in junction.children:
+                    if isinstance(child, Junction):
+                        logging.info(f" {buf_src.name} -> {child.name}")
+                        new_net_name = f"{original_net_name}{self.inserted_net_suffix}{i}"
+
+                        new_net = module.add_net(new_net_name)
+                        new_net.is_buffered_net = True
+                        new_net.buffer_original_netname = original_net_name
+                        logging.info(f": created net {new_net.name} derived from {new_net.buffer_original_netname}")
+
+                        buf_dst = junc_name_to_inst[child.name]
+
+                        buf_input_pin = buf_dst.add_pin(f"I{i}", PinDirection.INPUT)
+                        new_net.connect_pin(buf_input_pin)
+
+                        buf_output_pin = buf_src.add_pin(f"O{i}", PinDirection.OUTPUT)
+                        new_net.connect_pin(buf_output_pin)
+
+                        logging.debug(
+                            f"connected net:{new_net.name} between {buf_input_pin.full_name} and {buf_output_pin.full_name}"
+                        )
+                        i += 1
+
+                    elif isinstance(child, Pin):
+                        logging.info(f" {buf_src.name}  -> {child.full_name}")
+                        new_net_name = f"{original_net_name}{self.inserted_net_suffix}{i}"
+
+                        new_net = module.add_net(new_net_name)
+                        new_net.is_buffered_net = True
+                        new_net.buffer_original_netname = original_net_name
+                        logging.info(f": created net {new_net.name} derived from {new_net.buffer_original_netname}")
+
+                        new_net.connect_pin(child)
+
+                        buf_output_pin = buf_src.add_pin(f"O{i}", PinDirection.OUTPUT)
+                        new_net.connect_pin(buf_output_pin)
+
+                        logging.debug(f"connected net:{new_net.name} between {child.full_name} and {buf_output_pin.full_name}")
+                        i += 1
+
+                    else:
+                        logging.info(f" unknown child type {type(child)}")
+
         exit()
 
     def create_buffering_for_groups(self, module, net, ordering, collections):
