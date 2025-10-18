@@ -41,52 +41,6 @@ class NetlistOperationsMixin:
             "all_pins": list(net.pins),
         }
 
-    def get_fanout_tree(self, driver_pin: "Pin") -> "Dict":
-        """Get the complete fanout tree from a driver pin"""
-        if driver_pin.direction != PinDirection.OUTPUT or not driver_pin.net:
-            return {}
-
-        net = driver_pin.net
-        fanout_tree = {
-            "driver": driver_pin.full_name,
-            "net": net.full_name,
-            "loads": [pin.full_name for pin in net.loads],
-            "fanout": len(net.loads),
-        }
-
-        return fanout_tree
-
-    def find_timing_paths(self, start_instance: "Instance", end_instance: "Instance") -> "List[List[Pin]]":
-        """Find timing paths between two instances"""
-        # This is a simplified version - real timing analysis is much more complex
-        paths = []
-
-        def dfs_path(current_pin: "Pin", target_instance: "Instance", current_path: "List[Pin]"):
-            if len(current_path) > 20:  # Prevent infinite loops
-                return
-
-            if current_pin.instance == target_instance:
-                paths.append(current_path + [current_pin])
-                return
-
-            if current_pin.net:
-                net = current_pin.net
-                if current_pin.direction == PinDirection.OUTPUT:
-                    next_pins = net.loads
-                else:
-                    next_pins = net.drivers
-
-                for next_pin in next_pins:
-                    if next_pin not in current_path:
-                        dfs_path(next_pin, target_instance, current_path + [current_pin])
-
-        # Start from all output pins of start instance
-        for pin in start_instance.pins.values():
-            if pin.direction == PinDirection.OUTPUT:
-                dfs_path(pin, end_instance, [])
-
-        return paths
-
     def generate_ids(self):
         net_id_counter = 0
         inst_id_counter = 0

@@ -526,7 +526,7 @@ class GlobalRouter:
         # Initialize MST algorithm (Prim's)
         unconnected_pins = set(pins)
         start_pin = unconnected_pins.pop()
-        tree_connection_points = {start_pin}
+        tree_connection_points: Set[Pin | Junction] = {start_pin}
         topology = Topology(net=net)
 
         # Greedy merge loop
@@ -571,7 +571,13 @@ class GlobalRouter:
                 unconnected_pins.remove(best_new_pin)
             corner = self._get_l_path_corner(best_path)
             junction_name = f"J_{net.name}_{len(topology.junctions)}"
-            junction = Junction(name=junction_name, location=corner, children={best_new_pin, best_connection_point})
+            # Ensure we only add valid Pin or Junction objects to children
+            children = set()
+            if best_new_pin is not None:
+                children.add(best_new_pin)
+            if best_connection_point is not None:
+                children.add(best_connection_point)
+            junction = Junction(name=junction_name, location=corner, children=children)
             topology.junctions.append(junction)
             tree_connection_points.add(junction)
 
@@ -588,6 +594,8 @@ class GlobalRouter:
             for child in junction.children:
                 if isinstance(child, Pin):
                     end_point = child.draw.geom
+                    if end_point is None:
+                        continue
                     if not isinstance(end_point, Point):
                         end_point = end_point.centroid
                 else:  # Junction
@@ -601,7 +609,12 @@ class GlobalRouter:
                     new_geoms.append(LineString([start_point, end_point]))
 
         if new_geoms:
-            merged_geom = linemerge(unary_union(new_geoms))
+            union_geom = unary_union(new_geoms)
+            merged_geom = None
+            if isinstance(union_geom, LineString):
+                merged_geom = linemerge([union_geom])
+            elif isinstance(union_geom, MultiLineString):
+                merged_geom = linemerge(union_geom)
             if isinstance(merged_geom, LineString):
                 topology.net.draw.geom = MultiLineString([merged_geom])
             elif isinstance(merged_geom, MultiLineString):
@@ -677,6 +690,8 @@ class GlobalRouter:
                 for child in j.children:
                     if isinstance(child, Pin):
                         p = child.draw.geom
+                        if p is None:
+                            continue
                         if not isinstance(p, Point):
                             p = p.centroid
                         # Higher weight for pins
@@ -696,7 +711,7 @@ class GlobalRouter:
 
                 if coords_x:
                     # Update location to the median of connection points
-                    new_loc = Point(np.median(coords_x), np.median(coords_y))
+                    new_loc = Point(float(np.median(coords_x)), float(np.median(coords_y)))
 
                     # If the ideal location is restricted, find the nearest valid point on the boundary
                     if new_loc.within(macros) or new_loc.within(halos):
@@ -851,8 +866,8 @@ class GlobalRouter:
     def _calculate_total_cost(
         self,
         topology: Topology,
-        macros: Polygon,
-        halos: Polygon,
+        macros: Polygon | BaseGeometry,
+        halos: Polygon | BaseGeometry,
         congestion_idx,
         other_nets_geoms,
         pin_macros: Dict[Pin, Polygon],
@@ -871,7 +886,7 @@ class GlobalRouter:
 
         # Build adjacency list for the topology
         adj = defaultdict(set)
-        all_nodes = set(topology.junctions)
+        all_nodes: Set[Junction | Pin] = set(topology.junctions)
         for j in topology.junctions:
             for child in j.children:
                 adj[j].add(child)
@@ -888,12 +903,15 @@ class GlobalRouter:
                 processed_edges.add(tuple(sorted((id(u), id(v)))))
 
                 p1 = u.location if isinstance(u, Junction) else u.draw.geom
-                if not isinstance(p1, Point):
+                if p1 and not isinstance(p1, Point):
                     p1 = p1.centroid
 
                 p2 = v.location if isinstance(v, Junction) else v.draw.geom
-                if not isinstance(p2, Point):
+                if p2 and not isinstance(p2, Point):
                     p2 = p2.centroid
+
+                if p1 is None or p2 is None:
+                    continue
 
                 p1_macro_to_ignore = pin_macros.get(u) if isinstance(u, Pin) else None
                 p2_macro_to_ignore = pin_macros.get(v) if isinstance(v, Pin) else None
@@ -961,7 +979,10 @@ class GlobalRouter:
 
         fig, ax = plt.subplots(figsize=(12, 12))
         ax.set_aspect("equal", adjustable="box")
-        ax.set_title(f"Cost Calculation for Net: {topology.net.name} in {module.name}")
+        title = f"Cost Calculation for Net: {topology.net.name}"
+        if module:
+            title += f" in {module.name}"
+        ax.set_title(title)
         ax.set_xlabel("X")
         ax.set_ylabel("Y")
 
@@ -977,8 +998,9 @@ class GlobalRouter:
                     x, y = sub.exterior.xy
                     ax.fill(x, y, color="lightgrey", alpha=0.6, zorder=2)
             else:
-                x, y = macros.exterior.xy
-                ax.fill(x, y, color="lightgrey", alpha=0.6, zorder=2)
+                if isinstance(macros, Polygon):
+                    x, y = macros.exterior.xy
+                    ax.fill(x, y, color="lightgrey", alpha=0.6, zorder=2)
 
         # --- Draw halos ---
         if not halos.is_empty:
@@ -987,8 +1009,9 @@ class GlobalRouter:
                     x, y = sub.exterior.xy
                     ax.plot(x, y, color="blue", ls="--", lw=1, zorder=3)
             else:
-                x, y = halos.exterior.xy
-                ax.plot(x, y, color="blue", ls="--", lw=1, zorder=3)
+                if isinstance(halos, Polygon):
+                    x, y = halos.exterior.xy
+                    ax.plot(x, y, color="blue", ls="--", lw=1, zorder=3)
 
         # --- Draw paths and labels ---
         total_cost_for_plot = 0
@@ -1031,6 +1054,8 @@ class GlobalRouter:
         pins = [p for p in topology.net.pins.values() if hasattr(p.draw, "geom") and p.draw.geom is not None]
         for pin in pins:
             pgeom = pin.draw.geom
+            if pgeom is None:
+                continue
             if isinstance(pgeom, Point):
                 px, py = pgeom.x, pgeom.y
             else:
@@ -1038,11 +1063,15 @@ class GlobalRouter:
             ax.scatter(px, py, c="black", s=20, marker="o", zorder=5)
             ax.text(px + 0.5, py + 0.5, pin.full_name, fontsize=6, color="black", zorder=6)
 
-        ax.set_title(f"Cost Calculation for Net: {topology.net.name} in {module.name}\nTotal Cost: {total_cost_for_plot:.2f}")
+        title = f"Cost Calculation for Net: {topology.net.name}"
+        if module:
+            title += f" in {module.name}"
+        title += f"\nTotal Cost: {total_cost_for_plot:.2f}"
+        ax.set_title(title)
         fig.tight_layout()
 
         # Save figure
-        safe_module_name = module.name.replace("/", "_")
+        safe_module_name = module.name.replace("/", "_") if module else "unknown_module"
         safe_net_name = topology.net.name.replace("/", "_")
         filename = f"{plot_filename_prefix or ''}{safe_module_name}_{safe_net_name}_cost.png"
         full_path = os.path.join(out_dir, filename)
@@ -1074,6 +1103,8 @@ class GlobalRouter:
             for child in junction.children:
                 if isinstance(child, Pin) and child in pin_macros:
                     end_point = child.draw.geom
+                    if end_point is None:
+                        continue
                     macro = pin_macros[child]
 
                     # Determine the best L-path to the macro center
@@ -1127,6 +1158,8 @@ class GlobalRouter:
             for child in junction.children:
                 if isinstance(child, Pin):
                     end_point = child.draw.geom
+                    if end_point is None:
+                        continue
                     if not isinstance(end_point, Point):
                         end_point = end_point.centroid
                 else:  # Junction
@@ -1141,7 +1174,12 @@ class GlobalRouter:
                     new_geoms.append(LineString([start_point, end_point]))
 
         if new_geoms:
-            merged_geom = linemerge(unary_union(new_geoms))
+            union_geom = unary_union(new_geoms)
+            merged_geom = None
+            if isinstance(union_geom, LineString):
+                merged_geom = linemerge([union_geom])
+            elif isinstance(union_geom, MultiLineString):
+                merged_geom = linemerge(union_geom)
             if isinstance(merged_geom, LineString):
                 topology.net.draw.geom = MultiLineString([merged_geom])
             elif isinstance(merged_geom, MultiLineString):
@@ -1214,8 +1252,9 @@ class GlobalRouter:
                         x, y = sub.exterior.xy
                         ax.fill(x, y, color="lightgrey", alpha=0.6)
                 else:
-                    x, y = macros.exterior.xy
-                    ax.fill(x, y, color="lightgrey", alpha=0.6)
+                    if isinstance(macros, Polygon):
+                        x, y = macros.exterior.xy
+                        ax.fill(x, y, color="lightgrey", alpha=0.6)
 
             # --- Draw halos ---
             halos = self._get_halo_geometries(macros)
@@ -1225,8 +1264,9 @@ class GlobalRouter:
                         x, y = sub.exterior.xy
                         ax.plot(x, y, color="blue", ls="--", lw=1)
                 else:
-                    x, y = halos.exterior.xy
-                    ax.plot(x, y, color="blue", ls="--", lw=1)
+                    if isinstance(halos, Polygon):
+                        x, y = halos.exterior.xy
+                        ax.plot(x, y, color="blue", ls="--", lw=1)
 
             # --- Draw junctions, pins, and nets ---
             for idx, topo in enumerate(topos):
@@ -1256,10 +1296,15 @@ class GlobalRouter:
                     for child in junction.children:
                         if isinstance(child, Pin) and hasattr(child.draw, "geom") and child.draw.geom:
                             pgeom = child.draw.geom
+                            if pgeom is None:
+                                continue
+                            if pgeom is None:
+                                continue
                             if isinstance(pgeom, Point):
-                                px, py = pgeom.x, pgeom.y
+                                px, py = float(pgeom.x), float(pgeom.y)
                             else:
-                                px, py = pgeom.centroid.x, pgeom.centroid.y
+                                centroid = pgeom.centroid
+                                px, py = float(centroid.x), float(centroid.y)
                             ax.plot([jx, px], [jy, py], color=color, lw=1)
                             ax.scatter(px, py, c="black", s=20, marker="o")
                             ax.text(px + 0.5, py + 0.5, child.full_name, fontsize=6, color="black")

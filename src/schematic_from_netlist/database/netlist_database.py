@@ -111,12 +111,12 @@ def create_example_netlist():
 # Usage examples
 if __name__ == "__main__":
     # Set up basic logging for standalone script execution
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s:%(message)s")
+    log.basicConfig(level=log.DEBUG, format="%(levelname)s:%(name)s:%(message)s")
     # Create example database
     db = create_example_netlist()
 
     # Query examples
-    logging.info("Design Statistics:")
+    log.info("Design Statistics:")
     stats = db.design.get_design_statistics()
     for key, value in stats.items():
-        logging.info(f"  {key}: {value}")
+        log.info(f"  {key}: {value}")
