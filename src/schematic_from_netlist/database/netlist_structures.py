@@ -168,6 +168,17 @@ class Instance:
 
 
 # -----------------------------
+# Cluster
+# -----------------------------
+@dataclass
+class Cluster:
+    """Represents a cluster of instances"""
+
+    id: int
+    instances: List[Instance]
+
+
+# -----------------------------
 # Module
 # -----------------------------
 @dataclass
@@ -181,6 +192,7 @@ class Module:
     child_modules: Dict[str, Module] = field(default_factory=dict)
     busses: Dict[str, Bus] = field(default_factory=dict)
     parameters: Dict[str, Any] = field(default_factory=dict)
+    clusters: Dict[int, "Cluster"] = field(default_factory=dict)
 
     hash2instance: Dict[str, Instance] = field(default_factory=dict)
     hash2net: Dict[str, Net] = field(default_factory=dict)

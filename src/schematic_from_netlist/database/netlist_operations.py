@@ -14,11 +14,29 @@ from tabulate import tabulate
 from schematic_from_netlist.graph.global_router import Junction
 from schematic_from_netlist.graph.graph_partition import Edge, HypergraphData
 
-from .netlist_structures import Design, Instance, Module, Net, Pin, PinDirection
+from .netlist_structures import Cluster, Design, Instance, Module, Net, Pin, PinDirection
 
 
 class NetlistOperationsMixin:
     """Mixin class for netlist operations"""
+
+    nets_by_name: Dict[str, Net]
+    inst_by_name: Dict[str, Instance]
+    pins_by_name: Dict[str, Pin]
+    id_by_netname: Dict[str, int]
+    nets_by_id: Dict[int, Net]
+    netname_by_id: Dict[int, str]
+    id_by_instname: Dict[str, int]
+    instname_by_id: Dict[int, str]
+    inst_by_id: Dict[int, Instance]
+    design: Design
+    fanout_threshold: int
+    inserted_buf_prefix: str
+    inserted_net_suffix: str
+    buffered_nets_log: Dict[str, Dict]
+
+    def _build_lookup_tables(self) -> None:
+        ...
 
     # Query Methods
     def find_net(self, net_name: str) -> "Optional[Net]":
@@ -33,14 +51,6 @@ class NetlistOperationsMixin:
         """Find a pin by full name"""
         return self.pins_by_name.get(pin_name)
 
-    def get_net_connections(self, net: "Net") -> "Dict[str, List[Pin]]":
-        """Get all connections to a net, organized by type"""
-        return {
-            "drivers": list(net.drivers),
-            "loads": list(net.loads),
-            "all_pins": list(net.pins),
-        }
-
     def generate_ids(self):
         net_id_counter = 0
         inst_id_counter = 0
@@ -51,7 +61,7 @@ class NetlistOperationsMixin:
             self.nets_by_id[net_id_counter] = net
             self.netname_by_id[net_id_counter] = name
             net_id_counter += 1
-            for pin in net.pins:
+            for pin in net.pins.values():
                 instname = pin.instance.name
                 if instname not in self.id_by_instname:
                     self.id_by_instname[instname] = inst_id_counter
@@ -483,11 +493,11 @@ class NetlistOperationsMixin:
         edge_vector, index_vector = [], [0]
 
         for net in sorted_nets:
-            connected_instance_ids = sorted(list({pin.instance.id for pin in net.pins}))
+            connected_instance_ids = sorted(list({pin.instance.id for pin in net.pins.values()}))
             edge_vector.extend(connected_instance_ids)
             index_vector.append(len(edge_vector))
             logging.debug(
-                f"hyper: {net.name=} conn {net.num_conn}: {connected_instance_ids=} {[f'{pin.instance.name}/{pin.name}' for pin in net.pins]=}"
+                f"hyper: {net.name=} conn {net.num_conn}: {connected_instance_ids=} {[f'{pin.instance.name}/{pin.name}' for pin in net.pins.values()]=}"
             )
 
         return HypergraphData(num_nodes, num_edges, index_vector, edge_vector)
@@ -501,9 +511,10 @@ class NetlistOperationsMixin:
             else:
                 logging.warning(f"warning: instance not found matching {id=}")
 
-        self.design.top_module.clusters.clear()
-        for part_id, inst_list in instances_by_partition.items():
-            self.design.top_module.clusters[part_id] = Cluster(id=part_id, instances=inst_list)
+        if self.design.top_module:
+            self.design.top_module.clusters.clear()
+            for part_id, inst_list in instances_by_partition.items():
+                self.design.top_module.clusters[part_id] = Cluster(id=part_id, instances=inst_list)
 
     def get_edges_between_nodes(self, nodes):
         inst_list = [self.inst_by_id[id] for id in nodes]
@@ -511,7 +522,7 @@ class NetlistOperationsMixin:
         edges = []
         for net in net_list:
             if 2 <= net.num_conn <= self.fanout_threshold:
-                conn_inst_list = [pin.instance for pin in net.pins]
+                conn_inst_list = [pin.instance for pin in net.pins.values()]
                 for i in range(len(conn_inst_list)):
                     for j in range(i + 1, len(conn_inst_list)):
                         src, dst = conn_inst_list[i], conn_inst_list[j]
