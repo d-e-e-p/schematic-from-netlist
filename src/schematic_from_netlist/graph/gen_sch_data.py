@@ -22,7 +22,7 @@ class GenSchematicData:
 
     def generate_schematic(self):
         self.db.fig2shape()
-        self.mark_multi_fanout_buffers()
+        # self.mark_multi_fanout_buffers()
         # self.find_block_bounding_boxes()
         # self.find_net_shapes()
         self.patch_pins_of_buffers()

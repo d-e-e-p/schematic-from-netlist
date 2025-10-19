@@ -63,7 +63,7 @@ class GlobalRouter:
             net_topologies: Dict[Net, Topology] = {}
             net_pin_macros: Dict[Net, Dict[Pin, Polygon]] = {}
 
-            # --- STAGE 1: Initial Topology Generation ---
+            # --- STAGE 1
             log.info(f"--- Stage 1: Initial Topology Generation for {len(sorted_nets)} nets ---")
             for net in sorted_nets:
                 net.draw.geom = None  # Clear existing geometry
@@ -77,39 +77,20 @@ class GlobalRouter:
                     net_pin_macros[net] = pin_macros or {}
                     self._rebuild_net_geometry(topo)  # Update geometry for next net
 
-            # --- STAGE 2: Pruning Junctions ---
+            # --- STAGE 2
             log.info(f"--- Stage 2: Pruning Junctions ---")
             for topo in net_topologies.values():
                 self._prune_redundant_junctions(topo)
                 self._rebuild_net_geometry(topo)
 
-            # --- STAGE 3: Optimizing Junction Locations ---
+            # --- STAGE 3
             log.info(f"--- Stage 3: Optimizing Junction Locations ---")
             for net, topo in net_topologies.items():
                 self._optimize_junction_locations(topo, macros, halos, net_pin_macros[net])
                 self._rebuild_net_geometry(topo)
 
-            # --- STAGE 4: Sliding Junctions (Congestion-Aware) ---
-            log.info(f"--- Stage 4: Sliding Junctions (Congestion-Aware) ---")
-            for net, topo in net_topologies.items():
-                congestion_idx, other_nets_geoms = self._build_congestion_index(module, net)
-                h_tracks, v_tracks = self._build_track_occupancy(other_nets_geoms)
-                self._slide_junctions(
-                    topo,
-                    macros,
-                    halos,
-                    congestion_idx,
-                    other_nets_geoms,
-                    module,
-                    net_pin_macros[net],
-                    net_topologies,
-                    h_tracks,
-                    v_tracks,
-                )
-                self._rebuild_net_geometry(topo)
-
-            # --- STAGE 4.5: Jumping Junctions over Macros ---
-            log.info("--- Stage 4.5: Jumping Junctions over Macros ---")
+            # --- STAGE 4
+            log.info("--- Stage 4: Global Search by jumping junctions over macros ---")
             for net, topo in net_topologies.items():
                 congestion_idx, other_nets_geoms = self._build_congestion_index(module, net)
                 h_tracks, v_tracks = self._build_track_occupancy(other_nets_geoms)
@@ -127,8 +108,27 @@ class GlobalRouter:
                 )
                 self._rebuild_net_geometry(topo)
 
-            # --- STAGE 5: Finalize Routes ---
-            log.info(f"--- Stage 5: Finalizing Routes and Pin Locations ---")
+            # --- STAGE 5
+            log.info(f"--- Stage 5: Local search: sliding junctions around a bit ---")
+            for net, topo in net_topologies.items():
+                congestion_idx, other_nets_geoms = self._build_congestion_index(module, net)
+                h_tracks, v_tracks = self._build_track_occupancy(other_nets_geoms)
+                self._slide_junctions(
+                    topo,
+                    macros,
+                    halos,
+                    congestion_idx,
+                    other_nets_geoms,
+                    module,
+                    net_pin_macros[net],
+                    net_topologies,
+                    h_tracks,
+                    v_tracks,
+                )
+                self._rebuild_net_geometry(topo)
+
+            # --- STAGE 6
+            log.info(f"--- Stage 6: Finalizing Routes and Pin Locations ---")
             for net, topo in net_topologies.items():
                 self._finalize_routes_and_pin_locations(topo, module, net_pin_macros[net])
                 self.junctions[module].append(topo)

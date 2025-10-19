@@ -1,5 +1,5 @@
 import argparse
-import logging
+import logging as log
 import os
 
 import colorlog
@@ -49,9 +49,8 @@ def produce_graph(db):
     db.insert_route_guide_buffers(junctions)
     db.dump_to_table("route_guide_insertion")
     db.geom2fig()
-    gv.generate_layout_figures(phase="placed")
-    db.remove_multi_fanout_buffers()
-    db.geom2shape()
+    # gv.generate_layout_figures(phase="placed")
+    db.fig2shape()
 
 
 def generate_schematic(db, output_dir: str):
@@ -103,7 +102,7 @@ def main():
     produce_graph(db)
     generate_schematic(db, args.output_dir)
 
-    logging.info("Run Complete.")
+    log.info("Run Complete.")
 
 
 if __name__ == "__main__":

@@ -35,8 +35,7 @@ class NetlistOperationsMixin:
     inserted_net_suffix: str
     buffered_nets_log: Dict[str, Dict]
 
-    def _build_lookup_tables(self) -> None:
-        ...
+    def _build_lookup_tables(self) -> None: ...
 
     # Query Methods
     def find_net(self, net_name: str) -> "Optional[Net]":
@@ -173,7 +172,7 @@ class NetlistOperationsMixin:
             module.remove_instance(inst.name)
 
         for net in nets_to_delete:
-            logging.debug(f"Deleting buffer net {net.name}")
+            logging.debug(f"Deleting buffer net {net.name} with {net.draw.shape=}")
             # clone wires before delete
             original_net_name = net.buffer_original_netname
             original_net = module.nets.get(original_net_name)

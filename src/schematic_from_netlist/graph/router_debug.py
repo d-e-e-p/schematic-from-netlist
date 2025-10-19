@@ -58,7 +58,7 @@ class RouterDebugger:
         """
         Generate per-module schematic overview plots showing macros, pins, junctions, and existing net geometries.
         """
-        out_dir = "data/images"
+        out_dir = "data/images/summary"
         os.makedirs(out_dir, exist_ok=True)
 
         cmap = plt.get_cmap("tab20")  # color map for nets
