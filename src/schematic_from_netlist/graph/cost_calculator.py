@@ -3,10 +3,9 @@ from __future__ import annotations
 import logging as log
 import math
 from collections import defaultdict
-from typing import Dict, List, Optional, Set, Tuple
+from typing import List, Optional, Set, Tuple
 
-from shapely.geometry import LineString, MultiLineString, MultiPoint, Point, Polygon
-from shapely.geometry.base import BaseGeometry
+from shapely.geometry import GeometryCollection, LineString, MultiLineString, MultiPoint, Point, Polygon
 
 from schematic_from_netlist.database.netlist_structures import Pin
 from schematic_from_netlist.graph.router_debug import RouterDebugger
@@ -37,73 +36,31 @@ class CostCalculator:
         halo_overlap = path.intersection(context.halos).length
 
         # Compute congestion overlap
-        intersecting_length = 0.0
-        possible_intersections = [
-            context.other_nets_geoms[i] for i in context.congestion_idx.intersection(path.bounds)
-        ]
-        for geom in possible_intersections:
-            if path.intersects(geom):
-                intersecting_length += path.intersection(geom).length
+        intersecting_length, crossing_points = self.compute_path_crossings(
+            path, context.other_nets_geoms, context.congestion_idx, p1_macro_to_ignore, p2_macro_to_ignore
+        )
 
-        # Compute crossings
-        intersecting_crossings = 0
-        crossing_points = []
-        for geom in possible_intersections:
-            if path.intersects(geom):
-                intersection = path.intersection(geom)
-                if isinstance(intersection, Point):
-                    intersecting_crossings += 1
-                    crossing_points.append(intersection)
-                elif isinstance(intersection, MultiPoint):
-                    intersecting_crossings += len(intersection.geoms)
-                    crossing_points.extend(list(intersection.geoms))
-                elif isinstance(intersection, (LineString, MultiLineString)):
-                    # Overlap detected. Penalize based on length.
-                    intersecting_crossings += math.ceil(intersection.length / GRID_SPACING)
-
-        # Compute track overlap
-        track_overlap_length = 0.0
-        path_coords = list(path.coords)
-        for i in range(len(path_coords) - 1):
-            p1 = Point(path_coords[i])
-            p2 = Point(path_coords[i + 1])
-
-            if abs(p1.y - p2.y) < 1e-9:  # Horizontal segment
-                y = p1.y
-                seg_x1, seg_x2 = sorted((p1.x, p2.x))
-                if y in context.h_tracks:
-                    for track_x1, track_x2 in context.h_tracks[y]:
-                        overlap_start = max(seg_x1, track_x1)
-                        overlap_end = min(seg_x2, track_x2)
-                        if overlap_start < overlap_end:
-                            track_overlap_length += overlap_end - overlap_start
-            elif abs(p1.x - p2.x) < 1e-9:  # Vertical segment
-                x = p1.x
-                seg_y1, seg_y2 = sorted((p1.y, p2.y))
-                if x in context.v_tracks:
-                    for track_y1, track_y2 in context.v_tracks[x]:
-                        overlap_start = max(seg_y1, track_y1)
-                        overlap_end = min(seg_y2, track_y2)
-                        if overlap_start < overlap_end:
-                            track_overlap_length += overlap_end - overlap_start
+        track_overlap_length = self.compute_track_overlap_length(path, context, p1_macro_to_ignore, p2_macro_to_ignore)
 
         # Weighted cost components
         cost_wirelength = ROUTE_WEIGHTS["wirelength"] * wirelength
         cost_macro = ROUTE_WEIGHTS["macro"] * macro_overlap
         cost_halo = ROUTE_WEIGHTS["halo"] * halo_overlap
         cost_congestion = ROUTE_WEIGHTS["congestion"] * intersecting_length
-        cost_crossing = ROUTE_WEIGHTS["crossing"] * intersecting_crossings
+        cost_crossing = ROUTE_WEIGHTS["crossing"] * len(crossing_points)
         cost_track_overlap = ROUTE_WEIGHTS["track"] * track_overlap_length
 
         # Junction penalties
         cost_macro_junction_penalty = 0.0
         cost_halo_junction_penalty = 0.0
+        """
         if len(path.coords) == 3:  # L-shaped path
             corner = get_l_path_corner(path)
             if corner.within(context.macros):
                 cost_macro_junction_penalty = 1000.0
             if corner.within(context.halos):
                 cost_halo_junction_penalty = 500.0
+        """
 
         # Zero out wirelength and macro overlap costs for segments inside their own macro
         for macro_to_ignore in [p1_macro_to_ignore, p2_macro_to_ignore]:
@@ -137,7 +94,7 @@ class CostCalculator:
             macro_overlap=macro_overlap,
             halo_overlap=halo_overlap,
             intersecting_length=intersecting_length,
-            intersecting_crossings=intersecting_crossings,
+            intersecting_crossings=len(crossing_points),
             cost_wirelength=cost_wirelength,
             cost_macro=cost_macro,
             cost_halo=cost_halo,
@@ -171,6 +128,7 @@ class CostCalculator:
         total_cost = 0.0
         paths_with_metrics = []
         crossing_points = []
+        i = 0  # counter
 
         # Build adjacency list for the topology
         adj = defaultdict(set)
@@ -242,10 +200,142 @@ class CostCalculator:
                 if debug_plot:
                     paths_with_metrics.append((best_path, best_metrics))
                     crossing_points.extend(best_crossings)
+                    i += 1
 
         if debug_plot:
-            self._debugger.plot_cost_calculation(
-                topology, paths_with_metrics, crossing_points, context, plot_filename_prefix
-            )
+            self._debugger.plot_cost_calculation(topology, paths_with_metrics, crossing_points, context, plot_filename_prefix)
 
         return total_cost
+
+    def compute_path_crossings(
+        self,
+        path: LineString,
+        other_nets_geoms: List,
+        congestion_idx,
+        p1_macro_to_ignore: Optional[Polygon] = None,
+        p2_macro_to_ignore: Optional[Polygon] = None,
+    ) -> Tuple[float, List[Point]]:
+        """
+        Compute total overlap length and crossing points for a given path.
+
+        - Ignores intersections that occur inside or at the boundaries of the
+          source/destination macros (p1_macro_to_ignore, p2_macro_to_ignore).
+        - Ignores self-intersections where the path overlaps itself.
+        """
+
+        possible_intersections = [other_nets_geoms[i] for i in congestion_idx.intersection(path.bounds)]
+
+        intersecting_length = 0.0
+        crossing_points: List[Point] = []
+
+        for geom in possible_intersections:
+            # Skip self-intersection — same reference or identical coordinates
+            """
+            if geom.equals(path) or geom is path:
+                continue
+
+            # Skip if the geometry bounding box matches the path exactly
+            if geom.bounds == path.bounds and geom.length == path.length:
+                continue
+            """
+            if not path.intersects(geom):
+                continue
+
+            intersection = path.intersection(geom)
+
+            # Skip intersections that are within or touching the ignored macros
+            if p1_macro_to_ignore and p1_macro_to_ignore.intersects(intersection):
+                continue
+            if p2_macro_to_ignore and p2_macro_to_ignore.intersects(intersection):
+                continue
+
+            if isinstance(intersection, Point):
+                crossing_points.append(intersection)
+
+            elif isinstance(intersection, MultiPoint):
+                crossing_points.extend(list(intersection.geoms))
+
+            elif isinstance(intersection, (LineString, MultiLineString)):
+                # Overlap region — penalize by length
+                intersecting_length += intersection.length
+                # Optional: sample approximate crossing points for debugging/visualization
+                n_crossings = max(1, math.ceil(intersection.length / GRID_SPACING))
+                crossing_points.extend(
+                    [Point(intersection.interpolate(i / n_crossings, normalized=True)) for i in range(n_crossings)]
+                )
+
+            elif isinstance(intersection, GeometryCollection):
+                for g in intersection.geoms:
+                    if isinstance(g, Point):
+                        crossing_points.append(g)
+                    elif isinstance(g, (LineString, MultiLineString)):
+                        intersecting_length += g.length
+            else:
+                raise NotImplementedError(f"Unhandled intersection type: {intersection.geom_type}")
+
+        return intersecting_length, crossing_points
+
+    def compute_track_overlap_length(
+        self,
+        path: LineString,
+        context,
+        p1_macro_to_ignore=None,
+        p2_macro_to_ignore=None,
+    ) -> float:
+        """
+        Compute total overlap length of a path with existing routing tracks.
+        Ignores overlaps contained inside p1_macro_to_ignore or p2_macro_to_ignore.
+        """
+        if path.is_empty:
+            return 0.0
+
+        track_overlap_length = 0.0
+        path_coords = list(path.coords)
+
+        for i in range(len(path_coords) - 1):
+            p1 = Point(path_coords[i])
+            p2 = Point(path_coords[i + 1])
+            segment = LineString([p1, p2])
+
+            # Skip overlap check if the segment is fully inside one of the ignored macros
+            if (p1_macro_to_ignore and segment.within(p1_macro_to_ignore)) or (
+                p2_macro_to_ignore and segment.within(p2_macro_to_ignore)
+            ):
+                continue
+
+            # Horizontal segment
+            if abs(p1.y - p2.y) < 1e-9:
+                y = p1.y
+                seg_x1, seg_x2 = sorted((p1.x, p2.x))
+                if y in context.h_tracks:
+                    for track_x1, track_x2 in context.h_tracks[y]:
+                        overlap_start = max(seg_x1, track_x1)
+                        overlap_end = min(seg_x2, track_x2)
+                        if overlap_start < overlap_end:
+                            overlap_seg = LineString([(overlap_start, y), (overlap_end, y)])
+                            # Exclude portions inside ignore macros
+                            if not self._overlap_within_ignore(overlap_seg, p1_macro_to_ignore, p2_macro_to_ignore):
+                                track_overlap_length += overlap_end - overlap_start
+
+            # Vertical segment
+            elif abs(p1.x - p2.x) < 1e-9:
+                x = p1.x
+                seg_y1, seg_y2 = sorted((p1.y, p2.y))
+                if x in context.v_tracks:
+                    for track_y1, track_y2 in context.v_tracks[x]:
+                        overlap_start = max(seg_y1, track_y1)
+                        overlap_end = min(seg_y2, track_y2)
+                        if overlap_start < overlap_end:
+                            overlap_seg = LineString([(x, overlap_start), (x, overlap_end)])
+                            if not self._overlap_within_ignore(overlap_seg, p1_macro_to_ignore, p2_macro_to_ignore):
+                                track_overlap_length += overlap_end - overlap_start
+
+        return track_overlap_length
+
+    def _overlap_within_ignore(self, segment, p1_macro, p2_macro) -> bool:
+        """Helper: returns True if the overlap segment lies completely within one of the ignored macros."""
+        if p1_macro and segment.within(p1_macro):
+            return True
+        if p2_macro and segment.within(p2_macro):
+            return True
+        return False

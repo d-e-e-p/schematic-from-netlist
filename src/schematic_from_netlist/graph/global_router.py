@@ -22,6 +22,7 @@ from schematic_from_netlist.graph.cost_calculator import CostCalculator
 from schematic_from_netlist.graph.router_debug import RouterDebugger
 from schematic_from_netlist.graph.routing_helpers import (
     generate_l_paths,
+    generate_lz_paths,
     get_halo_geometries,
     get_l_path_corner,
     get_macro_geometries,
@@ -297,45 +298,33 @@ class GlobalRouter:
 
         return topology, pin_macros
 
-    def _generate_candidate_paths(self, p1: Point | None, p2: Point | None, halos: Polygon | BaseGeometry) -> List[LineString]:
-        """Generate candidate L-shaped paths, including escape routes from halos."""
-        paths = []
+    def _generate_candidate_paths(
+        self,
+        p1: Point | None,
+        p2: Point | None,
+        halos: Polygon | BaseGeometry,
+    ) -> List[LineString]:
+        """
+        Generate candidate L- and Z-shaped paths between two points.
+        Ignores halo escape logic (even if pins lie inside macros).
+
+        Returns unique LineStrings.
+        """
+        paths: List[LineString] = []
         if not p1 or not p2:
             return paths
 
-        # 1. Basic L-paths
-        paths.extend(generate_l_paths(p1, p2))
+        # 1. Generate all L + Z variants
+        paths.extend(generate_lz_paths(p1, p2))
 
-        # 2. Escape routes
-        p1_in_halo = p1.within(halos)
-        p2_in_halo = p2.within(halos)
-
-        escape_points = {}
-        if p1_in_halo:
-            if not halos.boundary.is_empty:
-                escape_points[1] = nearest_points(p1, halos.boundary)[1]
-
-        if p2_in_halo:
-            if not halos.boundary.is_empty:
-                escape_points[2] = nearest_points(p2, halos.boundary)[1]
-
-        e1 = escape_points.get(1)
-        e2 = escape_points.get(2)
-
-        if e1:
-            paths.extend(generate_l_paths(e1, p2))
-        if e2:
-            paths.extend(generate_l_paths(p1, e2))
-        if e1 and e2:
-            paths.extend(generate_l_paths(e1, e2))
-
-        # Return unique paths
+        # 2. Remove duplicates by WKT
         unique_paths = []
         seen = set()
         for p in paths:
             if p.wkt not in seen:
                 unique_paths.append(p)
                 seen.add(p.wkt)
+
         return unique_paths
 
     def _rebuild_net_geometry(self, topology: Topology):
@@ -560,6 +549,9 @@ class GlobalRouter:
                         if dx == 0 and dy == 0:
                             continue
                         new_location = Point(initial_location.x + dx, initial_location.y + dy)
+                        if topology.net.name == "n_sck":
+                            log.info(f" testing new location {new_location} for {junction.name}")
+
                         if new_location.within(macros) or new_location.within(halos):
                             tried_locations_costs[(new_location.x, new_location.y)] = float("inf")
                             continue
@@ -569,6 +561,11 @@ class GlobalRouter:
                             topology,
                             context,
                         )
+                        if topology.net.name == "n_sck":
+                            current_cost = self._cost_calculator.calculate_total_cost(
+                                topology, context, True, f"debug_sck_{j_idx}_iter_{i}_{int(current_cost)}_"
+                            )
+                            log.info(f" current cost: {current_cost}")
 
                         # Add junction spacing penalty
                         if junction_tree:
@@ -926,22 +923,25 @@ class GlobalRouter:
                         continue
                     macro = pin_macros[child]
 
-                    # Determine the best L-path to the macro center
-                    l_paths = generate_l_paths(start_point, end_point)
-                    if not l_paths:
-                        continue
+                    candidate_paths = self._generate_candidate_paths(start_point, end_point, halos)
+                    best_path_to_center = None
+                    best_metrics = None
 
-                    metrics1, _ = self._cost_calculator.calculate_path_cost(
-                        l_paths[0],
-                        context,
-                        p2_macro_to_ignore=macro,
-                    )
-                    metrics2, _ = self._cost_calculator.calculate_path_cost(
-                        l_paths[1],
-                        context,
-                        p2_macro_to_ignore=macro,
-                    )
-                    best_path_to_center = l_paths[0] if metrics1.total_cost <= metrics2.total_cost else l_paths[1]
+                    # Evaluate cost for each candidate
+                    for path in candidate_paths:
+                        metrics, _ = self._cost_calculator.calculate_path_cost(
+                            path,
+                            context,
+                            p2_macro_to_ignore=macro,
+                        )
+
+                        if best_metrics is None or metrics.total_cost < best_metrics.total_cost:
+                            best_metrics = metrics
+                            best_path_to_center = path
+
+                    # Fallback (no valid path)
+                    if best_path_to_center is None and candidate_paths:
+                        best_path_to_center = candidate_paths[0]
 
                     # Find intersection with boundary and update pin location
                     intersection = best_path_to_center.intersection(macro.boundary)

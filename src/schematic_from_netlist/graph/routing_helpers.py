@@ -36,6 +36,50 @@ def generate_l_paths(p1: Point, p2: Point) -> List[LineString]:
     return [path1, path2]
 
 
+def generate_lz_paths(p1: Point, p2: Point) -> List[LineString]:
+    """Generate L- and Z-shaped paths between two points."""
+    if not all(isinstance(p, Point) for p in [p1, p2]):
+        return []
+
+    paths = []
+
+    # --- L-shapes (2 options)
+    # Go vertical first, then horizontal
+    path_L1 = LineString([(p1.x, p1.y), (p1.x, p2.y), (p2.x, p2.y)])
+    # Go horizontal first, then vertical
+    path_L2 = LineString([(p1.x, p1.y), (p2.x, p1.y), (p2.x, p2.y)])
+    paths.extend([path_L1, path_L2])
+
+    # --- Z-shapes (2 options)
+    # Midpoints
+    mid_x = (p1.x + p2.x) / 2
+    mid_y = (p1.y + p2.y) / 2
+
+    # Z1: horizontal–vertical–horizontal, bending through mid_y
+    path_Z1 = LineString(
+        [
+            (p1.x, p1.y),
+            (mid_x, p1.y),
+            (mid_x, p2.y),
+            (p2.x, p2.y),
+        ]
+    )
+
+    # Z2: vertical–horizontal–vertical, bending through mid_x
+    path_Z2 = LineString(
+        [
+            (p1.x, p1.y),
+            (p1.x, mid_y),
+            (p2.x, mid_y),
+            (p2.x, p2.y),
+        ]
+    )
+
+    paths.extend([path_Z1, path_Z2])
+
+    return paths
+
+
 def get_l_path_corner(path: LineString) -> Point:
     """Get the corner point of an L-shaped path."""
     return Point(path.coords[1])

@@ -172,7 +172,7 @@ class NetlistOperationsMixin:
             module.remove_instance(inst.name)
 
         for net in nets_to_delete:
-            logging.info(f"Deleting buffer net {net.name} with {net.draw.shape=}")
+            logging.debug(f"Deleting buffer net {net.name} with {net.draw.shape=}")
             # clone wires before delete
             original_net_name = net.buffer_original_netname
             original_net = module.nets.get(original_net_name)
@@ -180,7 +180,7 @@ class NetlistOperationsMixin:
             del module.nets[net.name]
 
     def insert_route_guide_buffers(self, junctions):
-        logging.info(f"Inserting route guide buffers ")
+        logging.debug(f"Inserting route guide buffers ")
         for module, topos in junctions.items():
             self.insert_route_guide_buffers_for_module(module, topos)
 
@@ -215,7 +215,7 @@ class NetlistOperationsMixin:
                 original_net_name = topo.net.name
 
                 buf_src = junc_name_to_inst[junction.name]
-                logging.info(f"Inserting {junction.name=} in {original_net_name} at {junction.location} -> {buf_src.name}")
+                logging.debug(f"Inserting {junction.name=} in {original_net_name} at {junction.location} -> {buf_src.name}")
 
                 i = 0
                 for child in junction.children:
