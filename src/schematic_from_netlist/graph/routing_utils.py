@@ -4,7 +4,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Dict, List, Optional, Set, Tuple
 
 from rtree import index
-from shapely.geometry import LineString, Point, Polygon
+from shapely.geometry import LineString, MultiLineString, Point, Polygon
 from shapely.geometry.base import BaseGeometry
 
 from schematic_from_netlist.database.netlist_structures import Module, Net, Pin
@@ -22,6 +22,7 @@ class Junction:
     name: str
     location: Point
     children: Set[Junction | Pin] = field(default_factory=set)
+    geom: Optional[MultiLineString] = None
 
     def __hash__(self):
         return hash((self.name, self.location))

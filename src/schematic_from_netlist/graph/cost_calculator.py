@@ -10,7 +10,7 @@ from shapely.ops import unary_union
 
 from schematic_from_netlist.database.netlist_structures import Pin
 from schematic_from_netlist.graph.router_debug import RouterDebugger
-from schematic_from_netlist.graph.routing_helpers import generate_l_paths, get_l_path_corner
+from schematic_from_netlist.graph.routing_helpers import generate_candidate_paths, get_l_path_corner
 from schematic_from_netlist.graph.routing_utils import Junction, Metrics, RoutingContext, Topology
 
 # Pattern Route parameters
@@ -163,7 +163,7 @@ class CostCalculator:
                 p1_macro_to_ignore = context.pin_macros.get(u) if isinstance(u, Pin) else None
                 p2_macro_to_ignore = context.pin_macros.get(v) if isinstance(v, Pin) else None
 
-                candidate_paths = generate_l_paths(p1, p2)
+                candidate_paths = generate_candidate_paths(p1, p2, context)
 
                 if not candidate_paths:
                     path = LineString([p1, p2])
@@ -179,26 +179,25 @@ class CostCalculator:
                         crossing_points.extend(new_crossings)
                     continue
 
-                metrics1, crossings1 = self.calculate_path_cost(
-                    candidate_paths[0],
-                    context,
-                    p1_macro_to_ignore,
-                    p2_macro_to_ignore,
-                )
-                metrics2, crossings2 = self.calculate_path_cost(
-                    candidate_paths[1],
-                    context,
-                    p1_macro_to_ignore,
-                    p2_macro_to_ignore,
-                )
+                best_path = None
+                best_metrics = None
+                best_crossings = []
 
-                if metrics1.total_cost < metrics2.total_cost:
-                    best_path, best_metrics, best_crossings = candidate_paths[0], metrics1, crossings1
-                else:
-                    best_path, best_metrics, best_crossings = candidate_paths[1], metrics2, crossings2
+                for path in candidate_paths:
+                    metrics, crossings = self.calculate_path_cost(
+                        path,
+                        context,
+                        p1_macro_to_ignore,
+                        p2_macro_to_ignore,
+                    )
+                    if best_metrics is None or metrics.total_cost < best_metrics.total_cost:
+                        best_path = path
+                        best_metrics = metrics
+                        best_crossings = crossings
 
-                total_cost += best_metrics.total_cost
-                if debug_plot:
+                if best_metrics:
+                    total_cost += best_metrics.total_cost
+                if debug_plot and best_path and best_metrics:
                     paths_with_metrics.append((best_path, best_metrics))
                     crossing_points.extend(best_crossings)
                     i += 1

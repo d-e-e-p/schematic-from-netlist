@@ -8,6 +8,35 @@ from shapely.ops import unary_union
 from schematic_from_netlist.database.netlist_structures import Module
 
 
+def generate_candidate_paths(
+    p1: Point | None,
+    p2: Point | None,
+    context,
+) -> List[LineString]:
+    """
+    Generate candidate L- and Z-shaped paths between two points.
+    Ignores halo escape logic (even if pins lie inside macros).
+
+    Returns unique LineStrings.
+    """
+    paths: List[LineString] = []
+    if not p1 or not p2:
+        return paths
+
+    # 1. Generate all L + Z variants
+    paths.extend(generate_lz_paths(p1, p2))
+
+    # 2. Remove duplicates by WKT
+    unique_paths = []
+    seen = set()
+    for p in paths:
+        if p.wkt not in seen:
+            unique_paths.append(p)
+            seen.add(p.wkt)
+
+    return unique_paths
+
+
 def get_macro_geometries(module: Module):
     """Get all macro geometries in a module."""
     geoms = []
@@ -27,13 +56,7 @@ def get_halo_geometries(macros, buffer_dist: int = 10) -> Polygon:
     return macros.buffer(buffer_dist)
 
 
-def generate_l_paths(p1: Point, p2: Point) -> List[LineString]:
-    """Generate two L-shaped paths between two points."""
-    if not all(isinstance(p, Point) for p in [p1, p2]):
-        return []
-    path1 = LineString([(p1.x, p1.y), (p1.x, p2.y), (p2.x, p2.y)])
-    path2 = LineString([(p1.x, p1.y), (p2.x, p1.y), (p2.x, p2.y)])
-    return [path1, path2]
+
 
 
 def generate_lz_paths(p1: Point, p2: Point) -> List[LineString]:

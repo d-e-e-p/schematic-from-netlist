@@ -21,7 +21,7 @@ from schematic_from_netlist.database.netlist_structures import Module, Net, Pin
 from schematic_from_netlist.graph.cost_calculator import CostCalculator
 from schematic_from_netlist.graph.router_debug import RouterDebugger
 from schematic_from_netlist.graph.routing_helpers import (
-    generate_l_paths,
+    generate_candidate_paths,
     generate_lz_paths,
     get_halo_geometries,
     get_l_path_corner,
@@ -76,19 +76,50 @@ class GlobalRouter:
                 if topo:
                     net_topologies[net] = topo
                     net_pin_macros[net] = pin_macros or {}
-                    self._rebuild_net_geometry(topo)  # Update geometry for next net
+                    context = RoutingContext(
+                        macros=macros,
+                        halos=halos,
+                        congestion_idx=congestion_idx,
+                        other_nets_geoms=other_nets_geoms,
+                        h_tracks=h_tracks,
+                        v_tracks=v_tracks,
+                        pin_macros=pin_macros,
+                    )
+                    self._rebuild_net_geometry(topo, context)  # Update geometry for next net
 
             # --- STAGE 2
             log.info(f"--- Stage 2: Pruning Junctions ---")
-            for topo in net_topologies.values():
+            for net, topo in net_topologies.items():
                 self._prune_redundant_junctions(topo)
-                self._rebuild_net_geometry(topo)
+                congestion_idx, other_nets_geoms = self._build_congestion_index(module, net)
+                h_tracks, v_tracks = self._build_track_occupancy(other_nets_geoms)
+                context = RoutingContext(
+                    macros=macros,
+                    halos=halos,
+                    congestion_idx=congestion_idx,
+                    other_nets_geoms=other_nets_geoms,
+                    h_tracks=h_tracks,
+                    v_tracks=v_tracks,
+                    pin_macros=net_pin_macros.get(net, {}),
+                )
+                self._rebuild_net_geometry(topo, context)
 
             # --- STAGE 3
             log.info(f"--- Stage 3: Optimizing Junction Locations ---")
             for net, topo in net_topologies.items():
                 self._optimize_junction_locations(topo, macros, halos, net_pin_macros[net])
-                self._rebuild_net_geometry(topo)
+                congestion_idx, other_nets_geoms = self._build_congestion_index(module, net)
+                h_tracks, v_tracks = self._build_track_occupancy(other_nets_geoms)
+                context = RoutingContext(
+                    macros=macros,
+                    halos=halos,
+                    congestion_idx=congestion_idx,
+                    other_nets_geoms=other_nets_geoms,
+                    h_tracks=h_tracks,
+                    v_tracks=v_tracks,
+                    pin_macros=net_pin_macros.get(net, {}),
+                )
+                self._rebuild_net_geometry(topo, context)
 
             # --- STAGE 4
             log.info("--- Stage 4: Global Search by jumping junctions over macros ---")
@@ -107,7 +138,16 @@ class GlobalRouter:
                     h_tracks,
                     v_tracks,
                 )
-                self._rebuild_net_geometry(topo)
+                context = RoutingContext(
+                    macros=macros,
+                    halos=halos,
+                    congestion_idx=congestion_idx,
+                    other_nets_geoms=other_nets_geoms,
+                    h_tracks=h_tracks,
+                    v_tracks=v_tracks,
+                    pin_macros=net_pin_macros.get(net, {}),
+                )
+                self._rebuild_net_geometry(topo, context)
 
             # --- STAGE 5
             log.info(f"--- Stage 5: Local search: sliding junctions around a bit ---")
@@ -126,7 +166,16 @@ class GlobalRouter:
                     h_tracks,
                     v_tracks,
                 )
-                self._rebuild_net_geometry(topo)
+                context = RoutingContext(
+                    macros=macros,
+                    halos=halos,
+                    congestion_idx=congestion_idx,
+                    other_nets_geoms=other_nets_geoms,
+                    h_tracks=h_tracks,
+                    v_tracks=v_tracks,
+                    pin_macros=net_pin_macros.get(net, {}),
+                )
+                self._rebuild_net_geometry(topo, context)
 
             # --- STAGE 6
             log.info(f"--- Stage 6: Finalizing Routes and Pin Locations ---")
@@ -258,7 +307,7 @@ class GlobalRouter:
                     p1 = conn_point.draw.geom if isinstance(conn_point, Pin) else conn_point.location
                     p2 = new_pin.draw.geom
 
-                    candidate_paths = self._generate_candidate_paths(p1, p2, halos)
+                    candidate_paths = generate_candidate_paths(p1, p2, context)
                     for path_geom in candidate_paths:
                         p1_macro = pin_macros.get(conn_point) if isinstance(conn_point, Pin) else None
                         p2_macro = pin_macros.get(new_pin)
@@ -298,36 +347,7 @@ class GlobalRouter:
 
         return topology, pin_macros
 
-    def _generate_candidate_paths(
-        self,
-        p1: Point | None,
-        p2: Point | None,
-        halos: Polygon | BaseGeometry,
-    ) -> List[LineString]:
-        """
-        Generate candidate L- and Z-shaped paths between two points.
-        Ignores halo escape logic (even if pins lie inside macros).
-
-        Returns unique LineStrings.
-        """
-        paths: List[LineString] = []
-        if not p1 or not p2:
-            return paths
-
-        # 1. Generate all L + Z variants
-        paths.extend(generate_lz_paths(p1, p2))
-
-        # 2. Remove duplicates by WKT
-        unique_paths = []
-        seen = set()
-        for p in paths:
-            if p.wkt not in seen:
-                unique_paths.append(p)
-                seen.add(p.wkt)
-
-        return unique_paths
-
-    def _rebuild_net_geometry(self, topology: Topology):
+    def _rebuild_net_geometry(self, topology: Topology, context: RoutingContext):
         """Rebuilds the net's geometry based on its current topology of junctions and pins."""
         new_geoms = []
         for junction in topology.junctions:
@@ -343,7 +363,7 @@ class GlobalRouter:
                     end_point = child.location
 
                 # Generate orthogonal path to the final pin location (or other junction)
-                l_paths = generate_l_paths(start_point, end_point)
+                l_paths = generate_candidate_paths(start_point, end_point, context)
                 if l_paths:
                     new_geoms.append(l_paths[0])
                 elif start_point.distance(end_point) > 1e-9:
@@ -565,7 +585,6 @@ class GlobalRouter:
                             current_cost = self._cost_calculator.calculate_total_cost(
                                 topology, context, True, f"debug_{topology.net.name}_{j_idx}_iter_{i}_{int(current_cost)}_"
                             )
-                            log.info(f" current cost: {current_cost}")
 
                         # Add junction spacing penalty
                         if junction_tree:
@@ -923,7 +942,7 @@ class GlobalRouter:
                         continue
                     macro = pin_macros[child]
 
-                    candidate_paths = self._generate_candidate_paths(start_point, end_point, halos)
+                    candidate_paths = generate_candidate_paths(start_point, end_point, context)
                     best_path_to_center = None
                     best_metrics = None
 
