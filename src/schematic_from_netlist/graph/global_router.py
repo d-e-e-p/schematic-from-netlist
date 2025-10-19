@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 import logging as log
 import math
 import os
@@ -35,6 +36,18 @@ JUNCTION_SPACING_PENALTY = 2000.0  # Cost for placing junctions too close to eac
 MAX_PATH_COST = 100.0  # Mean path cost multiplier for pruning
 GRID_SPACING = 1.0  # Track spacing for snapping
 MAX_FANOUT = 15  # Maximum junction fanout
+
+
+def test_for_int_list_of_points(location_list, tol=1e-9):
+    """Return True if all Points in list have integer coordinates (within tolerance)."""
+    for pt in location_list:
+        if not isinstance(pt, Point):
+            return False  # not a Point
+        x_int = abs(pt.x - round(pt.x)) < tol
+        y_int = abs(pt.y - round(pt.y)) < tol
+        if not (x_int and y_int):
+            return False
+    return True
 
 
 class GlobalRouter:
@@ -123,31 +136,33 @@ class GlobalRouter:
 
             # --- STAGE 4
             log.info("--- Stage 4: Global Search by jumping junctions over macros ---")
-            for net, topo in net_topologies.items():
-                congestion_idx, other_nets_geoms = self._build_congestion_index(module, net)
-                h_tracks, v_tracks = self._build_track_occupancy(other_nets_geoms)
-                self._jump_junctions_over_macros(
-                    topo,
-                    macros,
-                    halos,
-                    congestion_idx,
-                    other_nets_geoms,
-                    module,
-                    net_pin_macros[net],
-                    net_topologies,
-                    h_tracks,
-                    v_tracks,
-                )
-                context = RoutingContext(
-                    macros=macros,
-                    halos=halos,
-                    congestion_idx=congestion_idx,
-                    other_nets_geoms=other_nets_geoms,
-                    h_tracks=h_tracks,
-                    v_tracks=v_tracks,
-                    pin_macros=net_pin_macros.get(net, {}),
-                )
-                self._rebuild_net_geometry(topo, context)
+            num_iterations = 3
+            for _ in range(num_iterations):
+                for net, topo in net_topologies.items():
+                    congestion_idx, other_nets_geoms = self._build_congestion_index(module, net)
+                    h_tracks, v_tracks = self._build_track_occupancy(other_nets_geoms)
+                    self._jump_junctions_over_macros(
+                        topo,
+                        macros,
+                        halos,
+                        congestion_idx,
+                        other_nets_geoms,
+                        module,
+                        net_pin_macros[net],
+                        net_topologies,
+                        h_tracks,
+                        v_tracks,
+                    )
+                    context = RoutingContext(
+                        macros=macros,
+                        halos=halos,
+                        congestion_idx=congestion_idx,
+                        other_nets_geoms=other_nets_geoms,
+                        h_tracks=h_tracks,
+                        v_tracks=v_tracks,
+                        pin_macros=net_pin_macros.get(net, {}),
+                    )
+                    self._rebuild_net_geometry(topo, context)
 
             # --- STAGE 5
             log.info(f"--- Stage 5: Local search: sliding junctions around a bit ---")
@@ -275,7 +290,7 @@ class GlobalRouter:
         for p in pins:
             if macro := p.instance.draw.geom:
                 pin_macros[p] = macro
-                p.draw.geom = macro.centroid
+                p.draw.geom = Point(round(macro.centroid.x), round(macro.centroid.y))
             else:
                 log.warning(f"Pin {p.name} instance {p.instance.name} has no geom .")
 
@@ -349,6 +364,10 @@ class GlobalRouter:
 
     def _rebuild_net_geometry(self, topology: Topology, context: RoutingContext):
         """Rebuilds the net's geometry based on its current topology of junctions and pins."""
+
+        def rounded_point(pt):
+            return Point(round(pt[0]), round(pt[1]))
+
         new_geoms = []
         for junction in topology.junctions:
             start_point = junction.location
@@ -356,8 +375,8 @@ class GlobalRouter:
             cached_paths = {}
             if junction.geom:
                 for line in junction.geom.geoms:
-                    p1 = Point(line.coords[0])
-                    p2 = Point(line.coords[-1])
+                    p1 = rounded_point(line.coords[0])
+                    p2 = rounded_point(line.coords[-1])
                     # Using almost_equals for robust float comparisons
                     if p1.distance(start_point) < 1e-6:
                         cached_paths[p2] = line
@@ -744,11 +763,6 @@ class GlobalRouter:
         """
         log.info(f"Starting junction jumping for module:{module.name} net:{topology.net.name}")
 
-        macro_polygons = [inst.draw.geom for inst in module.instances.values()]
-        if not macro_polygons:
-            return
-        macro_tree = STRtree(macro_polygons)
-
         context = RoutingContext(
             macros=macros,
             halos=halos,
@@ -766,50 +780,75 @@ class GlobalRouter:
 
         max_iterations = 10
         for i in range(max_iterations):
-            proposed_moves = {}
-            cost_reduced_this_iter = False
-
+            # 1. Pre-compute candidate locations for all junctions
+            junction_candidate_locations: Dict[Junction, List[Point]] = {}
             for junction in topology.junctions:
                 initial_location = junction.location
-                min_cost = self._cost_calculator.calculate_total_cost(topology, context)
-                best_location = initial_location
-
                 downstream_pins = self._get_downstream_pins(junction, parent_map, memo_downstream_pins)
                 if not downstream_pins:
-                    continue
+                    candidate_locations = [initial_location]
+                else:
+                    candidate_locations = self._find_jump_candidate_locations(initial_location, downstream_pins, macros, halos)
+                # Also include the initial location as a candidate
+                is_initial_loc_present = any(loc.distance(initial_location) < 1e-9 for loc in candidate_locations)
+                if not is_initial_loc_present:
+                    candidate_locations.append(initial_location)
+                junction_candidate_locations[junction] = candidate_locations
 
-                candidate_locations = self._find_jump_candidate_locations(junction.location, downstream_pins, macros, halos)
+            # 2. Test out the topo cost for all combinations of positions
+            junctions_to_optimize = topology.junctions
+            location_lists = [junction_candidate_locations[j] for j in junctions_to_optimize]
+            original_locations = {j: j.location for j in junctions_to_optimize}
 
-                tried_locations_costs = {}
-                for new_loc in candidate_locations:
-                    if new_loc.within(macros) or new_loc.within(halos):
-                        tried_locations_costs[(new_loc.x, new_loc.y)] = float("inf")
-                        continue
-                    junction.location = new_loc
+            min_cost = self._cost_calculator.calculate_total_cost(topology, context)
+            best_combination = original_locations.copy()
+            cost_reduced_this_iter = False
+            proposed_moves = {}
+
+            num_combinations = np.prod([len(l) for l in location_lists]) if location_lists else 0
+            if num_combinations > 100_000:
+                log.warning(
+                    f"For net {topology.net.name}, skipping combinatorial optimization in jump phase due to too many combinations: {num_combinations}"
+                )
+            else:
+                min_cost_for_loc: Dict[Tuple[Junction, Tuple[float, float]], float] = defaultdict(lambda: float("inf"))
+
+                for location_combination in itertools.product(*location_lists):
+                    current_combination = {j: loc for j, loc in zip(junctions_to_optimize, location_combination)}
+                    # Apply new locations
+                    for junction, new_loc in current_combination.items():
+                        junction.location = new_loc
+
                     current_cost = self._cost_calculator.calculate_total_cost(topology, context)
-                    tried_locations_costs[(new_loc.x, new_loc.y)] = current_cost
+
                     if current_cost < min_cost:
                         min_cost = current_cost
-                        best_location = new_loc
+                        best_combination = current_combination
 
-                # Also record the initial location
-                junction.location = initial_location
-                initial_cost = self._cost_calculator.calculate_total_cost(topology, context)
-                tried_locations_costs[(initial_location.x, initial_location.y)] = initial_cost
+                    # For heatmap data
+                    for junction, new_loc in current_combination.items():
+                        loc_tuple = (new_loc.x, new_loc.y)
+                        if current_cost < min_cost_for_loc[(junction, loc_tuple)]:
+                            min_cost_for_loc[(junction, loc_tuple)] = current_cost
 
-                # Accumulate tried locations and costs
-                for loc, cost in tried_locations_costs.items():
-                    all_tried_locations[junction][loc] = cost
+                # After iterating through combinations, populate all_tried_locations
+                for (junction, loc_tuple), cost in min_cost_for_loc.items():
+                    all_tried_locations[junction][loc_tuple] = cost
 
-                if best_location != initial_location:
-                    proposed_moves[junction] = best_location
+            # Restore original locations before determining moves
+            for junction, loc in original_locations.items():
+                junction.location = loc
+
+            # Determine proposed moves from the best combination
+            for junction, best_loc in best_combination.items():
+                if best_loc.distance(original_locations[junction]) > 1e-9:
+                    proposed_moves[junction] = best_loc
                     cost_reduced_this_iter = True
 
             self._log_jump_iteration_results(i, topology, context, module, cost_reduced_this_iter, proposed_moves, parent_map)
 
             if not cost_reduced_this_iter:
                 break
-
         else:
             log.warning(f"Junction jumping for net {topology.net.name} did not converge after {max_iterations} iterations.")
 
@@ -884,15 +923,25 @@ class GlobalRouter:
         Find candidate locations by starting at the centroid of downstream pins
         and sliding away from the original junction location to find valid spots.
         """
+
+        def rounded_point(x, y):
+            return Point(round(x), round(y))
+
+        def rounded_Point(pt):
+            return Point(round(pt.x), round(pt.y))
+
         pin_locations = [p.draw.geom for p in downstream_pins if hasattr(p.draw, "geom") and p.draw.geom]
         pin_locations = [p.centroid if not isinstance(p, Point) else p for p in pin_locations]
+        if not test_for_int_list_of_points(pin_locations):
+            log.warning(f"not int list of points: {pin_locations=}")
+            breakpoint()
         if not pin_locations:
             return []
 
         # 1. Calculate centroid of downstream pins
         centroid_x = np.mean([p.x for p in pin_locations])
         centroid_y = np.mean([p.y for p in pin_locations])
-        centroid = Point(centroid_x, centroid_y)
+        centroid = rounded_point(centroid_x, centroid_y)
 
         restricted_area = unary_union([macros, halos])
 
@@ -908,7 +957,7 @@ class GlobalRouter:
 
         # A large number to ensure the ray extends beyond all geometry.
         ray_length = 10000.0
-        ray_end = Point(centroid.x + direction_vector[0] * ray_length, centroid.y + direction_vector[1] * ray_length)
+        ray_end = rounded_point(centroid.x + direction_vector[0] * ray_length, centroid.y + direction_vector[1] * ray_length)
         ray = LineString([centroid, ray_end])
 
         # 3. Find the parts of the ray outside the restricted area.
@@ -925,17 +974,20 @@ class GlobalRouter:
             return []
 
         # 5. From the first valid position, generate a few more candidates along the ray.
-        candidate_locations = [first_valid_pos]
+        candidate_locations = [rounded_Point(first_valid_pos)]
         num_candidates = 4
         step_size = GRID_SPACING * 2  # Use grid spacing for a sensible step
         for i in range(1, num_candidates + 1):
-            candidate = Point(
+            candidate = rounded_point(
                 first_valid_pos.x + direction_vector[0] * step_size * i,
                 first_valid_pos.y + direction_vector[1] * step_size * i,
             )
             if not candidate.within(restricted_area):
                 candidate_locations.append(candidate)
 
+        if not test_for_int_list_of_points(candidate_locations):
+            log.warning(f"not int list of points: {candidate_locations=}")
+            breakpoint()
         return candidate_locations
 
     def _log_jump_iteration_results(

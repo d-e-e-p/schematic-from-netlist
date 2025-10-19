@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging as log
 from typing import List
 
 from shapely.geometry import LineString, MultiPolygon, Point, Polygon
@@ -40,14 +41,14 @@ def generate_candidate_paths(p1: Point | None, p2: Point | None, context) -> Lis
                     offset = sign * i * OFFSET_STEP
                     # Horizontal segment overlap -> offset vertically
                     if abs(p1.y - path.coords[1][1]) < 1e-9:  # L-path, horizontal first
-                        new_y = p1.y + offset
+                        new_y = round(p1.y + offset)
                         detour_path = LineString([p1, Point(p1.x, new_y), Point(p2.x, new_y), p2])
                         if not _check_segment_overlap(Point(p1.x, new_y), Point(p2.x, new_y), context):
                             final_paths.append(detour_path)
                             break
                     # Vertical segment overlap -> offset horizontally
                     else:  # L-path, vertical first
-                        new_x = p1.x + offset
+                        new_x = round(p1.x + offset)
                         detour_path = LineString([p1, Point(new_x, p1.y), Point(new_x, p2.y), p2])
                         if not _check_segment_overlap(Point(new_x, p1.y), Point(new_x, p2.y), context):
                             final_paths.append(detour_path)
@@ -101,8 +102,8 @@ def generate_lz_paths(p1: Point, p2: Point) -> List[LineString]:
 
     # --- Z-shapes (2 options)
     # Midpoints
-    mid_x = (p1.x + p2.x) / 2
-    mid_y = (p1.y + p2.y) / 2
+    mid_x = round((p1.x + p2.x) / 2)
+    mid_y = round((p1.y + p2.y) / 2)
 
     # Z1: horizontal–vertical–horizontal, bending through mid_y
     path_Z1 = LineString(
@@ -139,9 +140,8 @@ def _check_segment_overlap(p1: Point, p2: Point, context) -> bool:
     segment = LineString([p1, p2])
     # Ignore check if the segment is fully inside one of the ignored macros
     for macro in context.pin_macros.values():
-        if segment.within(macro):
+        if macro.contains(segment):
             return False
-
     # Horizontal segment
     if abs(p1.y - p2.y) < 1e-9:
         y = p1.y

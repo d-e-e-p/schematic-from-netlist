@@ -208,13 +208,14 @@ class RouterDebugger:
             # Add labels for cost components
             label_pos = path.interpolate(0.5, normalized=True)
             label_text = (
-                f"wl: {metrics.cost_wirelength:.1f}\n"
-                f"macro: {metrics.cost_macro:.1f}\n"
-                f"halo: {metrics.cost_halo:.1f}\n"
-                f"cong: {metrics.cost_congestion:.1f}\n"
-                f"cross: {metrics.cost_crossing:.1f}\n"
-                f"pen: {metrics.cost_macro_junction_penalty + metrics.cost_halo_junction_penalty:.1f}\n"
-                f"TOTAL: {metrics.total_cost:.1f}"
+                f"wl: {metrics.cost_wirelength:.0f}\n"
+                f"macro: {metrics.cost_macro:.0f}\n"
+                f"halo: {metrics.cost_halo:.0f}\n"
+                f"cong: {metrics.cost_congestion:.0f}\n"
+                f"cross: {metrics.cost_crossing:.0f}\n"
+                f"track: {metrics.cost_track_overlap:.0f}\n"
+                f"pen: {metrics.cost_macro_junction_penalty + metrics.cost_halo_junction_penalty:.0f}\n"
+                f"TOTAL: {metrics.total_cost:.0f}"
             )
             ax.text(
                 label_pos.x,
