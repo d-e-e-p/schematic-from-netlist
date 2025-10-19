@@ -140,8 +140,6 @@ class GlobalRouter:
         self._debugger.plot_junction_summary(self.junctions)
 
         for module in self.db.design.modules.values():
-            if module.is_leaf:
-                continue
             self._diagnose_crossings(module)
 
         return self.junctions

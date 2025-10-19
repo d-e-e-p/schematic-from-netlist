@@ -160,11 +160,19 @@ class NetPhysical:
         if self.geom is None:
             self.shape.clear()
             return None
-        # Convert MultiLineString back to list of 2-point segments
-        self.shape = [
-            ((int(line.coords[0][0]), int(line.coords[0][1])), (int(line.coords[1][0]), int(line.coords[1][1])))
-            for line in self.geom.geoms
-        ]
+
+        segments = []
+
+        # Iterate over all LineStrings in MultiLineString
+        for line in self.geom.geoms:
+            coords = line.coords
+            # Convert all consecutive pairs to int segments
+            for i in range(len(coords) - 1):
+                x1, y1 = int(coords[i][0]), int(coords[i][1])
+                x2, y2 = int(coords[i + 1][0]), int(coords[i + 1][1])
+                segments.append(((x1, y1), (x2, y2)))
+
+        self.shape = segments
         return self.shape
 
 

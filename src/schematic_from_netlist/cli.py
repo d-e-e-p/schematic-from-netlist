@@ -48,15 +48,16 @@ def produce_graph(db):
     junctions = router.insert_routing_junctions()
     db.insert_route_guide_buffers(junctions)
     db.dump_to_table("route_guide_insertion")
-    db.geom2fig()
+    # db.geom2fig()
     # gv.generate_layout_figures(phase="placed")
-    db.fig2shape()
+    db.remove_multi_fanout_buffers()
+    db.geom2shape()
 
 
 def generate_schematic(db, output_dir: str):
     """Generate schematic info and produce LTSpice output."""
     db.schematic_db = GenSchematicData(db)
-    db.schematic_db.generate_schematic()
+    # db.schematic_db.generate_schematic()
 
     writer = LTSpiceWriter(db)
     writer.produce_schematic(output_dir)
