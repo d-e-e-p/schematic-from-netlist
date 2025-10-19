@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import logging as log
 import os
-from typing import TYPE_CHECKING, Dict, List
+import time
+from typing import TYPE_CHECKING, Dict, List, Tuple
 
 import matplotlib.pyplot as plt
 from shapely.geometry import LineString, MultiLineString, MultiPolygon, Point, Polygon
 from tabulate import tabulate
 
+from schematic_from_netlist.database.netlist_structures import Module
 from schematic_from_netlist.graph.routing_helpers import get_halo_geometries, get_macro_geometries
 from schematic_from_netlist.graph.routing_utils import Junction, Pin, Topology
 
@@ -260,3 +262,98 @@ class RouterDebugger:
         plt.savefig(full_path, dpi=200)
         plt.close(fig)
         log.debug(f"Saved cost debug plot for net {topology.net.name} -> {full_path}")
+
+    def _plot_junction_move_heatmap(
+        self,
+        module: Module,
+        topology: Topology,
+        moved_junction: Junction,
+        tried_locations_costs: Dict[Tuple[float, float], float],
+        best_location: Point,
+        min_cost: float,
+        macros: Polygon,
+        halos: Polygon,
+        filename_prefix: str,
+    ):
+        """Generate a heatmap of junction move costs."""
+        out_dir = "data/images/heatmaps"
+        os.makedirs(out_dir, exist_ok=True)
+
+        fig, ax = plt.subplots(figsize=(12, 12))
+        ax.set_aspect("equal", adjustable="box")
+        ax.set_title(f"Junction Move Heatmap: {moved_junction.name} in {topology.net.name}")
+
+        # --- Draw macros and halos ---
+        if not macros.is_empty:
+            if isinstance(macros, MultiPolygon):
+                for sub in macros.geoms:
+                    x, y = sub.exterior.xy
+                    ax.fill(x, y, color="lightgrey", alpha=0.6)
+            else:
+                x, y = macros.exterior.xy
+                ax.fill(x, y, color="lightgrey", alpha=0.6)
+        if not halos.is_empty:
+            if isinstance(halos, MultiPolygon):
+                for sub in halos.geoms:
+                    x, y = sub.exterior.xy
+                    ax.plot(x, y, color="blue", ls="--", lw=1)
+            else:
+                x, y = halos.exterior.xy
+                ax.plot(x, y, color="blue", ls="--", lw=1)
+
+        # --- Draw other junctions and pins for context ---
+        for junction in topology.junctions:
+            if junction is not moved_junction:
+                jx, jy = junction.location.x, junction.location.y
+                ax.scatter(jx, jy, c="grey", s=50, marker="x")
+        pins = [p for p in topology.net.pins.values() if hasattr(p.draw, "geom") and p.draw.geom is not None]
+        for pin in pins:
+            pgeom = pin.draw.geom
+            px, py = (pgeom.x, pgeom.y) if isinstance(pgeom, Point) else (pgeom.centroid.x, pgeom.centroid.y)
+            ax.scatter(px, py, c="black", s=20, marker="o")
+
+        # --- Prepare heatmap data ---
+        locations = []
+        costs_perc = []
+        if min_cost > 0:
+            for loc, cost in tried_locations_costs.items():
+                locations.append(loc)
+                if cost == float("inf"):
+                    # Use a high value for invalid spots, maybe max of others + 50%
+                    valid_costs = [c for c in tried_locations_costs.values() if c != float("inf")]
+                    max_perc = max([((c - min_cost) / min_cost) * 100 for c in valid_costs]) if valid_costs else 100
+                    costs_perc.append(max_perc + 50)
+                else:
+                    percentage_increase = ((cost - min_cost) / min_cost) * 100
+                    costs_perc.append(percentage_increase)
+
+        if not locations:
+            log.warning("No locations to plot for heatmap.")
+            plt.close(fig)
+            return
+
+        x_coords = [loc[0] for loc in locations]
+        y_coords = [loc[1] for loc in locations]
+
+        # --- Plot heatmap ---
+        sc = ax.scatter(x_coords, y_coords, c=costs_perc, cmap="viridis_r", s=120, alpha=0.9, edgecolors="k", linewidth=0.5)
+        cbar = plt.colorbar(sc, ax=ax, label="Cost increase (%) over best")
+        cbar.set_alpha(1)
+
+        # Annotate points with cost percentage
+        for i, txt in enumerate(costs_perc):
+            ax.annotate(
+                f"{txt:.0f}%", (x_coords[i], y_coords[i]), textcoords="offset points", xytext=(0, 10), ha="center", fontsize=7
+            )
+
+        # Mark best location
+        ax.scatter(best_location.x, best_location.y, c="red", s=200, marker="*", label="Best Location")
+        ax.legend()
+
+        fig.tight_layout()
+        timestamp = time.strftime("%Y%m%d-%H%M%S")
+        filename = f"{filename_prefix}_{timestamp}.png"
+        full_path = os.path.join(out_dir, filename)
+        plt.savefig(full_path, dpi=200)
+        plt.close(fig)
+        log.info(f"Saved junction move heatmap -> {full_path}")

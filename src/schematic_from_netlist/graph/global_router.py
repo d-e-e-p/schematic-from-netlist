@@ -529,6 +529,7 @@ class GlobalRouter:
                     context,
                 )
                 best_location = initial_location
+                tried_locations_costs = {(initial_location.x, initial_location.y): min_cost}
 
                 # --- Calculate dynamic search step size ---
                 connected_points = []
@@ -561,6 +562,7 @@ class GlobalRouter:
                             continue
                         new_location = Point(initial_location.x + dx, initial_location.y + dy)
                         if new_location.within(macros) or new_location.within(halos):
+                            tried_locations_costs[(new_location.x, new_location.y)] = float("inf")
                             continue
 
                         junction.location = new_location
@@ -574,12 +576,27 @@ class GlobalRouter:
                             nearby_junctions = junction_tree.query(new_location.buffer(4))
                             current_cost += JUNCTION_SPACING_PENALTY * len(nearby_junctions)
 
+                        tried_locations_costs[(new_location.x, new_location.y)] = current_cost
+
                         if current_cost < min_cost:
                             min_cost = current_cost
                             best_location = new_location
 
                 # Restore original location for next junction's calculation
                 junction.location = initial_location
+
+                if len(tried_locations_costs) > 1:
+                    self._debugger._plot_junction_move_heatmap(
+                        module,
+                        topology,
+                        junction,
+                        tried_locations_costs,
+                        best_location,
+                        min_cost,
+                        macros,
+                        halos,
+                        filename_prefix=f"slide_iter_{i}",
+                    )
 
                 if best_location != initial_location:
                     proposed_moves[junction] = best_location
@@ -605,6 +622,73 @@ class GlobalRouter:
 
         else:
             log.warning(f"Junction sliding for net {topology.net.name} did not converge after {max_iterations} iterations.")
+
+    def _get_dominant_pin_direction(self, j_loc: Point, pin_locations: List[Point]) -> Optional[str]:
+        """Calculates the dominant direction of pins relative to a junction."""
+        if not pin_locations:
+            return None
+
+        vectors = np.array([(p.x - j_loc.x, p.y - j_loc.y) for p in pin_locations])
+        tolerance = 1e-6
+        avg_vector = np.mean(vectors, axis=0)
+
+        if abs(avg_vector[0]) > abs(avg_vector[1]):  # Horizontal
+            if avg_vector[0] < 0 and np.all(vectors[:, 0] < tolerance):
+                return "W"
+            elif avg_vector[0] > 0 and np.all(vectors[:, 0] > -tolerance):
+                return "E"
+        else:  # Vertical
+            if avg_vector[1] > 0 and np.all(vectors[:, 1] > -tolerance):
+                return "N"
+            elif avg_vector[1] < 0 and np.all(vectors[:, 1] < tolerance):
+                return "S"
+        return None
+
+    def _find_candidate_jump_locations(
+        self, j_loc: Point, dominant_direction: str, halos: BaseGeometry, macro_tree: STRtree, macro_polygons: List[Polygon]
+    ) -> List[Point]:
+        """Finds candidate locations to jump over a blocking macro."""
+        probe_dist = 2.0
+        jump_offset = 4.0
+        probe_point = None
+        candidate_locations = []
+
+        if dominant_direction == "W":
+            probe_point = Point(j_loc.x - probe_dist, j_loc.y)
+        elif dominant_direction == "E":
+            probe_point = Point(j_loc.x + probe_dist, j_loc.y)
+        elif dominant_direction == "N":
+            probe_point = Point(j_loc.x, j_loc.y + probe_dist)
+        elif dominant_direction == "S":
+            probe_point = Point(j_loc.x, j_loc.y - probe_dist)
+
+        if probe_point and probe_point.within(halos):
+            nearby_macro_indices = list(macro_tree.query(j_loc.buffer(probe_dist * 10)))
+            for macro_idx in nearby_macro_indices:
+                macro = macro_polygons[macro_idx]
+                is_blocking = False
+                if dominant_direction == "W" and macro.bounds[2] < j_loc.x:
+                    is_blocking = True
+                elif dominant_direction == "E" and macro.bounds[0] > j_loc.x:
+                    is_blocking = True
+                elif dominant_direction == "N" and macro.bounds[1] > j_loc.y:
+                    is_blocking = True
+                elif dominant_direction == "S" and macro.bounds[3] < j_loc.y:
+                    is_blocking = True
+
+                if not is_blocking:
+                    continue
+
+                if dominant_direction == "W":
+                    candidate_locations.append(Point(macro.bounds[2] + jump_offset, j_loc.y))
+                elif dominant_direction == "E":
+                    candidate_locations.append(Point(macro.bounds[0] - jump_offset, j_loc.y))
+                elif dominant_direction == "N":
+                    candidate_locations.append(Point(j_loc.x, macro.bounds[1] - jump_offset))
+                elif dominant_direction == "S":
+                    candidate_locations.append(Point(j_loc.x, macro.bounds[3] + jump_offset))
+        
+        return candidate_locations
 
     def _jump_junctions_over_macros(
         self,
