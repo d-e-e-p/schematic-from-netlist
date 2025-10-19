@@ -812,7 +812,7 @@ class GlobalRouter:
     ) -> List[Point]:
         """
         Find candidate locations by starting at the centroid of downstream pins
-        and sliding towards the original junction location to find valid spots.
+        and sliding away from the original junction location to find valid spots.
         """
         pin_locations = [p.draw.geom for p in downstream_pins if hasattr(p.draw, "geom") and p.draw.geom]
         pin_locations = [p.centroid if not isinstance(p, Point) else p for p in pin_locations]
@@ -822,38 +822,49 @@ class GlobalRouter:
         # 1. Calculate centroid of downstream pins
         centroid_x = np.mean([p.x for p in pin_locations])
         centroid_y = np.mean([p.y for p in pin_locations])
-        current_pos = Point(centroid_x, centroid_y)
+        centroid = Point(centroid_x, centroid_y)
 
         restricted_area = unary_union([macros, halos])
-        search_line = LineString([current_pos, junction_loc])
 
-        if search_line.length < 1e-6:
-            return [current_pos] if not current_pos.within(restricted_area) else []
+        # 2. Define a ray from the centroid going in the opposite direction of the junction.
+        if centroid.distance(junction_loc) < 1e-6:
+            return [centroid] if not centroid.within(restricted_area) else []
 
-        # 2. Slide along the line from centroid to junction until we are out of restricted areas
-        num_steps = 20
-        first_valid_pos = None
-        for i in range(num_steps + 1):
-            fraction = i / num_steps
-            current_pos = search_line.interpolate(fraction, normalized=True)
-            if not current_pos.within(restricted_area):
-                first_valid_pos = current_pos
-                break
-        breakpoint()
+        direction_vector = np.array([centroid.x - junction_loc.x, centroid.y - junction_loc.y])
+        norm = np.linalg.norm(direction_vector)
+        if norm == 0:
+            return [centroid] if not centroid.within(restricted_area) else []
+        direction_vector /= norm
+
+        # A large number to ensure the ray extends beyond all geometry.
+        ray_length = 10000.0
+        ray_end = Point(centroid.x + direction_vector[0] * ray_length, centroid.y + direction_vector[1] * ray_length)
+        ray = LineString([centroid, ray_end])
+
+        # 3. Find the parts of the ray outside the restricted area.
+        valid_line_parts = ray.difference(restricted_area)
+
+        if valid_line_parts.is_empty:
+            return []  # The ray never escapes the restricted area.
+
+        # 4. Find the closest point on the valid line parts to the centroid.
+        # This will be the first point on the ray outside the restricted area.
+        _, first_valid_pos = nearest_points(centroid, valid_line_parts)
 
         if first_valid_pos is None:
-            return []  # No valid position found along the line
+            return []
 
-        # 3. From the first valid position, generate a few more candidates towards the junction
+        # 5. From the first valid position, generate a few more candidates along the ray.
         candidate_locations = [first_valid_pos]
-        remaining_line = LineString([first_valid_pos, junction_loc])
-        if remaining_line.length > 1.0:
-            num_candidates = 4
-            for i in range(1, num_candidates + 1):
-                fraction = i / num_candidates
-                candidate = remaining_line.interpolate(fraction, normalized=True)
-                if not candidate.within(restricted_area):
-                    candidate_locations.append(candidate)
+        num_candidates = 4
+        step_size = GRID_SPACING * 2  # Use grid spacing for a sensible step
+        for i in range(1, num_candidates + 1):
+            candidate = Point(
+                first_valid_pos.x + direction_vector[0] * step_size * i,
+                first_valid_pos.y + direction_vector[1] * step_size * i,
+            )
+            if not candidate.within(restricted_area):
+                candidate_locations.append(candidate)
 
         return candidate_locations
 
