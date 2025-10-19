@@ -518,6 +518,7 @@ class GlobalRouter:
         )
 
         max_iterations = 10  # To prevent infinite loops
+        all_tried_locations: Dict[Junction, Dict[Tuple[float, float], float]] = defaultdict(dict)
         for i in range(max_iterations):
             proposed_moves = {}
             cost_reduced_this_iter = False
@@ -585,18 +586,9 @@ class GlobalRouter:
                 # Restore original location for next junction's calculation
                 junction.location = initial_location
 
-                if len(tried_locations_costs) > 1:
-                    self._debugger._plot_junction_move_heatmap(
-                        module,
-                        topology,
-                        junction,
-                        tried_locations_costs,
-                        best_location,
-                        min_cost,
-                        macros,
-                        halos,
-                        filename_prefix=f"slide_iter_{i}",
-                    )
+                # Accumulate tried locations and costs
+                for loc, cost in tried_locations_costs.items():
+                    all_tried_locations[junction][loc] = cost
 
                 if best_location != initial_location:
                     proposed_moves[junction] = best_location
@@ -623,6 +615,24 @@ class GlobalRouter:
         else:
             log.warning(f"Junction sliding for net {topology.net.name} did not converge after {max_iterations} iterations.")
 
+        # After all iterations, generate a summary heatmap for each junction
+        for junction, tried_locations in all_tried_locations.items():
+            if len(tried_locations) > 1:
+                best_loc_tuple = min(tried_locations, key=tried_locations.get)
+                best_location = Point(best_loc_tuple)
+                min_cost = tried_locations[best_loc_tuple]
+                self._debugger._plot_junction_move_heatmap(
+                    module,
+                    topology,
+                    junction,
+                    tried_locations,
+                    best_location,
+                    min_cost,
+                    macros,
+                    halos,
+                    filename_prefix="slide_summary_",
+                )
+
     def _get_dominant_pin_direction(self, j_loc: Point, pin_locations: List[Point]) -> Optional[str]:
         """Calculates the dominant direction of pins relative to a junction."""
         if not pin_locations:
@@ -643,52 +653,6 @@ class GlobalRouter:
             elif avg_vector[1] < 0 and np.all(vectors[:, 1] < tolerance):
                 return "S"
         return None
-
-    def _find_candidate_jump_locations(
-        self, j_loc: Point, dominant_direction: str, halos: BaseGeometry, macro_tree: STRtree, macro_polygons: List[Polygon]
-    ) -> List[Point]:
-        """Finds candidate locations to jump over a blocking macro."""
-        probe_dist = 2.0
-        jump_offset = 4.0
-        probe_point = None
-        candidate_locations = []
-
-        if dominant_direction == "W":
-            probe_point = Point(j_loc.x - probe_dist, j_loc.y)
-        elif dominant_direction == "E":
-            probe_point = Point(j_loc.x + probe_dist, j_loc.y)
-        elif dominant_direction == "N":
-            probe_point = Point(j_loc.x, j_loc.y + probe_dist)
-        elif dominant_direction == "S":
-            probe_point = Point(j_loc.x, j_loc.y - probe_dist)
-
-        if probe_point and probe_point.within(halos):
-            nearby_macro_indices = list(macro_tree.query(j_loc.buffer(probe_dist * 10)))
-            for macro_idx in nearby_macro_indices:
-                macro = macro_polygons[macro_idx]
-                is_blocking = False
-                if dominant_direction == "W" and macro.bounds[2] < j_loc.x:
-                    is_blocking = True
-                elif dominant_direction == "E" and macro.bounds[0] > j_loc.x:
-                    is_blocking = True
-                elif dominant_direction == "N" and macro.bounds[1] > j_loc.y:
-                    is_blocking = True
-                elif dominant_direction == "S" and macro.bounds[3] < j_loc.y:
-                    is_blocking = True
-
-                if not is_blocking:
-                    continue
-
-                if dominant_direction == "W":
-                    candidate_locations.append(Point(macro.bounds[2] + jump_offset, j_loc.y))
-                elif dominant_direction == "E":
-                    candidate_locations.append(Point(macro.bounds[0] - jump_offset, j_loc.y))
-                elif dominant_direction == "N":
-                    candidate_locations.append(Point(j_loc.x, macro.bounds[1] - jump_offset))
-                elif dominant_direction == "S":
-                    candidate_locations.append(Point(j_loc.x, macro.bounds[3] + jump_offset))
-        
-        return candidate_locations
 
     def _jump_junctions_over_macros(
         self,
@@ -726,6 +690,79 @@ class GlobalRouter:
             module=module,
         )
 
+        parent_map = self._build_junction_parent_map(topology)
+        memo_downstream_pins = {}
+        all_tried_locations: Dict[Junction, Dict[Tuple[float, float], float]] = defaultdict(dict)
+
+        max_iterations = 10
+        for i in range(max_iterations):
+            proposed_moves = {}
+            cost_reduced_this_iter = False
+
+            for junction in topology.junctions:
+                initial_location = junction.location
+                min_cost = self._cost_calculator.calculate_total_cost(topology, context)
+                best_location = initial_location
+
+                downstream_pins = self._get_downstream_pins(junction, parent_map, memo_downstream_pins)
+                if not downstream_pins:
+                    continue
+
+                candidate_locations = self._find_jump_candidate_locations(junction.location, downstream_pins, macros, halos)
+
+                tried_locations_costs = {}
+                for new_loc in candidate_locations:
+                    if new_loc.within(macros) or new_loc.within(halos):
+                        tried_locations_costs[(new_loc.x, new_loc.y)] = float("inf")
+                        continue
+                    junction.location = new_loc
+                    current_cost = self._cost_calculator.calculate_total_cost(topology, context)
+                    tried_locations_costs[(new_loc.x, new_loc.y)] = current_cost
+                    if current_cost < min_cost:
+                        min_cost = current_cost
+                        best_location = new_loc
+
+                # Also record the initial location
+                junction.location = initial_location
+                initial_cost = self._cost_calculator.calculate_total_cost(topology, context)
+                tried_locations_costs[(initial_location.x, initial_location.y)] = initial_cost
+
+                # Accumulate tried locations and costs
+                for loc, cost in tried_locations_costs.items():
+                    all_tried_locations[junction][loc] = cost
+
+                if best_location != initial_location:
+                    proposed_moves[junction] = best_location
+                    cost_reduced_this_iter = True
+
+            self._log_jump_iteration_results(i, topology, context, module, cost_reduced_this_iter, proposed_moves)
+
+            if not cost_reduced_this_iter:
+                break
+
+        else:
+            log.warning(f"Junction jumping for net {topology.net.name} did not converge after {max_iterations} iterations.")
+
+        # After all iterations, generate a summary heatmap for each junction
+        for junction, tried_locations in all_tried_locations.items():
+            if tried_locations:
+                best_loc_tuple = min(tried_locations, key=tried_locations.get)
+                best_location = Point(best_loc_tuple)
+                min_cost = tried_locations[best_loc_tuple]
+                self._debugger._plot_junction_move_heatmap(
+                    module,
+                    topology,
+                    junction,
+                    tried_locations,
+                    best_location,
+                    min_cost,
+                    macros,
+                    halos,
+                    filename_prefix="jump_summary_",
+                )
+
+    def _build_junction_parent_map(self, topology: Topology) -> Dict[Junction, Optional[Junction]]:
+        """Build a mapping of junctions to their parent junctions."""
         parent_map: Dict[Junction, Optional[Junction]] = {}
         if topology.junctions:
             root = topology.junctions[0]
@@ -739,143 +776,109 @@ class GlobalRouter:
                         visited.add(c_obj)
                         parent_map[c_obj] = p
                         q.append(c_obj)
+        return parent_map
 
-        memo_downstream_pins = {}
+    def _get_downstream_pins(
+        self, junction: Junction, parent_map: Dict[Junction, Optional[Junction]], memo_downstream_pins: Dict[Junction, List[Pin]]
+    ) -> List[Pin]:
+        """Get all pins downstream of a junction."""
+        if junction in memo_downstream_pins:
+            return memo_downstream_pins[junction]
 
-        def get_downstream_pins(j: Junction) -> List[Pin]:
-            if j in memo_downstream_pins:
-                return memo_downstream_pins[j]
+        pins = []
+        q = list(junction.children)
+        visited = {junction, parent_map.get(junction)} if parent_map.get(junction) else {junction}
 
-            pins = []
-            q = list(j.children)
-            # Start traversal from j's children, don't go to its parent
-            visited = {j, parent_map.get(j)} if parent_map.get(j) else {j}
+        while q:
+            node = q.pop(0)
+            if node in visited:
+                continue
+            visited.add(node)
 
-            while q:
-                node = q.pop(0)
-                if node in visited:
-                    continue
-                visited.add(node)
+            if isinstance(node, Pin):
+                pins.append(node)
+            elif isinstance(node, Junction):
+                q.extend(list(node.children))
 
-                if isinstance(node, Pin):
-                    pins.append(node)
-                elif isinstance(node, Junction):
-                    q.extend(list(node.children))
+        memo_downstream_pins[junction] = pins
+        return pins
 
-            memo_downstream_pins[j] = pins
-            return pins
+    def _find_jump_candidate_locations(
+        self,
+        junction_loc: Point,
+        downstream_pins: List[Pin],
+        macros: BaseGeometry,
+        halos: BaseGeometry,
+    ) -> List[Point]:
+        """
+        Find candidate locations by starting at the centroid of downstream pins
+        and sliding towards the original junction location to find valid spots.
+        """
+        pin_locations = [p.draw.geom for p in downstream_pins if hasattr(p.draw, "geom") and p.draw.geom]
+        pin_locations = [p.centroid if not isinstance(p, Point) else p for p in pin_locations]
+        if not pin_locations:
+            return []
 
-        max_iterations = 10
-        for i in range(max_iterations):
-            proposed_moves = {}
-            cost_reduced_this_iter = False
+        # 1. Calculate centroid of downstream pins
+        centroid_x = np.mean([p.x for p in pin_locations])
+        centroid_y = np.mean([p.y for p in pin_locations])
+        current_pos = Point(centroid_x, centroid_y)
 
-            for junction in topology.junctions:
-                initial_location = junction.location
-                min_cost = self._cost_calculator.calculate_total_cost(topology, context)
-                best_location = initial_location
+        restricted_area = unary_union([macros, halos])
+        search_line = LineString([current_pos, junction_loc])
 
-                downstream_pins = get_downstream_pins(junction)
-                if not downstream_pins:
-                    continue
+        if search_line.length < 1e-6:
+            return [current_pos] if not current_pos.within(restricted_area) else []
 
-                pin_locations = [p.draw.geom for p in downstream_pins if hasattr(p.draw, "geom") and p.draw.geom]
-                pin_locations = [p.centroid if not isinstance(p, Point) else p for p in pin_locations]
-                if not pin_locations:
-                    continue
-
-                j_loc = junction.location
-                vectors = np.array([(p.x - j_loc.x, p.y - j_loc.y) for p in pin_locations])
-                tolerance = 1e-6
-
-                dominant_direction = None
-                avg_vector = np.mean(vectors, axis=0)
-                if abs(avg_vector[0]) > abs(avg_vector[1]):  # Horizontal
-                    if avg_vector[0] < 0 and np.all(vectors[:, 0] < tolerance):
-                        dominant_direction = "W"
-                    elif avg_vector[0] > 0 and np.all(vectors[:, 0] > -tolerance):
-                        dominant_direction = "E"
-                else:  # Vertical
-                    if avg_vector[1] > 0 and np.all(vectors[:, 1] > -tolerance):
-                        dominant_direction = "N"
-                    elif avg_vector[1] < 0 and np.all(vectors[:, 1] < tolerance):
-                        dominant_direction = "S"
-
-                if not dominant_direction:
-                    continue
-
-                probe_dist = 2.0
-                jump_offset = 4.0
-                probe_point = None
-                if dominant_direction == "W":
-                    probe_point = Point(j_loc.x - probe_dist, j_loc.y)
-                elif dominant_direction == "E":
-                    probe_point = Point(j_loc.x + probe_dist, j_loc.y)
-                elif dominant_direction == "N":
-                    probe_point = Point(j_loc.x, j_loc.y + probe_dist)
-                elif dominant_direction == "S":
-                    probe_point = Point(j_loc.x, j_loc.y - probe_dist)
-
-                if probe_point and probe_point.within(halos):
-                    nearby_macro_indices = list(macro_tree.query(j_loc.buffer(probe_dist * 10)))
-                    for macro_idx in nearby_macro_indices:
-                        macro = macro_polygons[macro_idx]
-                        is_blocking = False
-                        if dominant_direction == "W" and macro.bounds[2] < j_loc.x:
-                            is_blocking = True
-                        elif dominant_direction == "E" and macro.bounds[0] > j_loc.x:
-                            is_blocking = True
-                        elif dominant_direction == "N" and macro.bounds[1] > j_loc.y:
-                            is_blocking = True
-                        elif dominant_direction == "S" and macro.bounds[3] < j_loc.y:
-                            is_blocking = True
-
-                        if not is_blocking:
-                            continue
-
-                        candidate_locations = []
-                        if dominant_direction == "W":
-                            candidate_locations.append(Point(macro.bounds[2] + jump_offset, j_loc.y))
-                        elif dominant_direction == "E":
-                            candidate_locations.append(Point(macro.bounds[0] - jump_offset, j_loc.y))
-                        elif dominant_direction == "N":
-                            candidate_locations.append(Point(j_loc.x, macro.bounds[1] - jump_offset))
-                        elif dominant_direction == "S":
-                            candidate_locations.append(Point(j_loc.x, macro.bounds[3] + jump_offset))
-
-                        log.info(f" trying new locs {candidate_locations} based on dominant direction {dominant_direction}")
-                        for new_loc in candidate_locations:
-                            if new_loc.within(macros) or new_loc.within(halos):
-                                continue
-                            junction.location = new_loc
-                            current_cost = self._cost_calculator.calculate_total_cost(topology, context)
-                            if current_cost < min_cost:
-                                min_cost = current_cost
-                                best_location = new_loc
-
-                junction.location = initial_location
-                if best_location != initial_location:
-                    proposed_moves[junction] = best_location
-                    cost_reduced_this_iter = True
-
-            # Generate intermediate cost calculation plot
-            log.info(f"calculating cost and dumping to prefix jump_iter_{i}_ for module:{module.name} net:{topology.net.name}")
-            self._cost_calculator.calculate_total_cost(
-                topology,
-                context,
-                debug_plot=True,
-                plot_filename_prefix=f"jump_iter_{i}_",
-            )
-
-            if not cost_reduced_this_iter:
-                log.info(f"Junction jumping for net {topology.net.name} converged after {i} iterations.")
+        # 2. Slide along the line from centroid to junction until we are out of restricted areas
+        num_steps = 20
+        first_valid_pos = None
+        for i in range(num_steps + 1):
+            fraction = i / num_steps
+            current_pos = search_line.interpolate(fraction, normalized=True)
+            if not current_pos.within(restricted_area):
+                first_valid_pos = current_pos
                 break
+        breakpoint()
+
+        if first_valid_pos is None:
+            return []  # No valid position found along the line
+
+        # 3. From the first valid position, generate a few more candidates towards the junction
+        candidate_locations = [first_valid_pos]
+        remaining_line = LineString([first_valid_pos, junction_loc])
+        if remaining_line.length > 1.0:
+            num_candidates = 4
+            for i in range(1, num_candidates + 1):
+                fraction = i / num_candidates
+                candidate = remaining_line.interpolate(fraction, normalized=True)
+                if not candidate.within(restricted_area):
+                    candidate_locations.append(candidate)
+
+        return candidate_locations
+
+    def _log_jump_iteration_results(
+        self,
+        iteration: int,
+        topology: Topology,
+        context: RoutingContext,
+        module: Module,
+        cost_reduced: bool,
+        proposed_moves: Dict[Junction, Point],
+    ):
+        """Log and plot results of a jump iteration."""
+        log.info(f"calculating cost and dumping to prefix jump_iter_{iteration}_ for module:{module.name} net:{topology.net.name}")
+        self._cost_calculator.calculate_total_cost(
+            topology,
+            context,
+            debug_plot=True,
+            plot_filename_prefix=f"jump_iter_{iteration}_",
+        )
+
+        if cost_reduced:
             for junction, new_location in proposed_moves.items():
                 junction.location = new_location
                 log.info(f"  Jumped junction {junction.name} to {new_location}")
-
-        else:
-            log.warning(f"Junction jumping for net {topology.net.name} did not converge after {max_iterations} iterations.")
 
     def _finalize_routes_and_pin_locations(
         self,

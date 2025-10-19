@@ -351,8 +351,7 @@ class RouterDebugger:
         ax.legend()
 
         fig.tight_layout()
-        timestamp = time.strftime("%Y%m%d-%H%M%S")
-        filename = f"{filename_prefix}_{timestamp}.png"
+        filename = f"{module.name}_{topology.net.name}_{filename_prefix}.png"
         full_path = os.path.join(out_dir, filename)
         plt.savefig(full_path, dpi=200)
         plt.close(fig)
