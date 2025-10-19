@@ -10,18 +10,23 @@ from collections import defaultdict
 from dataclasses import asdict, dataclass, field
 from typing import Dict, List, Optional, Set, Tuple
 
-import matplotlib.pyplot as plt
 import numpy as np
-import shapely
 from rtree import index
-from shapely.geometry import LineString, MultiLineString, MultiPoint, MultiPolygon, Point, Polygon, box
+from shapely.geometry import LineString, MultiLineString, MultiPoint, MultiPolygon, Point, Polygon
 from shapely.geometry.base import BaseGeometry
 from shapely.ops import linemerge, nearest_points, snap, unary_union
 from shapely.strtree import STRtree
-from tabulate import tabulate
 
 from schematic_from_netlist.database.netlist_structures import Module, Net, Pin
-from schematic_from_netlist.graph.geom_utils import Geom
+from schematic_from_netlist.graph.cost_calculator import CostCalculator
+from schematic_from_netlist.graph.router_debug import RouterDebugger
+from schematic_from_netlist.graph.routing_helpers import (
+    generate_l_paths,
+    get_halo_geometries,
+    get_l_path_corner,
+    get_macro_geometries,
+)
+from schematic_from_netlist.graph.routing_utils import Junction, RoutingContext, Topology
 
 # Pattern Route parameters
 ROUTE_WEIGHTS = {"wirelength": 1.0, "congestion": 2.0, "halo": 5.0, "crossing": 5.0, "macro": 1000.0, "track": 20.0}
@@ -31,67 +36,12 @@ GRID_SPACING = 1.0  # Track spacing for snapping
 MAX_FANOUT = 15  # Maximum junction fanout
 
 
-@dataclass
-class Topology:
-    net: Net
-    junctions: List[Junction] = field(default_factory=list)
-    metrics: Metrics | None = None
-
-
-@dataclass
-class Junction:
-    name: str
-    location: Point
-    children: Set[Junction | Pin] = field(default_factory=set)
-
-    def __hash__(self):
-        return hash((self.name, self.location))
-
-
-@dataclass
-class Metrics:
-    # Geometric parameters
-    wirelength: float = 0.0
-    macro_overlap: float = 0.0
-    halo_overlap: float = 0.0
-    intersecting_length: float = 0.0
-    intersecting_crossings: int = 0
-
-    # Individual weighted costs
-    cost_wirelength: float = 0.0
-    cost_macro: float = 0.0
-    cost_halo: float = 0.0
-    cost_congestion: float = 0.0
-    cost_crossing: float = 0.0
-    cost_track_overlap: float = 0.0
-    cost_macro_junction_penalty: float = 0.0
-    cost_halo_junction_penalty: float = 0.0
-
-    # Aggregate total
-    total_cost: float = 0.0
-
-    def to_dict(self):
-        """Return the metrics as a plain dictionary."""
-        return asdict(self)
-
-    def __str__(self):
-        """Return a short summary string for logging."""
-        return (
-            f"wl={self.cost_wirelength:.1f}, "
-            f"macro={self.cost_macro:.1f}, "
-            f"halo={self.cost_halo:.1f}, "
-            f"cong={self.cost_congestion:.1f}, "
-            f"cross={self.cost_crossing:.1f}, "
-            f"track={self.cost_track_overlap:.1f}, "
-            f"pen={self.cost_macro_junction_penalty + self.cost_halo_junction_penalty:.1f}, "
-            f"total={self.total_cost:.1f}"
-        )
-
-
 class GlobalRouter:
     def __init__(self, db):
         self.db = db
         self.junctions: Dict[Module, List[Topology]] = defaultdict(list)
+        self._debugger = RouterDebugger()
+        self._cost_calculator = CostCalculator(self._debugger)
 
     def insert_routing_junctions(self):
         # Process groups
@@ -102,8 +52,8 @@ class GlobalRouter:
             log.info(f"Processing module {module.name} with {len(module.nets)} nets in stages.")
 
             # --- Pre-computation for the whole module ---
-            macros = self._get_macro_geometries(module)
-            halos = self._get_halo_geometries(macros)
+            macros = get_macro_geometries(module)
+            halos = get_halo_geometries(macros)
             sorted_nets = sorted(
                 [n for n in module.nets.values() if 2 < n.num_conn < self.db.fanout_threshold],
                 key=lambda net: net.num_conn,
@@ -158,6 +108,25 @@ class GlobalRouter:
                 )
                 self._rebuild_net_geometry(topo)
 
+            # --- STAGE 4.5: Jumping Junctions over Macros ---
+            log.info("--- Stage 4.5: Jumping Junctions over Macros ---")
+            for net, topo in net_topologies.items():
+                congestion_idx, other_nets_geoms = self._build_congestion_index(module, net)
+                h_tracks, v_tracks = self._build_track_occupancy(other_nets_geoms)
+                self._jump_junctions_over_macros(
+                    topo,
+                    macros,
+                    halos,
+                    congestion_idx,
+                    other_nets_geoms,
+                    module,
+                    net_pin_macros[net],
+                    net_topologies,
+                    h_tracks,
+                    v_tracks,
+                )
+                self._rebuild_net_geometry(topo)
+
             # --- STAGE 5: Finalize Routes ---
             log.info(f"--- Stage 5: Finalizing Routes and Pin Locations ---")
             for net, topo in net_topologies.items():
@@ -167,8 +136,8 @@ class GlobalRouter:
         log.info(f"Total junctions created: {sum(len(v) for v in self.junctions.values())}")
 
         # Log detailed junction summary
-        self._log_junction_summary()
-        self._plot_junction_summary()
+        self._debugger.log_junction_summary(self.junctions)
+        self._debugger.plot_junction_summary(self.junctions)
 
         for module in self.db.design.modules.values():
             if module.is_leaf:
@@ -176,75 +145,6 @@ class GlobalRouter:
             self._diagnose_crossings(module)
 
         return self.junctions
-
-    def _diagnose_crossings(self, module: Module):
-        """Checks all routed nets in a module for crossings or overlaps and logs them."""
-        log.info(f"--- Crossing Diagnosis for Module: {module.name} ---")
-        nets = [n for n in module.nets.values() if hasattr(n.draw, "geom") and n.draw.geom and not n.draw.geom.is_empty]
-
-        net_lines = {}
-        for net in nets:
-            geom = net.draw.geom
-            if isinstance(geom, LineString):
-                net_lines[net.name] = [geom]
-            elif isinstance(geom, MultiLineString):
-                net_lines[net.name] = list(geom.geoms)
-
-        violations = 0
-        net_names = list(net_lines.keys())
-        for i in range(len(net_names)):
-            for j in range(i + 1, len(net_names)):
-                net1_name = net_names[i]
-                net2_name = net_names[j]
-                for line1 in net_lines[net1_name]:
-                    for line2 in net_lines[net2_name]:
-                        if line1.intersects(line2):
-                            # Ignore intersections at the exact endpoints, as they are likely intended connections
-                            if line1.touches(line2):
-                                intersection = line1.intersection(line2)
-                                if isinstance(intersection, Point):
-                                    is_endpoint = False
-                                    for p in [
-                                        Point(line1.coords[0]),
-                                        Point(line1.coords[-1]),
-                                        Point(line2.coords[0]),
-                                        Point(line2.coords[-1]),
-                                    ]:
-                                        if p.equals(intersection):
-                                            is_endpoint = True
-                                            break
-                                    if is_endpoint:
-                                        continue
-
-                            intersection = line1.intersection(line2)
-                            log.warning(
-                                f"Violation between {net1_name} and {net2_name}: "
-                                f"type = {type(intersection).__name__}, WKT = {intersection.wkt}"
-                            )
-                            violations += 1
-
-        if violations == 0:
-            log.info("No crossing/overlap violations found.")
-        else:
-            log.warning(f"Found {violations} crossing/overlap violations.")
-        log.info(f"--- End of Diagnosis ---")
-
-    def _get_macro_geometries(self, module: Module):
-        """Get all macro geometries in a module."""
-        geoms = []
-        for i in module.get_all_instances().values():
-            if hasattr(i.draw, "geom") and i.draw.geom:
-                if isinstance(i.draw.geom, Polygon):
-                    geoms.append(i.draw.geom)
-                elif isinstance(i.draw.geom, MultiPolygon):
-                    geoms.extend(list(i.draw.geom.geoms))
-        return unary_union(geoms) if geoms else Polygon()
-
-    def _get_halo_geometries(self, macros, buffer_dist: int = 10) -> Polygon:
-        """Get halo geometries around macros."""
-        if macros.is_empty:
-            return Polygon()
-        return macros.buffer(buffer_dist)
 
     def _build_congestion_index(self, module: Module, current_net: Net) -> Tuple[index.Index, List[LineString]]:
         """Build an R-tree index for congestion analysis."""
@@ -305,198 +205,6 @@ class GlobalRouter:
 
         return h_tracks, v_tracks
 
-    def _generate_candidate_paths(self, p1: Point | None, p2: Point | None, halos: Polygon | BaseGeometry) -> List[LineString]:
-        """Generate candidate L-shaped paths, including escape routes from halos."""
-        paths = []
-        if not p1 or not p2:
-            return paths
-
-        # 1. Basic L-paths
-        paths.extend(self._generate_l_paths(p1, p2))
-
-        # 2. Escape routes
-        p1_in_halo = p1.within(halos)
-        p2_in_halo = p2.within(halos)
-
-        escape_points = {}
-        if p1_in_halo:
-            if not halos.boundary.is_empty:
-                escape_points[1] = nearest_points(p1, halos.boundary)[1]
-
-        if p2_in_halo:
-            if not halos.boundary.is_empty:
-                escape_points[2] = nearest_points(p2, halos.boundary)[1]
-
-        e1 = escape_points.get(1)
-        e2 = escape_points.get(2)
-
-        if e1:
-            paths.extend(self._generate_l_paths(e1, p2))
-        if e2:
-            paths.extend(self._generate_l_paths(p1, e2))
-        if e1 and e2:
-            paths.extend(self._generate_l_paths(e1, e2))
-
-        # Return unique paths
-        unique_paths = []
-        seen = set()
-        for p in paths:
-            if p.wkt not in seen:
-                unique_paths.append(p)
-                seen.add(p.wkt)
-        return unique_paths
-
-    def _generate_l_paths(self, p1: Point, p2: Point) -> List[LineString]:
-        """Generate two L-shaped paths between two points."""
-        if not all(isinstance(p, Point) for p in [p1, p2]):
-            return []
-        path1 = LineString([(p1.x, p1.y), (p1.x, p2.y), (p2.x, p2.y)])
-        path2 = LineString([(p1.x, p1.y), (p2.x, p1.y), (p2.x, p2.y)])
-        return [path1, path2]
-
-    def _get_l_path_corner(self, path: LineString) -> Point:
-        """Get the corner point of an L-shaped path."""
-        return Point(path.coords[1])
-
-    def _calculate_path_cost(
-        self,
-        path: LineString,
-        macros: Polygon | BaseGeometry,
-        halos: Polygon | BaseGeometry,
-        congestion_idx: index.Index,
-        other_nets_geoms: List[LineString],
-        h_tracks: Dict[float, List[Tuple[float, float]]],
-        v_tracks: Dict[float, List[Tuple[float, float]]],
-        p1_macro_to_ignore: Optional[Polygon] = None,
-        p2_macro_to_ignore: Optional[Polygon] = None,
-    ) -> Tuple[Metrics, List[Point]]:
-        """Calculate detailed routing cost metrics for a given path."""
-
-        # Compute geometric parameters
-        wirelength = path.length
-        macro_overlap = path.intersection(macros).length
-        halo_overlap = path.intersection(halos).length
-
-        # Compute congestion overlap
-        intersecting_length = 0.0
-        possible_intersections = [other_nets_geoms[i] for i in congestion_idx.intersection(path.bounds)]
-        for geom in possible_intersections:
-            if path.intersects(geom):
-                intersecting_length += path.intersection(geom).length
-
-        # Compute crossings
-        intersecting_crossings = 0
-        crossing_points = []
-        for geom in possible_intersections:
-            if path.intersects(geom):
-                intersection = path.intersection(geom)
-                if isinstance(intersection, Point):
-                    intersecting_crossings += 1
-                    crossing_points.append(intersection)
-                elif isinstance(intersection, MultiPoint):
-                    intersecting_crossings += len(intersection.geoms)
-                    crossing_points.extend(list(intersection.geoms))
-                elif isinstance(intersection, (LineString, MultiLineString)):
-                    # Overlap detected. Penalize based on length.
-                    intersecting_crossings += math.ceil(intersection.length / GRID_SPACING)
-
-        # Compute track overlap
-        track_overlap_length = 0.0
-        path_coords = list(path.coords)
-        for i in range(len(path_coords) - 1):
-            p1 = Point(path_coords[i])
-            p2 = Point(path_coords[i + 1])
-
-            if abs(p1.y - p2.y) < 1e-9:  # Horizontal segment
-                y = p1.y
-                seg_x1, seg_x2 = sorted((p1.x, p2.x))
-                if y in h_tracks:
-                    for track_x1, track_x2 in h_tracks[y]:
-                        overlap_start = max(seg_x1, track_x1)
-                        overlap_end = min(seg_x2, track_x2)
-                        if overlap_start < overlap_end:
-                            track_overlap_length += overlap_end - overlap_start
-            elif abs(p1.x - p2.x) < 1e-9:  # Vertical segment
-                x = p1.x
-                seg_y1, seg_y2 = sorted((p1.y, p2.y))
-                if x in v_tracks:
-                    for track_y1, track_y2 in v_tracks[x]:
-                        overlap_start = max(seg_y1, track_y1)
-                        overlap_end = min(seg_y2, track_y2)
-                        if overlap_start < overlap_end:
-                            track_overlap_length += overlap_end - overlap_start
-
-        # Weighted cost components
-        cost_wirelength = ROUTE_WEIGHTS["wirelength"] * wirelength
-        cost_macro = ROUTE_WEIGHTS["macro"] * macro_overlap
-        cost_halo = ROUTE_WEIGHTS["halo"] * halo_overlap
-        cost_congestion = ROUTE_WEIGHTS["congestion"] * intersecting_length
-        cost_crossing = ROUTE_WEIGHTS["crossing"] * intersecting_crossings
-        cost_track_overlap = ROUTE_WEIGHTS["track"] * track_overlap_length
-
-        # Junction penalties
-        cost_macro_junction_penalty = 0.0
-        cost_halo_junction_penalty = 0.0
-        if len(path.coords) == 3:  # L-shaped path
-            corner = self._get_l_path_corner(path)
-            if corner.within(macros):
-                cost_macro_junction_penalty = 1000.0
-            if corner.within(halos):
-                cost_halo_junction_penalty = 500.0
-
-        # Zero out wirelength and macro overlap costs for segments inside their own macro
-        for macro_to_ignore in [p1_macro_to_ignore, p2_macro_to_ignore]:
-            if macro_to_ignore:
-                internal_segment = path.intersection(macro_to_ignore)
-                if internal_segment.length > 0:
-                    internal_wirelength = internal_segment.length
-
-                    # Subtract wirelength and macro overlap cost for the internal segment
-                    cost_wirelength -= ROUTE_WEIGHTS["wirelength"] * internal_wirelength
-                    cost_macro -= ROUTE_WEIGHTS["macro"] * internal_wirelength
-
-                    # Update raw metrics as well for logging consistency
-                    wirelength -= internal_wirelength
-                    macro_overlap -= internal_wirelength
-
-        # Total cost
-        total_cost = (
-            cost_wirelength
-            + cost_macro
-            + cost_halo
-            + cost_congestion
-            + cost_crossing
-            + cost_track_overlap
-            + cost_macro_junction_penalty
-            + cost_halo_junction_penalty
-        )
-
-        metrics = Metrics(
-            wirelength=wirelength,
-            macro_overlap=macro_overlap,
-            halo_overlap=halo_overlap,
-            intersecting_length=intersecting_length,
-            intersecting_crossings=intersecting_crossings,
-            cost_wirelength=cost_wirelength,
-            cost_macro=cost_macro,
-            cost_halo=cost_halo,
-            cost_congestion=cost_congestion,
-            cost_crossing=cost_crossing,
-            cost_track_overlap=cost_track_overlap,
-            cost_macro_junction_penalty=cost_macro_junction_penalty,
-            cost_halo_junction_penalty=cost_halo_junction_penalty,
-            total_cost=total_cost,
-        )
-
-        log.debug(
-            f"cost: wl={cost_wirelength:.1f}, macro={cost_macro:.1f}, halo={cost_halo:.1f}, "
-            f"congestion={cost_congestion:.1f}, crossing={cost_crossing:.1f}, "
-            f"penalties={cost_macro_junction_penalty + cost_halo_junction_penalty:.1f}, "
-            f"total={total_cost:.1f}"
-        )
-
-        return metrics, crossing_points
-
     def _create_initial_topology(
         self,
         net: Net,
@@ -529,6 +237,16 @@ class GlobalRouter:
         tree_connection_points: Set[Pin | Junction] = {start_pin}
         topology = Topology(net=net)
 
+        context = RoutingContext(
+            macros=macros,
+            halos=halos,
+            congestion_idx=congestion_idx,
+            other_nets_geoms=other_nets_geoms,
+            h_tracks=h_tracks,
+            v_tracks=v_tracks,
+            pin_macros=pin_macros,
+        )
+
         # Greedy merge loop
         while unconnected_pins:
             min_cost = float("inf")
@@ -545,14 +263,9 @@ class GlobalRouter:
                     for path_geom in candidate_paths:
                         p1_macro = pin_macros.get(conn_point) if isinstance(conn_point, Pin) else None
                         p2_macro = pin_macros.get(new_pin)
-                        metrics, _ = self._calculate_path_cost(
+                        metrics, _ = self._cost_calculator.calculate_path_cost(
                             path_geom,
-                            macros,
-                            halos,
-                            congestion_idx,
-                            other_nets_geoms,
-                            h_tracks,
-                            v_tracks,
+                            context,
                             p1_macro,
                             p2_macro,
                         )
@@ -569,7 +282,7 @@ class GlobalRouter:
             # Add new pin and junction to the tree
             if best_new_pin:
                 unconnected_pins.remove(best_new_pin)
-            corner = self._get_l_path_corner(best_path)
+            corner = get_l_path_corner(best_path)
             junction_name = f"J_{net.name}_{len(topology.junctions)}"
             # Ensure we only add valid Pin or Junction objects to children
             children = set()
@@ -585,6 +298,47 @@ class GlobalRouter:
                 tree_connection_points.remove(best_connection_point)
 
         return topology, pin_macros
+
+    def _generate_candidate_paths(self, p1: Point | None, p2: Point | None, halos: Polygon | BaseGeometry) -> List[LineString]:
+        """Generate candidate L-shaped paths, including escape routes from halos."""
+        paths = []
+        if not p1 or not p2:
+            return paths
+
+        # 1. Basic L-paths
+        paths.extend(generate_l_paths(p1, p2))
+
+        # 2. Escape routes
+        p1_in_halo = p1.within(halos)
+        p2_in_halo = p2.within(halos)
+
+        escape_points = {}
+        if p1_in_halo:
+            if not halos.boundary.is_empty:
+                escape_points[1] = nearest_points(p1, halos.boundary)[1]
+
+        if p2_in_halo:
+            if not halos.boundary.is_empty:
+                escape_points[2] = nearest_points(p2, halos.boundary)[1]
+
+        e1 = escape_points.get(1)
+        e2 = escape_points.get(2)
+
+        if e1:
+            paths.extend(generate_l_paths(e1, p2))
+        if e2:
+            paths.extend(generate_l_paths(p1, e2))
+        if e1 and e2:
+            paths.extend(generate_l_paths(e1, e2))
+
+        # Return unique paths
+        unique_paths = []
+        seen = set()
+        for p in paths:
+            if p.wkt not in seen:
+                unique_paths.append(p)
+                seen.add(p.wkt)
+        return unique_paths
 
     def _rebuild_net_geometry(self, topology: Topology):
         """Rebuilds the net's geometry based on its current topology of junctions and pins."""
@@ -602,7 +356,7 @@ class GlobalRouter:
                     end_point = child.location
 
                 # Generate orthogonal path to the final pin location (or other junction)
-                l_paths = self._generate_l_paths(start_point, end_point)
+                l_paths = generate_l_paths(start_point, end_point)
                 if l_paths:
                     new_geoms.append(l_paths[0])
                 elif start_point.distance(end_point) > 1e-9:
@@ -741,6 +495,7 @@ class GlobalRouter:
         2. After checking all junctions, apply all the beneficial moves simultaneously.
         3. Re-plot the routing and repeat until no more cost reduction is possible.
         """
+        search_step_size = 4
         log.debug(f"Starting junction sliding for net {topology.net.name}")
 
         # Build an STRtree of all junctions from OTHER nets for quick spatial queries
@@ -751,6 +506,17 @@ class GlobalRouter:
                     other_junction_points.append(j.location)
         junction_tree = STRtree(other_junction_points) if other_junction_points else None
 
+        context = RoutingContext(
+            macros=macros,
+            halos=halos,
+            congestion_idx=congestion_idx,
+            other_nets_geoms=other_nets_geoms,
+            h_tracks=h_tracks,
+            v_tracks=v_tracks,
+            pin_macros=pin_macros,
+            module=module,
+        )
+
         max_iterations = 10  # To prevent infinite loops
         for i in range(max_iterations):
             proposed_moves = {}
@@ -758,16 +524,9 @@ class GlobalRouter:
 
             for j_idx, junction in enumerate(topology.junctions):
                 initial_location = junction.location
-                min_cost = self._calculate_total_cost(
+                min_cost = self._cost_calculator.calculate_total_cost(
                     topology,
-                    macros,
-                    halos,
-                    congestion_idx,
-                    other_nets_geoms,
-                    pin_macros,
-                    h_tracks,
-                    v_tracks,
-                    module=module,
+                    context,
                 )
                 best_location = initial_location
 
@@ -785,15 +544,13 @@ class GlobalRouter:
                     elif geom:
                         connected_points.append(geom.centroid)
 
-                if not connected_points:
-                    search_step_size = 2
-                else:
+                if connected_points:
                     x_coords = [p.x for p in connected_points]
                     y_coords = [p.y for p in connected_points]
                     span_x = max(x_coords) - min(x_coords) if x_coords else 0
                     span_y = max(y_coords) - min(y_coords) if y_coords else 0
                     span = max(span_x, span_y)
-                    search_step_size = max(2, int(span / 10))  # More aggressive step size
+                    search_step_size = max(search_step_size, int(span / 10))  # larger step size for larger spans
                 # ---
 
                 # Explore surrounding spots in a wider range
@@ -807,16 +564,9 @@ class GlobalRouter:
                             continue
 
                         junction.location = new_location
-                        current_cost = self._calculate_total_cost(
+                        current_cost = self._cost_calculator.calculate_total_cost(
                             topology,
-                            macros,
-                            halos,
-                            congestion_idx,
-                            other_nets_geoms,
-                            pin_macros,
-                            h_tracks,
-                            v_tracks,
-                            module=module,
+                            context,
                         )
 
                         # Add junction spacing penalty
@@ -846,240 +596,202 @@ class GlobalRouter:
 
             # Generate intermediate cost calculation plot
             log.info(f"calculating cost and dumping to prefix slide_iter_{i}_ for module:{module.name} net:{topology.net.name}")
-            self._calculate_total_cost(
+            self._cost_calculator.calculate_total_cost(
                 topology,
-                macros,
-                halos,
-                congestion_idx,
-                other_nets_geoms,
-                pin_macros,
-                h_tracks,
-                v_tracks,
+                context,
                 debug_plot=True,
-                module=module,
                 plot_filename_prefix=f"slide_iter_{i}_",
             )
 
         else:
             log.warning(f"Junction sliding for net {topology.net.name} did not converge after {max_iterations} iterations.")
 
-    def _calculate_total_cost(
+    def _jump_junctions_over_macros(
         self,
         topology: Topology,
         macros: Polygon | BaseGeometry,
         halos: Polygon | BaseGeometry,
         congestion_idx,
         other_nets_geoms,
+        module: Module,
         pin_macros: Dict[Pin, Polygon],
+        all_topologies: Dict[Net, Topology],
         h_tracks,
         v_tracks,
-        debug_plot: bool = False,
-        module: Optional[Module] = None,
-        plot_filename_prefix: str | None = None,
     ):
         """
-        Calculates the total cost of a given topology and can optionally generate a debug plot.
+        Tries to find better junction locations by jumping over macros.
+        This is for cases where a junction is stuck on one side of a macro due to a halo,
+        while all its connected pins are on the same side.
         """
-        total_cost = 0.0
-        paths_with_metrics = []
-        crossing_points = []
+        log.info(f"Starting junction jumping for module:{module.name} net:{topology.net.name}")
 
-        # Build adjacency list for the topology
-        adj = defaultdict(set)
-        all_nodes: Set[Junction | Pin] = set(topology.junctions)
-        for j in topology.junctions:
-            for child in j.children:
-                adj[j].add(child)
-                adj[child].add(j)
-                all_nodes.add(child)
+        macro_polygons = [inst.draw.geom for inst in module.instances.values()]
+        if not macro_polygons:
+            return
+        macro_tree = STRtree(macro_polygons)
 
-        processed_edges = set()
-        for u in all_nodes:
-            if u not in adj:
-                continue
-            for v in adj[u]:
-                if tuple(sorted((id(u), id(v)))) in processed_edges:
+        context = RoutingContext(
+            macros=macros,
+            halos=halos,
+            congestion_idx=congestion_idx,
+            other_nets_geoms=other_nets_geoms,
+            h_tracks=h_tracks,
+            v_tracks=v_tracks,
+            pin_macros=pin_macros,
+            module=module,
+        )
+
+        parent_map: Dict[Junction, Optional[Junction]] = {}
+        if topology.junctions:
+            root = topology.junctions[0]
+            q = [root]
+            visited = {root}
+            parent_map[root] = None
+            while q:
+                p = q.pop(0)
+                for c_obj in p.children:
+                    if isinstance(c_obj, Junction) and c_obj not in visited:
+                        visited.add(c_obj)
+                        parent_map[c_obj] = p
+                        q.append(c_obj)
+
+        memo_downstream_pins = {}
+
+        def get_downstream_pins(j: Junction) -> List[Pin]:
+            if j in memo_downstream_pins:
+                return memo_downstream_pins[j]
+
+            pins = []
+            q = list(j.children)
+            # Start traversal from j's children, don't go to its parent
+            visited = {j, parent_map.get(j)} if parent_map.get(j) else {j}
+
+            while q:
+                node = q.pop(0)
+                if node in visited:
                     continue
-                processed_edges.add(tuple(sorted((id(u), id(v)))))
+                visited.add(node)
 
-                p1 = u.location if isinstance(u, Junction) else u.draw.geom
-                if p1 and not isinstance(p1, Point):
-                    p1 = p1.centroid
+                if isinstance(node, Pin):
+                    pins.append(node)
+                elif isinstance(node, Junction):
+                    q.extend(list(node.children))
 
-                p2 = v.location if isinstance(v, Junction) else v.draw.geom
-                if p2 and not isinstance(p2, Point):
-                    p2 = p2.centroid
+            memo_downstream_pins[j] = pins
+            return pins
 
-                if p1 is None or p2 is None:
+        max_iterations = 10
+        for i in range(max_iterations):
+            proposed_moves = {}
+            cost_reduced_this_iter = False
+
+            for junction in topology.junctions:
+                initial_location = junction.location
+                min_cost = self._cost_calculator.calculate_total_cost(topology, context)
+                best_location = initial_location
+
+                downstream_pins = get_downstream_pins(junction)
+                if not downstream_pins:
                     continue
 
-                p1_macro_to_ignore = pin_macros.get(u) if isinstance(u, Pin) else None
-                p2_macro_to_ignore = pin_macros.get(v) if isinstance(v, Pin) else None
-
-                candidate_paths = self._generate_l_paths(p1, p2)
-
-                if not candidate_paths:
-                    path = LineString([p1, p2])
-                    metrics, new_crossings = self._calculate_path_cost(
-                        path,
-                        macros,
-                        halos,
-                        congestion_idx,
-                        other_nets_geoms,
-                        h_tracks,
-                        v_tracks,
-                        p1_macro_to_ignore,
-                        p2_macro_to_ignore,
-                    )
-                    total_cost += metrics.total_cost
-                    if debug_plot:
-                        paths_with_metrics.append((path, metrics))
-                        crossing_points.extend(new_crossings)
+                pin_locations = [p.draw.geom for p in downstream_pins if hasattr(p.draw, "geom") and p.draw.geom]
+                pin_locations = [p.centroid if not isinstance(p, Point) else p for p in pin_locations]
+                if not pin_locations:
                     continue
 
-                metrics1, crossings1 = self._calculate_path_cost(
-                    candidate_paths[0],
-                    macros,
-                    halos,
-                    congestion_idx,
-                    other_nets_geoms,
-                    h_tracks,
-                    v_tracks,
-                    p1_macro_to_ignore,
-                    p2_macro_to_ignore,
-                )
-                metrics2, crossings2 = self._calculate_path_cost(
-                    candidate_paths[1],
-                    macros,
-                    halos,
-                    congestion_idx,
-                    other_nets_geoms,
-                    h_tracks,
-                    v_tracks,
-                    p1_macro_to_ignore,
-                    p2_macro_to_ignore,
-                )
+                j_loc = junction.location
+                vectors = np.array([(p.x - j_loc.x, p.y - j_loc.y) for p in pin_locations])
+                tolerance = 1e-6
 
-                if metrics1.total_cost < metrics2.total_cost:
-                    best_path, best_metrics, best_crossings = candidate_paths[0], metrics1, crossings1
-                else:
-                    best_path, best_metrics, best_crossings = candidate_paths[1], metrics2, crossings2
+                dominant_direction = None
+                avg_vector = np.mean(vectors, axis=0)
+                if abs(avg_vector[0]) > abs(avg_vector[1]):  # Horizontal
+                    if avg_vector[0] < 0 and np.all(vectors[:, 0] < tolerance):
+                        dominant_direction = "W"
+                    elif avg_vector[0] > 0 and np.all(vectors[:, 0] > -tolerance):
+                        dominant_direction = "E"
+                else:  # Vertical
+                    if avg_vector[1] > 0 and np.all(vectors[:, 1] > -tolerance):
+                        dominant_direction = "N"
+                    elif avg_vector[1] < 0 and np.all(vectors[:, 1] < tolerance):
+                        dominant_direction = "S"
 
-                total_cost += best_metrics.total_cost
-                if debug_plot:
-                    paths_with_metrics.append((best_path, best_metrics))
-                    crossing_points.extend(best_crossings)
+                if not dominant_direction:
+                    continue
 
-        if not debug_plot:
-            return total_cost
+                probe_dist = 2.0
+                jump_offset = 4.0
+                probe_point = None
+                if dominant_direction == "W":
+                    probe_point = Point(j_loc.x - probe_dist, j_loc.y)
+                elif dominant_direction == "E":
+                    probe_point = Point(j_loc.x + probe_dist, j_loc.y)
+                elif dominant_direction == "N":
+                    probe_point = Point(j_loc.x, j_loc.y + probe_dist)
+                elif dominant_direction == "S":
+                    probe_point = Point(j_loc.x, j_loc.y - probe_dist)
 
-        # --- Plotting logic ---
-        out_dir = "data/images/cost_debug"
-        os.makedirs(out_dir, exist_ok=True)
+                if probe_point and probe_point.within(halos):
+                    nearby_macro_indices = list(macro_tree.query(j_loc.buffer(probe_dist * 10)))
+                    for macro_idx in nearby_macro_indices:
+                        macro = macro_polygons[macro_idx]
+                        is_blocking = False
+                        if dominant_direction == "W" and macro.bounds[2] < j_loc.x:
+                            is_blocking = True
+                        elif dominant_direction == "E" and macro.bounds[0] > j_loc.x:
+                            is_blocking = True
+                        elif dominant_direction == "N" and macro.bounds[1] > j_loc.y:
+                            is_blocking = True
+                        elif dominant_direction == "S" and macro.bounds[3] < j_loc.y:
+                            is_blocking = True
 
-        fig, ax = plt.subplots(figsize=(12, 12))
-        ax.set_aspect("equal", adjustable="box")
-        title = f"Cost Calculation for Net: {topology.net.name}"
-        if module:
-            title += f" in {module.name}"
-        ax.set_title(title)
-        ax.set_xlabel("X")
-        ax.set_ylabel("Y")
+                        if not is_blocking:
+                            continue
 
-        # --- Draw other nets for context ---
-        for geom in other_nets_geoms:
-            x, y = geom.xy
-            ax.plot(x, y, color="lightgray", lw=0.75, zorder=1)
+                        candidate_locations = []
+                        if dominant_direction == "W":
+                            candidate_locations.append(Point(macro.bounds[2] + jump_offset, j_loc.y))
+                        elif dominant_direction == "E":
+                            candidate_locations.append(Point(macro.bounds[0] - jump_offset, j_loc.y))
+                        elif dominant_direction == "N":
+                            candidate_locations.append(Point(j_loc.x, macro.bounds[1] - jump_offset))
+                        elif dominant_direction == "S":
+                            candidate_locations.append(Point(j_loc.x, macro.bounds[3] + jump_offset))
 
-        # --- Draw macros ---
-        if not macros.is_empty:
-            if isinstance(macros, MultiPolygon):
-                for sub in macros.geoms:
-                    x, y = sub.exterior.xy
-                    ax.fill(x, y, color="lightgrey", alpha=0.6, zorder=2)
-            else:
-                if isinstance(macros, Polygon):
-                    x, y = macros.exterior.xy
-                    ax.fill(x, y, color="lightgrey", alpha=0.6, zorder=2)
+                        log.info(f" trying new locs {candidate_locations} based on dominant direction {dominant_direction}")
+                        for new_loc in candidate_locations:
+                            if new_loc.within(macros) or new_loc.within(halos):
+                                continue
+                            junction.location = new_loc
+                            current_cost = self._cost_calculator.calculate_total_cost(topology, context)
+                            if current_cost < min_cost:
+                                min_cost = current_cost
+                                best_location = new_loc
 
-        # --- Draw halos ---
-        if not halos.is_empty:
-            if isinstance(halos, MultiPolygon):
-                for sub in halos.geoms:
-                    x, y = sub.exterior.xy
-                    ax.plot(x, y, color="blue", ls="--", lw=1, zorder=3)
-            else:
-                if isinstance(halos, Polygon):
-                    x, y = halos.exterior.xy
-                    ax.plot(x, y, color="blue", ls="--", lw=1, zorder=3)
+                junction.location = initial_location
+                if best_location != initial_location:
+                    proposed_moves[junction] = best_location
+                    cost_reduced_this_iter = True
 
-        # --- Draw paths and labels ---
-        total_cost_for_plot = 0
-        for path, metrics in paths_with_metrics:
-            x, y = path.xy
-            ax.plot(x, y, color="red", lw=2, zorder=4)
-            total_cost_for_plot += metrics.total_cost
-
-            # Add labels for cost components
-            label_pos = path.interpolate(0.5, normalized=True)
-            label_text = (
-                f"wl: {metrics.cost_wirelength:.1f}\n"
-                f"macro: {metrics.cost_macro:.1f}\n"
-                f"halo: {metrics.cost_halo:.1f}\n"
-                f"cong: {metrics.cost_congestion:.1f}\n"
-                f"cross: {metrics.cost_crossing:.1f}\n"
-                f"pen: {metrics.cost_macro_junction_penalty + metrics.cost_halo_junction_penalty:.1f}\n"
-                f"TOTAL: {metrics.total_cost:.1f}"
-            )
-            ax.text(
-                label_pos.x,
-                label_pos.y,
-                label_text,
-                fontsize=8,
-                color="darkgreen",
-                bbox=dict(facecolor="white", alpha=0.7, edgecolor="none", pad=0.2),
-                zorder=6,
+            # Generate intermediate cost calculation plot
+            log.info(f"calculating cost and dumping to prefix jump_iter_{i}_ for module:{module.name} net:{topology.net.name}")
+            self._cost_calculator.calculate_total_cost(
+                topology,
+                context,
+                debug_plot=True,
+                plot_filename_prefix=f"jump_iter_{i}_",
             )
 
-        # --- Draw crossing points ---
-        for p in crossing_points:
-            ax.scatter(p.x, p.y, c="red", s=40, marker="x", zorder=5, lw=1)
+            if not cost_reduced_this_iter:
+                log.info(f"Junction jumping for net {topology.net.name} converged after {i} iterations.")
+                break
+            for junction, new_location in proposed_moves.items():
+                junction.location = new_location
+                log.info(f"  Jumped junction {junction.name} to {new_location}")
 
-        # --- Draw junctions and pins ---
-        for junction in topology.junctions:
-            jx, jy = junction.location.x, junction.location.y
-            ax.scatter(jx, jy, c="blue", s=80, marker="x", zorder=5)
-            ax.text(jx + 0.5, jy + 0.5, junction.name, fontsize=7, color="blue", zorder=6)
-
-        pins = [p for p in topology.net.pins.values() if hasattr(p.draw, "geom") and p.draw.geom is not None]
-        for pin in pins:
-            pgeom = pin.draw.geom
-            if pgeom is None:
-                continue
-            if isinstance(pgeom, Point):
-                px, py = pgeom.x, pgeom.y
-            else:
-                px, py = pgeom.centroid.x, pgeom.centroid.y
-            ax.scatter(px, py, c="black", s=20, marker="o", zorder=5)
-            ax.text(px + 0.5, py + 0.5, pin.full_name, fontsize=6, color="black", zorder=6)
-
-        title = f"Cost Calculation for Net: {topology.net.name}"
-        if module:
-            title += f" in {module.name}"
-        title += f"\nTotal Cost: {total_cost_for_plot:.2f}"
-        ax.set_title(title)
-        fig.tight_layout()
-
-        # Save figure
-        safe_module_name = module.name.replace("/", "_") if module else "unknown_module"
-        safe_net_name = topology.net.name.replace("/", "_")
-        filename = f"{plot_filename_prefix or ''}{safe_module_name}_{safe_net_name}_cost.png"
-        full_path = os.path.join(out_dir, filename)
-        plt.savefig(full_path, dpi=200)
-        plt.close(fig)
-        log.debug(f"Saved cost debug plot for net {topology.net.name} -> {full_path}")
-
-        return total_cost
+        else:
+            log.warning(f"Junction jumping for net {topology.net.name} did not converge after {max_iterations} iterations.")
 
     def _finalize_routes_and_pin_locations(
         self,
@@ -1092,10 +804,21 @@ class GlobalRouter:
         with orthogonal paths.
         """
         # Re-fetch everything needed for cost calculation
-        macros = self._get_macro_geometries(module)
-        halos = self._get_halo_geometries(macros)
+        macros = get_macro_geometries(module)
+        halos = get_halo_geometries(macros)
         congestion_idx, other_nets_geoms = self._build_congestion_index(module, topology.net)
         h_tracks, v_tracks = self._build_track_occupancy(other_nets_geoms)
+
+        context = RoutingContext(
+            macros=macros,
+            halos=halos,
+            congestion_idx=congestion_idx,
+            other_nets_geoms=other_nets_geoms,
+            h_tracks=h_tracks,
+            v_tracks=v_tracks,
+            pin_macros=pin_macros,
+            module=module,
+        )
 
         # 1. First pass: Update pin locations for pins inside macros
         for junction in topology.junctions:
@@ -1108,28 +831,18 @@ class GlobalRouter:
                     macro = pin_macros[child]
 
                     # Determine the best L-path to the macro center
-                    l_paths = self._generate_l_paths(start_point, end_point)
+                    l_paths = generate_l_paths(start_point, end_point)
                     if not l_paths:
                         continue
 
-                    metrics1, _ = self._calculate_path_cost(
+                    metrics1, _ = self._cost_calculator.calculate_path_cost(
                         l_paths[0],
-                        macros,
-                        halos,
-                        congestion_idx,
-                        other_nets_geoms,
-                        h_tracks,
-                        v_tracks,
+                        context,
                         p2_macro_to_ignore=macro,
                     )
-                    metrics2, _ = self._calculate_path_cost(
+                    metrics2, _ = self._cost_calculator.calculate_path_cost(
                         l_paths[1],
-                        macros,
-                        halos,
-                        congestion_idx,
-                        other_nets_geoms,
-                        h_tracks,
-                        v_tracks,
+                        context,
                         p2_macro_to_ignore=macro,
                     )
                     best_path_to_center = l_paths[0] if metrics1.total_cost <= metrics2.total_cost else l_paths[1]
@@ -1167,7 +880,7 @@ class GlobalRouter:
 
                 # Generate orthogonal path to the final pin location (or other junction)
                 # We don't need to cost this, just pick one deterministically for the final geometry
-                l_paths = self._generate_l_paths(start_point, end_point)
+                l_paths = generate_l_paths(start_point, end_point)
                 if l_paths:
                     new_geoms.append(l_paths[0])
                 elif start_point.distance(end_point) > 1e-9:
@@ -1189,136 +902,54 @@ class GlobalRouter:
         else:
             topology.net.draw.geom = None
 
-    def _log_junction_summary(self):
-        """Log detailed summary of inserted junctions."""
-        for module, topos in self.junctions.items():
-            log.debug(f"module {module.name=} size {module.draw.geom}")
-            macros = self._get_macro_geometries(module)
-            if not macros.is_empty:
-                log.debug(f"  Macro blockages at: {macros.wkt}")
-            for topo in topos:
-                # Log detailed junction info
-                for junction in topo.junctions:
-                    log.debug(f"Inserting {junction.name=} in {topo.net.name} at {junction.location}")
-                    for child in junction.children:
-                        if isinstance(child, Junction):
-                            log.debug(f"  Connected to junction {child.name} at {child.location}")
-                        elif isinstance(child, Pin):
-                            log.debug(f"  Connected to pin {child.full_name} at {child.draw.geom}")
-                        else:
-                            log.debug(f"  Connected to unknown child type {type(child)}")
+    def _diagnose_crossings(self, module: Module):
+        """Checks all routed nets in a module for crossings or overlaps and logs them."""
+        log.info(f"--- Crossing Diagnosis for Module: {module.name} ---")
+        nets = [n for n in module.nets.values() if hasattr(n.draw, "geom") and n.draw.geom and not n.draw.geom.is_empty]
 
-        summary = []
-        for module, topos in self.junctions.items():
-            for topo in topos:
-                # Count unique children
-                unique_children = set()
-                for junction in topo.junctions:
-                    unique_children.update(
-                        child for child in junction.children if isinstance(child, Pin)
-                    )  # Only count pin connections
+        net_lines = {}
+        for net in nets:
+            geom = net.draw.geom
+            if isinstance(geom, LineString):
+                net_lines[net.name] = [geom]
+            elif isinstance(geom, MultiLineString):
+                net_lines[net.name] = list(geom.geoms)
 
-                row = [module.name, topo.net.name, topo.net.num_conn, len(topo.junctions), len(unique_children)]
-                summary.append(row)
+        violations = 0
+        net_names = list(net_lines.keys())
+        for i in range(len(net_names)):
+            for j in range(i + 1, len(net_names)):
+                net1_name = net_names[i]
+                net2_name = net_names[j]
+                for line1 in net_lines[net1_name]:
+                    for line2 in net_lines[net2_name]:
+                        if line1.intersects(line2):
+                            # Ignore intersections at the exact endpoints, as they are likely intended connections
+                            if line1.touches(line2):
+                                intersection = line1.intersection(line2)
+                                if isinstance(intersection, Point):
+                                    is_endpoint = False
+                                    for p in [
+                                        Point(line1.coords[0]),
+                                        Point(line1.coords[-1]),
+                                        Point(line2.coords[0]),
+                                        Point(line2.coords[-1]),
+                                    ]:
+                                        if p.equals(intersection):
+                                            is_endpoint = True
+                                            break
+                                    if is_endpoint:
+                                        continue
 
-        # Log summary table
-        headers = ["Module", "Net", "Connections", "Junctions", "Children"]
-        log.info("Junction Insertion Summary:\n" + tabulate(summary, headers=headers, tablefmt="pipe"))
+                            intersection = line1.intersection(line2)
+                            log.warning(
+                                f"Violation between {net1_name} and {net2_name}: "
+                                f"type = {type(intersection).__name__}, WKT = {intersection.wkt}"
+                            )
+                            violations += 1
 
-    def _plot_junction_summary(self, stage: str = "", title: str = ""):
-        """
-        Generate per-module schematic overview plots showing macros, pins, junctions, and existing net geometries.
-
-        Args:
-            junctions: Dict[Module, List[Topology]]
-        """
-        out_dir = "data/images"
-        os.makedirs(out_dir, exist_ok=True)
-
-        cmap = plt.get_cmap("tab20")  # color map for nets
-
-        for module, topos in self.junctions.items():
-            fig, ax = plt.subplots(figsize=(10, 10))
-            ax.set_aspect("equal", adjustable="box")
-            ax.set_title(f"Module: {module.name} {title}")
-            ax.set_xlabel("X")
-            ax.set_ylabel("Y")
-
-            # --- Draw macros ---
-            macros = self._get_macro_geometries(module)
-            if not macros.is_empty:
-                if isinstance(macros, MultiPolygon):
-                    for sub in macros.geoms:
-                        x, y = sub.exterior.xy
-                        ax.fill(x, y, color="lightgrey", alpha=0.6)
-                else:
-                    if isinstance(macros, Polygon):
-                        x, y = macros.exterior.xy
-                        ax.fill(x, y, color="lightgrey", alpha=0.6)
-
-            # --- Draw halos ---
-            halos = self._get_halo_geometries(macros)
-            if not halos.is_empty:
-                if isinstance(halos, MultiPolygon):
-                    for sub in halos.geoms:
-                        x, y = sub.exterior.xy
-                        ax.plot(x, y, color="blue", ls="--", lw=1)
-                else:
-                    if isinstance(halos, Polygon):
-                        x, y = halos.exterior.xy
-                        ax.plot(x, y, color="blue", ls="--", lw=1)
-
-            # --- Draw junctions, pins, and nets ---
-            for idx, topo in enumerate(topos):
-                color = cmap(idx % 20)  # assign color per net
-
-                # Plot net geometry if exists
-                if topo.net.draw.geom:
-                    geom = topo.net.draw.geom
-                    if isinstance(geom, LineString):
-                        geom = [geom]
-                    elif isinstance(geom, MultiLineString):
-                        geom = list(geom.geoms)
-                    for line in geom:
-                        x, y = line.xy
-                        ax.plot(x, y, color=color, lw=1.5)
-                    # Label the net at first point
-                    first_line = geom[0]
-                    ax.text(first_line.coords[0][0], first_line.coords[0][1], topo.net.name, fontsize=8, color=color)
-
-                # Plot junctions
-                for junction in topo.junctions:
-                    jx, jy = junction.location.x, junction.location.y
-                    ax.scatter(jx, jy, c=color, s=80, marker="x")
-                    ax.text(jx + 0.5, jy + 0.5, junction.name, fontsize=7, color=color)
-
-                    # Draw connections to children
-                    for child in junction.children:
-                        if isinstance(child, Pin) and hasattr(child.draw, "geom") and child.draw.geom:
-                            pgeom = child.draw.geom
-                            if pgeom is None:
-                                continue
-                            if pgeom is None:
-                                continue
-                            if isinstance(pgeom, Point):
-                                px, py = float(pgeom.x), float(pgeom.y)
-                            else:
-                                centroid = pgeom.centroid
-                                px, py = float(centroid.x), float(centroid.y)
-                            ax.plot([jx, px], [jy, py], color=color, lw=1)
-                            ax.scatter(px, py, c="black", s=20, marker="o")
-                            ax.text(px + 0.5, py + 0.5, child.full_name, fontsize=6, color="black")
-                        elif isinstance(child, Junction):
-                            cx, cy = child.location.x, child.location.y
-                            ax.plot([jx, cx], [jy, cy], color=color, lw=1, ls="--")
-
-            ax.set_xlabel("X")
-            ax.set_ylabel("Y")
-            fig.tight_layout()
-
-            # Save figure
-            fname = os.path.join(out_dir, f"{stage}{module.name}_junctions.png")
-            plt.savefig(fname, dpi=200)
-            plt.close(fig)
-
-            log.info(f"Saved schematic plot for module {module.name} → {fname}")
+        if violations == 0:
+            log.info("No crossing/overlap violations found.")
+        else:
+            log.warning(f"Found {violations} crossing/overlap violations.")
+        log.info(f"--- End of Diagnosis ---")
