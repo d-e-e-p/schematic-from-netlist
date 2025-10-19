@@ -561,9 +561,9 @@ class GlobalRouter:
                             topology,
                             context,
                         )
-                        if topology.net.name == "n_sck":
+                        if topology.net.name == "n6":
                             current_cost = self._cost_calculator.calculate_total_cost(
-                                topology, context, True, f"debug_sck_{j_idx}_iter_{i}_{int(current_cost)}_"
+                                topology, context, True, f"debug_{topology.net.name}_{j_idx}_iter_{i}_{int(current_cost)}_"
                             )
                             log.info(f" current cost: {current_cost}")
 
@@ -961,6 +961,7 @@ class GlobalRouter:
                         )
 
         # 2. Second pass: Rebuild the entire net geometry with final pin locations
+        """
         new_geoms = []
         for junction in topology.junctions:
             start_point = junction.location
@@ -997,6 +998,7 @@ class GlobalRouter:
                 topology.net.draw.geom = MultiLineString([g for g in new_geoms if isinstance(g, LineString)])
         else:
             topology.net.draw.geom = None
+        """
 
     def _diagnose_crossings(self, module: Module):
         """Checks all routed nets in a module for crossings or overlaps and logs them."""

@@ -119,24 +119,25 @@ class RouterDebugger:
                     ax.text(jx + 0.5, jy + 0.5, junction.name, fontsize=7, color=color)
 
                     # Draw connections to children
-                    for child in junction.children:
-                        if isinstance(child, Pin) and hasattr(child.draw, "geom") and child.draw.geom:
-                            pgeom = child.draw.geom
-                            if pgeom is None:
-                                continue
-                            if pgeom is None:
-                                continue
-                            if isinstance(pgeom, Point):
-                                px, py = float(pgeom.x), float(pgeom.y)
-                            else:
-                                centroid = pgeom.centroid
-                                px, py = float(centroid.x), float(centroid.y)
-                            ax.plot([jx, px], [jy, py], color=color, lw=1)
-                            ax.scatter(px, py, c="black", s=20, marker="o")
-                            ax.text(px + 0.5, py + 0.5, child.full_name, fontsize=6, color="black")
-                        elif isinstance(child, Junction):
-                            cx, cy = child.location.x, child.location.y
-                            ax.plot([jx, cx], [jy, cy], color=color, lw=1, ls="--")
+                    if False:
+                        for child in junction.children:
+                            if isinstance(child, Pin) and hasattr(child.draw, "geom") and child.draw.geom:
+                                pgeom = child.draw.geom
+                                if pgeom is None:
+                                    continue
+                                if pgeom is None:
+                                    continue
+                                if isinstance(pgeom, Point):
+                                    px, py = float(pgeom.x), float(pgeom.y)
+                                else:
+                                    centroid = pgeom.centroid
+                                    px, py = float(centroid.x), float(centroid.y)
+                                ax.plot([jx, px], [jy, py], color=color, lw=1)
+                                ax.scatter(px, py, c="black", s=20, marker="o")
+                                ax.text(px + 0.5, py + 0.5, child.full_name, fontsize=6, color="black")
+                            elif isinstance(child, Junction):
+                                cx, cy = child.location.x, child.location.y
+                                ax.plot([jx, cx], [jy, cy], color=color, lw=1, ls="--")
 
             ax.set_xlabel("X")
             ax.set_ylabel("Y")

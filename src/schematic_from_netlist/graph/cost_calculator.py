@@ -6,6 +6,7 @@ from collections import defaultdict
 from typing import List, Optional, Set, Tuple
 
 from shapely.geometry import GeometryCollection, LineString, MultiLineString, MultiPoint, Point, Polygon
+from shapely.ops import unary_union
 
 from schematic_from_netlist.database.netlist_structures import Pin
 from schematic_from_netlist.graph.router_debug import RouterDebugger
@@ -241,12 +242,12 @@ class CostCalculator:
             if not path.intersects(geom):
                 continue
 
+            # Subtract out sections within ignored macros
             intersection = path.intersection(geom)
+            intersection = self._subtract_macro_overlap(intersection, p1_macro_to_ignore, p2_macro_to_ignore)
 
-            # Skip intersections that are within or touching the ignored macros
-            if p1_macro_to_ignore and p1_macro_to_ignore.intersects(intersection):
-                continue
-            if p2_macro_to_ignore and p2_macro_to_ignore.intersects(intersection):
+            # If nothing remains, skip
+            if intersection.is_empty:
                 continue
 
             if isinstance(intersection, Point):
@@ -339,3 +340,18 @@ class CostCalculator:
         if p2_macro and segment.within(p2_macro):
             return True
         return False
+
+    def _subtract_macro_overlap(self, intersection, p1_macro_to_ignore, p2_macro_to_ignore):
+        """Return only the portion of intersection not inside the ignore macros."""
+        ignore_regions = []
+        if p1_macro_to_ignore:
+            ignore_regions.append(p1_macro_to_ignore)
+        if p2_macro_to_ignore:
+            ignore_regions.append(p2_macro_to_ignore)
+
+        if not ignore_regions:
+            return intersection  # nothing to subtract
+
+        ignore_union = unary_union(ignore_regions)
+        remainder = intersection.difference(ignore_union)
+        return remainder
