@@ -352,6 +352,19 @@ class GlobalRouter:
         new_geoms = []
         for junction in topology.junctions:
             start_point = junction.location
+
+            cached_paths = {}
+            if junction.geom:
+                for line in junction.geom.geoms:
+                    p1 = Point(line.coords[0])
+                    p2 = Point(line.coords[-1])
+                    # Using almost_equals for robust float comparisons
+                    if p1.distance(start_point) < 1e-6:
+                        cached_paths[p2] = line
+                    elif p2.distance(start_point) < 1e-6:
+                        cached_paths[p1] = line
+
+            junction_paths = []
             for child in junction.children:
                 if isinstance(child, Pin):
                     end_point = child.draw.geom
@@ -362,12 +375,48 @@ class GlobalRouter:
                 else:  # Junction
                     end_point = child.location
 
-                # Generate orthogonal path to the final pin location (or other junction)
-                l_paths = generate_candidate_paths(start_point, end_point, context)
-                if l_paths:
-                    new_geoms.append(l_paths[0])
-                elif start_point.distance(end_point) > 1e-9:
-                    new_geoms.append(LineString([start_point, end_point]))
+                best_path = None
+                # Check for a cached path
+                cached_end_point_found = None
+                for cached_end_point in cached_paths:
+                    if cached_end_point.distance(end_point) < 1e-6:
+                        cached_end_point_found = cached_end_point
+                        break
+
+                if cached_end_point_found:
+                    best_path = cached_paths[cached_end_point_found]
+
+                if best_path is None:
+                    # If not cached, compute, select best, and cache
+                    candidate_paths = generate_candidate_paths(start_point, end_point, context)
+
+                    min_cost = float("inf")
+                    p1_macro_to_ignore = None  # Junctions are not in macros
+                    p2_macro_to_ignore = context.pin_macros.get(child) if isinstance(child, Pin) else None
+
+                    if not candidate_paths:
+                        if start_point.distance(end_point) > 1e-9:
+                            best_path = LineString([start_point, end_point])
+                    else:
+                        for path in candidate_paths:
+                            metrics, _ = self._cost_calculator.calculate_path_cost(
+                                path,
+                                context,
+                                p1_macro_to_ignore,
+                                p2_macro_to_ignore,
+                            )
+                            if metrics.total_cost < min_cost:
+                                min_cost = metrics.total_cost
+                                best_path = path
+
+                if best_path:
+                    new_geoms.append(best_path)
+                    junction_paths.append(best_path)
+
+            if junction_paths:
+                junction.geom = MultiLineString(junction_paths)
+            else:
+                junction.geom = None
 
         if new_geoms:
             union_geom = unary_union(new_geoms)
@@ -481,6 +530,9 @@ class GlobalRouter:
                             new_loc = nearest_points(new_loc, restricted_area.boundary)[1]
 
                     j.location = new_loc
+                    j.geom = None
+                    if j in parent_map and parent_map[j]:
+                        parent_map[j].geom = None
 
     def _slide_junctions(
         self,
@@ -524,6 +576,7 @@ class GlobalRouter:
             module=module,
         )
 
+        parent_map = self._build_junction_parent_map(topology)
         max_iterations = 10  # To prevent infinite loops
         all_tried_locations: Dict[Junction, Dict[Tuple[float, float], float]] = defaultdict(dict)
         for i in range(max_iterations):
@@ -615,6 +668,9 @@ class GlobalRouter:
             # Apply all proposed moves for this iteration
             for junction, new_location in proposed_moves.items():
                 junction.location = new_location
+                junction.geom = None
+                if junction in parent_map and parent_map[junction]:
+                    parent_map[junction].geom = None
                 log.debug(f"  Moved junction {junction.name} to {new_location}")
 
             # Generate intermediate cost calculation plot
@@ -749,7 +805,7 @@ class GlobalRouter:
                     proposed_moves[junction] = best_location
                     cost_reduced_this_iter = True
 
-            self._log_jump_iteration_results(i, topology, context, module, cost_reduced_this_iter, proposed_moves)
+            self._log_jump_iteration_results(i, topology, context, module, cost_reduced_this_iter, proposed_moves, parent_map)
 
             if not cost_reduced_this_iter:
                 break
@@ -890,6 +946,7 @@ class GlobalRouter:
         module: Module,
         cost_reduced: bool,
         proposed_moves: Dict[Junction, Point],
+        parent_map: Dict[Junction, Optional[Junction]],
     ):
         """Log and plot results of a jump iteration."""
         log.info(f"calculating cost and dumping to prefix jump_iter_{iteration}_ for module:{module.name} net:{topology.net.name}")
@@ -903,6 +960,9 @@ class GlobalRouter:
         if cost_reduced:
             for junction, new_location in proposed_moves.items():
                 junction.location = new_location
+                junction.geom = None
+                if parent_map.get(junction):
+                    parent_map.get(junction).geom = None
                 log.info(f"  Jumped junction {junction.name} to {new_location}")
 
     def _finalize_routes_and_pin_locations(

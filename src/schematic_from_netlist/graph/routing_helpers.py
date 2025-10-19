@@ -8,28 +8,57 @@ from shapely.ops import unary_union
 from schematic_from_netlist.database.netlist_structures import Module
 
 
-def generate_candidate_paths(
-    p1: Point | None,
-    p2: Point | None,
-    context,
-) -> List[LineString]:
+def generate_candidate_paths(p1: Point | None, p2: Point | None, context) -> List[LineString]:
     """
     Generate candidate L- and Z-shaped paths between two points.
-    Ignores halo escape logic (even if pins lie inside macros).
-
-    Returns unique LineStrings.
+    If a path overlaps with existing tracks, it attempts to find a clear path by offsetting.
     """
-    paths: List[LineString] = []
+
     if not p1 or not p2:
-        return paths
+        return []
 
-    # 1. Generate all L + Z variants
-    paths.extend(generate_lz_paths(p1, p2))
+    initial_paths = generate_lz_paths(p1, p2)
+    final_paths = []
+    OFFSET_STEP = 5.0
+    MAX_OFFSET_ATTEMPTS = 5
 
-    # 2. Remove duplicates by WKT
+    for path in initial_paths:
+        has_overlap = False
+        coords = list(path.coords)
+        for i in range(len(coords) - 1):
+            if _check_segment_overlap(Point(coords[i]), Point(coords[i + 1]), context):
+                has_overlap = True
+                break
+
+        if not has_overlap:
+            final_paths.append(path)
+        else:
+            # Path has overlap, try to find a detour
+            for i in range(1, MAX_OFFSET_ATTEMPTS + 1):
+                # Try positive and negative offsets
+                for sign in [1, -1]:
+                    offset = sign * i * OFFSET_STEP
+                    # Horizontal segment overlap -> offset vertically
+                    if abs(p1.y - path.coords[1][1]) < 1e-9:  # L-path, horizontal first
+                        new_y = p1.y + offset
+                        detour_path = LineString([p1, Point(p1.x, new_y), Point(p2.x, new_y), p2])
+                        if not _check_segment_overlap(Point(p1.x, new_y), Point(p2.x, new_y), context):
+                            final_paths.append(detour_path)
+                            break
+                    # Vertical segment overlap -> offset horizontally
+                    else:  # L-path, vertical first
+                        new_x = p1.x + offset
+                        detour_path = LineString([p1, Point(new_x, p1.y), Point(new_x, p2.y), p2])
+                        if not _check_segment_overlap(Point(new_x, p1.y), Point(new_x, p2.y), context):
+                            final_paths.append(detour_path)
+                            break
+                if len(final_paths) > len(initial_paths):  # Found a detour
+                    break
+
+    # Remove duplicates
     unique_paths = []
     seen = set()
-    for p in paths:
+    for p in final_paths:
         if p.wkt not in seen:
             unique_paths.append(p)
             seen.add(p.wkt)
@@ -54,9 +83,6 @@ def get_halo_geometries(macros, buffer_dist: int = 10) -> Polygon:
     if macros.is_empty:
         return Polygon()
     return macros.buffer(buffer_dist)
-
-
-
 
 
 def generate_lz_paths(p1: Point, p2: Point) -> List[LineString]:
@@ -106,3 +132,30 @@ def generate_lz_paths(p1: Point, p2: Point) -> List[LineString]:
 def get_l_path_corner(path: LineString) -> Point:
     """Get the corner point of an L-shaped path."""
     return Point(path.coords[1])
+
+
+def _check_segment_overlap(p1: Point, p2: Point, context) -> bool:
+    """Check if a segment overlaps with existing tracks, ignoring overlaps inside specified macros."""
+    segment = LineString([p1, p2])
+    # Ignore check if the segment is fully inside one of the ignored macros
+    for macro in context.pin_macros.values():
+        if segment.within(macro):
+            return False
+
+    # Horizontal segment
+    if abs(p1.y - p2.y) < 1e-9:
+        y = p1.y
+        seg_x1, seg_x2 = sorted((p1.x, p2.x))
+        if y in context.h_tracks:
+            for track_x1, track_x2 in context.h_tracks[y]:
+                if max(seg_x1, track_x1) < min(seg_x2, track_x2):
+                    return True
+    # Vertical segment
+    elif abs(p1.x - p2.x) < 1e-9:
+        x = p1.x
+        seg_y1, seg_y2 = sorted((p1.y, p2.y))
+        if x in context.v_tracks:
+            for track_y1, track_y2 in context.v_tracks[x]:
+                if max(seg_y1, track_y1) < min(seg_y2, track_y2):
+                    return True
+    return False
