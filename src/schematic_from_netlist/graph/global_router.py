@@ -934,7 +934,6 @@ class GlobalRouter:
         pin_locations = [p.centroid if not isinstance(p, Point) else p for p in pin_locations]
         if not test_for_int_list_of_points(pin_locations):
             log.warning(f"not int list of points: {pin_locations=}")
-            breakpoint()
         if not pin_locations:
             return []
 
@@ -987,7 +986,6 @@ class GlobalRouter:
 
         if not test_for_int_list_of_points(candidate_locations):
             log.warning(f"not int list of points: {candidate_locations=}")
-            breakpoint()
         return candidate_locations
 
     def _log_jump_iteration_results(
@@ -1027,55 +1025,13 @@ class GlobalRouter:
         Finalize routes by updating pin locations for those inside macros and then rebuilding the net's geometry
         with orthogonal paths.
         """
-        # Re-fetch everything needed for cost calculation
-        macros = get_macro_geometries(module)
-        halos = get_halo_geometries(macros)
-        congestion_idx, other_nets_geoms = self._build_congestion_index(module, topology.net)
-        h_tracks, v_tracks = self._build_track_occupancy(other_nets_geoms)
-
-        context = RoutingContext(
-            macros=macros,
-            halos=halos,
-            congestion_idx=congestion_idx,
-            other_nets_geoms=other_nets_geoms,
-            h_tracks=h_tracks,
-            v_tracks=v_tracks,
-            pin_macros=pin_macros,
-            module=module,
-        )
-
         # 1. First pass: Update pin locations for pins inside macros
         for junction in topology.junctions:
             start_point = junction.location
+            path = junction.geom
             for child in junction.children:
                 if isinstance(child, Pin) and child in pin_macros:
-                    end_point = child.draw.geom
-                    if end_point is None:
-                        continue
-                    macro = pin_macros[child]
-
-                    candidate_paths = generate_candidate_paths(start_point, end_point, context)
-                    best_path_to_center = None
-                    best_metrics = None
-
-                    # Evaluate cost for each candidate
-                    for path in candidate_paths:
-                        metrics, _ = self._cost_calculator.calculate_path_cost(
-                            path,
-                            context,
-                            p2_macro_to_ignore=macro,
-                        )
-
-                        if best_metrics is None or metrics.total_cost < best_metrics.total_cost:
-                            best_metrics = metrics
-                            best_path_to_center = path
-
-                    # Fallback (no valid path)
-                    if best_path_to_center is None and candidate_paths:
-                        best_path_to_center = candidate_paths[0]
-
-                    # Find intersection with boundary and update pin location
-                    intersection = best_path_to_center.intersection(macro.boundary)
+                    intersection = path.intersection(child.instance.draw.geom)
                     new_pin_loc = None
                     if not intersection.is_empty:
                         if isinstance(intersection, Point):
@@ -1090,46 +1046,6 @@ class GlobalRouter:
                             f"Could not find intersection for pin {child.full_name} on macro boundary. "
                             f"Junction at {start_point}, macro centroid at {end_point}. Using original pin location."
                         )
-
-        # 2. Second pass: Rebuild the entire net geometry with final pin locations
-        """
-        new_geoms = []
-        for junction in topology.junctions:
-            start_point = junction.location
-            for child in junction.children:
-                if isinstance(child, Pin):
-                    end_point = child.draw.geom
-                    if end_point is None:
-                        continue
-                    if not isinstance(end_point, Point):
-                        end_point = end_point.centroid
-                else:  # Junction
-                    end_point = child.location
-
-                # Generate orthogonal path to the final pin location (or other junction)
-                # We don't need to cost this, just pick one deterministically for the final geometry
-                l_paths = generate_l_paths(start_point, end_point)
-                if l_paths:
-                    new_geoms.append(l_paths[0])
-                elif start_point.distance(end_point) > 1e-9:
-                    new_geoms.append(LineString([start_point, end_point]))
-
-        if new_geoms:
-            union_geom = unary_union(new_geoms)
-            merged_geom = None
-            if isinstance(union_geom, LineString):
-                merged_geom = linemerge([union_geom])
-            elif isinstance(union_geom, MultiLineString):
-                merged_geom = linemerge(union_geom)
-            if isinstance(merged_geom, LineString):
-                topology.net.draw.geom = MultiLineString([merged_geom])
-            elif isinstance(merged_geom, MultiLineString):
-                topology.net.draw.geom = merged_geom
-            else:
-                topology.net.draw.geom = MultiLineString([g for g in new_geoms if isinstance(g, LineString)])
-        else:
-            topology.net.draw.geom = None
-        """
 
     def _diagnose_crossings(self, module: Module):
         """Checks all routed nets in a module for crossings or overlaps and logs them."""
