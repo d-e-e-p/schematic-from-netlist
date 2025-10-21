@@ -1264,7 +1264,7 @@ class GlobalRouter:
             if current_segments:
                 new_v_tracks[x] = current_segments
 
-        log.info(f"before {h_tracks=} {v_tracks=} ")
-        log.info(f"after {new_h_tracks=}  {new_v_tracks=} ")
-        log.info(f"macros = {macros}")
+        log.debug(f"before {h_tracks=} {v_tracks=} ")
+        log.debug(f"after {new_h_tracks=}  {new_v_tracks=} ")
+        log.debug(f"macros = {macros}")
         return new_h_tracks, new_v_tracks

@@ -3,13 +3,13 @@ from __future__ import annotations
 import logging as log
 import unittest
 from collections import defaultdict
-from typing import List, Optional
+from typing import Dict, List, Optional, Tuple
 from unittest.mock import Mock  # Used to create a simple 'context' object
 
 from shapely.geometry import LineString, MultiPolygon, Point, Polygon
 from shapely.ops import unary_union
 
-from schematic_from_netlist.database.netlist_structures import Module
+from schematic_from_netlist.database.netlist_structures import Module, Pin
 
 
 def generate_candidate_paths(p1: Point | None, p2: Point | None, context) -> List[LineString]:
@@ -22,8 +22,8 @@ def generate_candidate_paths(p1: Point | None, p2: Point | None, context) -> Lis
 
     initial_paths = generate_lz_paths(p1, p2)
     final_paths = []
-    OFFSET_STEP = 5.0
-    MAX_OFFSET_ATTEMPTS = 5
+    OFFSET_STEP = 2.0
+    MAX_OFFSET_ATTEMPTS = 50
 
     seen = set()
 
@@ -35,14 +35,27 @@ def generate_candidate_paths(p1: Point | None, p2: Point | None, context) -> Lis
         else:
             # Path has overlap, try to find a detour
             detour = _find_clear_detour(path, p1, p2, context, OFFSET_STEP, MAX_OFFSET_ATTEMPTS)
+            if detour and not is_orthogonal(detour):
+                log.info(f"Detour is not orthogonal: {detour.wkt}")
+                breakpoint()
             if detour and detour.wkt not in seen:
                 final_paths.append(detour)
                 seen.add(detour.wkt)
 
     if not final_paths:
-        log.warning(f"No clear path found for {p1=} {p2=} {path=} {context.v_tracks=} {context.h_tracks=}")
-        breakpoint()
+        log.debug(f"No clear path found for {p1=} {p2=} {initial_paths=} {context.v_tracks=} {context.h_tracks=}")
     return final_paths
+
+
+def is_orthogonal(path: LineString, tol: float = 1e-9) -> bool:
+    """Return True if all segments of the path are horizontal or vertical."""
+    coords = list(path.coords)
+    for (x1, y1), (x2, y2) in zip(coords, coords[1:]):
+        dx, dy = abs(x2 - x1), abs(y2 - y1)
+        # Segment must be either horizontal or vertical
+        if dx > tol and dy > tol:
+            return False
+    return True
 
 
 def get_macro_geometries(module: Module):
@@ -121,15 +134,12 @@ def _check_segment_overlap(p1: Point, p2: Point, context) -> bool:
     segment = LineString([p1, p2])
     tolerance = 1e-9
 
-    # Ignore check if the segment is fully inside one of the ignored macros
-    for macro in context.pin_macros.values():
-        if macro.contains(segment):
-            # log.info(f"Segment {segment.wkt} is inside macro {macro.wkt}, ignoring.")
-            return False
+    # check_track_macro_pin Ignore check if the segment is fully inside one of the ignored macros
+    if segment_on_occupied_macro_pin(segment, context.pin_macros, context.h_tracks, context.v_tracks):
+        return False
 
     # Horizontal segment
     if abs(p1.y - p2.y) < tolerance:
-        # Assuming coordinates are already rounded, as per your _build_track_occupancy
         y = int(round(p1.y))
         seg_x1, seg_x2 = sorted((int(round(p1.x)), int(round(p2.x))))
 
@@ -200,7 +210,7 @@ def _find_clear_detour(
                 for sign in [1, -1]:
                     offset = sign * i * offset_step
                     new_x = int(round(p1.x + offset))
-                    # Create a Z-path with a horizontal middle segment
+                    # Create a Π -path with a horizontal middle segment
                     detour_path = LineString([p1, Point(new_x, p1.y), Point(new_x, p2.y), p2])
                     if not _check_path_overlap(detour_path, context):
                         return detour_path  # Found a clear path
@@ -213,15 +223,13 @@ def _find_clear_detour(
                 for sign in [1, -1]:
                     offset = sign * i * offset_step
                     new_y = int(round(p1.y + offset))
-                    # Create a Z-path with a vertical middle segment
+                    # Create a Π -path with a vertical middle segment
                     detour_path = LineString([p1, Point(p1.x, new_y), Point(p2.x, new_y), p2])
                     if not _check_path_overlap(detour_path, context):
                         return detour_path  # Found a clear path
             return None  # No clear vertical detour found
 
-    # *** END OF NEW LOGIC ***
-
-    # Existing logic for L-Paths (now correctly skipped by the malformed path)
+    # logic for L-Paths (now correctly skipped by the malformed path)
     if num_coords == 3:
         for i in range(1, max_attempts + 1):
             for sign in [1, -1]:
@@ -242,28 +250,120 @@ def _find_clear_detour(
 
     # Existing logic for Z-Paths
     elif num_coords == 4:
-        p_mid1 = Point(path.coords[1])
-        p_mid2 = Point(path.coords[2])
+        p1, p_mid1, p_mid2, p2 = map(Point, path.coords)
 
         for i in range(1, max_attempts + 1):
             for sign in [1, -1]:
                 offset = sign * i * offset_step
-                detour_path = None
 
-                # Check orientation of the middle segment
-                if abs(p_mid1.y - p_mid2.y) < 1e-9:  # Middle segment is horizontal
+                # Middle segment direction: horizontal if y1 ≈ y2
+                if abs(p_mid1.y - p_mid2.y) < 1e-9:  # horizontal middle segment
+                    # offset vertically
                     new_y = int(round(p_mid1.y + offset))
                     detour_path = LineString([p1, Point(p_mid1.x, new_y), Point(p_mid2.x, new_y), p2])
-                else:  # Middle segment is vertical
+                elif abs(p_mid1.x - p_mid2.x) < 1e-9:  # vertical middle segment
+                    # offset horizontally
                     new_x = int(round(p_mid1.x + offset))
                     detour_path = LineString([p1, Point(new_x, p_mid1.y), Point(new_x, p_mid2.y), p2])
+                else:
+                    # The middle segment is diagonal—this shouldn't happen for orthogonal paths
+                    continue
 
-                if detour_path and not _check_path_overlap(detour_path, context):
+                # Validate orthogonality and overlap
+                if is_orthogonal(detour_path) and not _check_path_overlap(detour_path, context):
                     return detour_path
+
         return None  # No Z-path detour found
 
     log.warning(f"No clear detour found for {p1=} {p2=} {path=} {context.v_tracks=} {context.h_tracks=}")
     return None  # No clear detour found
+
+
+def segment_on_occupied_macro_pin(
+    segment: LineString,
+    pin_macros: Dict[Pin, Polygon],
+    h_tracks: Dict[int, List[Tuple[int, int]]],
+    v_tracks: Dict[int, List[Tuple[int, int]]],
+) -> bool:
+    """
+    Checks if a segment crosses a macro or if its intersection points with a
+    macro boundary lie on a defined track.
+
+    This function returns True if:
+    1. The segment runs along the North, South, East, or West face of any macro.
+    2. The segment intersects a macro boundary, and that intersection point
+       lies on a defined horizontal or vertical track.
+
+    Args:
+        segment: The LineString segment to check.
+        pin_macros: A dictionary of Shapely Polygons representing macro areas.
+        h_tracks: Dictionary of horizontal tracks {y: [(x1, x2), ...]}.
+        v_tracks: Dictionary of vertical tracks {x: [(y1, y2), ...]}.
+
+    Returns:
+        True if the segment is invalid for either reason, False otherwise.
+    """
+    tol = 1e-9
+    (x1, y1), (x2, y2) = segment.coords
+    is_horizontal = abs(y1 - y2) < tol
+    is_vertical = abs(x1 - x2) < tol
+    for macro in pin_macros.values():
+        # Condition 1: Check for segments running along the N, S, E, or W faces of the macro.
+        minx, miny, maxx, maxy = macro.bounds
+
+        # Horizontal segment → check north/south (top/bottom) faces
+        if is_horizontal:
+            y = y1
+            if abs(y - maxy) < tol or abs(y - miny) < tol:
+                seg_x1, seg_x2 = sorted((x1, x2))
+                if max(seg_x1, minx) < min(seg_x2, maxx):
+                    return True
+
+        # Vertical segment → check east/west (right/left) faces
+        elif is_vertical:
+            x = x1
+            if abs(x - maxx) < tol or abs(x - minx) < tol:
+                seg_y1, seg_y2 = sorted((y1, y2))
+                if max(seg_y1, miny) < min(seg_y2, maxy):
+                    return True
+
+        # Condition 2: Check intersection points on the boundary.
+        # Use intersection() with the macro's boundary to find the exact points of contact.
+        intersection_geom = segment.intersection(macro.exterior)
+
+        # Skip if there is no intersection at all
+        if intersection_geom.is_empty:
+            continue
+
+        # Collect all individual intersection points from the geometry.
+        # This handles cases where the segment crosses the macro at multiple points.
+        points_to_check = []
+        if intersection_geom.geom_type == "Point":
+            points_to_check.append(intersection_geom)
+        elif intersection_geom.geom_type == "MultiPoint":
+            points_to_check.extend(intersection_geom.geoms)
+        elif intersection_geom.geom_type in ["LineString", "MultiLineString"]:
+            # If the intersection is a line, it means the segment runs along the
+            # macro boundary. We check the endpoints of this shared line.
+            geoms = intersection_geom.geoms if intersection_geom.geom_type == "MultiLineString" else [intersection_geom]
+            for line in geoms:
+                points_to_check.extend([Point(p) for p in line.coords])
+
+        # Now, check if any of the found intersection points lie on a defined track.
+        for point in points_to_check:
+            x_coord = int(round(point.x))
+            y_coord = int(round(point.y))
+
+            # Check if the point's x-coordinate matches a vertical track
+            if x_coord in v_tracks:
+                return True
+
+            # Check if the point's y-coordinate matches a horizontal track
+            if y_coord in h_tracks:
+                return True
+
+    # If we loop through all macros and find no invalid condition, return False.
+    return False
 
 
 # --- Test Case ---
