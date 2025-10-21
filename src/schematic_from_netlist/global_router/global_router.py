@@ -19,14 +19,14 @@ from shapely.ops import linemerge, nearest_points, snap, unary_union
 from shapely.strtree import STRtree
 
 from schematic_from_netlist.database.netlist_structures import Module, Net, Pin
-from schematic_from_netlist.global_router.gr_cost_calculator import CostCalculator
-from schematic_from_netlist.global_router.gr_debug import RouterDebugger
-from schematic_from_netlist.global_router.gr_helpers import (
+from schematic_from_netlist.global_router.gr_candidate_paths import (
     generate_candidate_paths,
     get_halo_geometries,
     get_l_path_corner,
     get_macro_geometries,
 )
+from schematic_from_netlist.global_router.gr_cost_calculator import CostCalculator
+from schematic_from_netlist.global_router.gr_debug import RouterDebugger
 from schematic_from_netlist.global_router.gr_structures import Junction, RoutingContext, Topology
 
 # Pattern Route parameters
@@ -96,6 +96,7 @@ class GlobalRouter:
                         h_tracks=h_tracks,
                         v_tracks=v_tracks,
                         pin_macros=pin_macros,
+                        net=net,
                     )
                     self._rebuild_net_geometry(topo, context)  # Update geometry for next net
             junctions = defaultdict(list)
@@ -118,6 +119,7 @@ class GlobalRouter:
                     h_tracks=h_tracks,
                     v_tracks=v_tracks,
                     pin_macros=net_pin_macros.get(net, {}),
+                    net=net,
                 )
                 self._rebuild_net_geometry(topo, context)
 
@@ -140,6 +142,7 @@ class GlobalRouter:
                     h_tracks=h_tracks,
                     v_tracks=v_tracks,
                     pin_macros=net_pin_macros.get(net, {}),
+                    net=net,
                 )
                 self._rebuild_net_geometry(topo, context)
 
@@ -175,6 +178,7 @@ class GlobalRouter:
                         h_tracks=h_tracks,
                         v_tracks=v_tracks,
                         pin_macros=net_pin_macros.get(net, {}),
+                        net=net,
                     )
                     self._rebuild_net_geometry(topo, context)
 
@@ -208,6 +212,7 @@ class GlobalRouter:
                     h_tracks=h_tracks,
                     v_tracks=v_tracks,
                     pin_macros=net_pin_macros.get(net, {}),
+                    net=net,
                 )
                 self._rebuild_net_geometry(topo, context)
 
@@ -289,7 +294,7 @@ class GlobalRouter:
                     val_y2 = int(round(p2.y))
                     v_tracks[key_x].append(tuple(sorted((val_y1, val_y2))))
 
-        # Helper to merge intervals (now updated to expect ints)
+        # Helper to merge intervals (expect ints)
         def merge_intervals(intervals: List[Tuple[int, int]]) -> List[Tuple[int, int]]:
             if not intervals:
                 return []
@@ -648,6 +653,7 @@ class GlobalRouter:
 
             for j_idx, junction in enumerate(topology.junctions):
                 initial_location = junction.location
+                context.net = topology.net
                 min_cost = self._cost_calculator.calculate_total_cost(
                     topology,
                     context,
@@ -828,6 +834,7 @@ class GlobalRouter:
             junction_candidate_locations: Dict[Junction, List[Point]] = {}
             for junction in topology.junctions:
                 initial_location = junction.location
+                context.net = topology.net
                 downstream_pins = self._get_downstream_pins(junction, parent_map, memo_downstream_pins)
                 if not downstream_pins:
                     candidate_locations = [initial_location]

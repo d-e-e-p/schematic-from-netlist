@@ -78,3 +78,4 @@ class RoutingContext:
     v_tracks: Dict[float, List[Tuple[float, float]]]
     pin_macros: Dict[Pin, Polygon]
     module: Optional[Module] = None
+    net: Optional[Net] = None

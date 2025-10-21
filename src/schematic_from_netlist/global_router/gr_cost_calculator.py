@@ -9,8 +9,8 @@ from shapely.geometry import GeometryCollection, LineString, MultiLineString, Mu
 from shapely.ops import unary_union
 
 from schematic_from_netlist.database.netlist_structures import Pin
+from schematic_from_netlist.global_router.gr_candidate_paths import generate_candidate_paths, get_l_path_corner
 from schematic_from_netlist.global_router.gr_debug import RouterDebugger
-from schematic_from_netlist.global_router.gr_helpers import generate_candidate_paths, get_l_path_corner
 from schematic_from_netlist.global_router.gr_structures import Junction, Metrics, RoutingContext, Topology
 
 # Pattern Route parameters

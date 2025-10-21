@@ -129,14 +129,13 @@ def get_l_path_corner(path: LineString) -> Point:
 def _check_segment_overlap(p1: Point, p2: Point, context) -> bool:
     """
     Check if a segment overlaps with existing tracks by more than 1 unit.
-    Ignores overlaps inside specified macros.
     """
     segment = LineString([p1, p2])
     tolerance = 1e-9
 
     # check_track_macro_pin Ignore check if the segment is fully inside one of the ignored macros
     if segment_on_occupied_macro_pin(segment, context.pin_macros, context.h_tracks, context.v_tracks):
-        return False
+        return True
 
     # Horizontal segment
     if abs(p1.y - p2.y) < tolerance:
