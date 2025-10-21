@@ -109,6 +109,7 @@ class GlobalRouter:
                 self._prune_redundant_junctions(topo)
                 congestion_idx, other_nets_geoms = self._build_congestion_index(module, net)
                 h_tracks, v_tracks = self._build_track_occupancy(other_nets_geoms)
+                h_tracks, v_tracks = self.remove_macros_from_tracks(h_tracks, v_tracks, net_pin_macros.get(net))
                 context = RoutingContext(
                     macros=macros,
                     halos=halos,
@@ -130,6 +131,7 @@ class GlobalRouter:
                 self._optimize_junction_locations(topo, macros, halos, net_pin_macros[net])
                 congestion_idx, other_nets_geoms = self._build_congestion_index(module, net)
                 h_tracks, v_tracks = self._build_track_occupancy(other_nets_geoms)
+                h_tracks, v_tracks = self.remove_macros_from_tracks(h_tracks, v_tracks, net_pin_macros.get(net))
                 context = RoutingContext(
                     macros=macros,
                     halos=halos,
@@ -152,6 +154,7 @@ class GlobalRouter:
                 for net, topo in net_topologies.items():
                     congestion_idx, other_nets_geoms = self._build_congestion_index(module, net)
                     h_tracks, v_tracks = self._build_track_occupancy(other_nets_geoms)
+                    h_tracks, v_tracks = self.remove_macros_from_tracks(h_tracks, v_tracks, net_pin_macros.get(net))
                     self._jump_junctions_over_macros(
                         topo,
                         macros,
@@ -184,6 +187,7 @@ class GlobalRouter:
             for net, topo in net_topologies.items():
                 congestion_idx, other_nets_geoms = self._build_congestion_index(module, net)
                 h_tracks, v_tracks = self._build_track_occupancy(other_nets_geoms)
+                h_tracks, v_tracks = self.remove_macros_from_tracks(h_tracks, v_tracks, net_pin_macros.get(net))
                 self._slide_junctions(
                     topo,
                     macros,
@@ -250,9 +254,13 @@ class GlobalRouter:
 
     def _build_track_occupancy(
         self, geoms: List[LineString]
-    ) -> Tuple[Dict[float, List[Tuple[float, float]]], Dict[float, List[Tuple[float, float]]]]:
+    ) -> Tuple[Dict[int, List[Tuple[int, int]]], Dict[int, List[Tuple[int, int]]]]:
+        """
+        Builds track occupancy maps, rounding all coordinates to the nearest integer.
+        """
         h_tracks = defaultdict(list)
         v_tracks = defaultdict(list)
+        tolerance = 1e-9  # Define tolerance for comparisons
 
         for line in geoms:
             coords = list(line.coords)
@@ -260,14 +268,29 @@ class GlobalRouter:
                 p1 = Point(coords[i])
                 p2 = Point(coords[i + 1])
 
-                # Use a tolerance for floating point comparisons
-                if abs(p1.y - p2.y) < 1e-9:  # Horizontal
-                    h_tracks[p1.y].append(tuple(sorted((p1.x, p2.x))))
-                elif abs(p1.x - p2.x) < 1e-9:  # Vertical
-                    v_tracks[p1.x].append(tuple(sorted((p1.y, p2.y))))
+                # *** ADDED CHECK ***
+                # Skip zero-length segments caused by repeated coordinates
+                if p1.distance(p2) < tolerance:
+                    continue
+                # *** END OF ADDED CHECK ***
 
-        # Helper to merge intervals
-        def merge_intervals(intervals):
+                # Use a tolerance for floating point comparisons
+                if abs(p1.y - p2.y) < tolerance:  # Horizontal
+                    # Round all values to the nearest integer
+                    key_y = int(round(p1.y))
+                    val_x1 = int(round(p1.x))
+                    val_x2 = int(round(p2.x))
+                    h_tracks[key_y].append(tuple(sorted((val_x1, val_x2))))
+
+                elif abs(p1.x - p2.x) < tolerance:  # Vertical
+                    # Round all values to the nearest integer
+                    key_x = int(round(p1.x))
+                    val_y1 = int(round(p1.y))
+                    val_y2 = int(round(p2.y))
+                    v_tracks[key_x].append(tuple(sorted((val_y1, val_y2))))
+
+        # Helper to merge intervals (now updated to expect ints)
+        def merge_intervals(intervals: List[Tuple[int, int]]) -> List[Tuple[int, int]]:
             if not intervals:
                 return []
             intervals.sort()
@@ -280,6 +303,7 @@ class GlobalRouter:
                     merged.append(current)
             return merged
 
+        # Merge intervals for each track
         for y in h_tracks:
             h_tracks[y] = merge_intervals(h_tracks[y])
         for x in v_tracks:
@@ -318,6 +342,7 @@ class GlobalRouter:
         start_pin = unconnected_pins.pop()
         tree_connection_points: Set[Pin | Junction] = {start_pin}
         topology = Topology(net=net)
+        h_tracks, v_tracks = self.remove_macros_from_tracks(h_tracks, v_tracks, pin_macros)
 
         context = RoutingContext(
             macros=macros,
@@ -1117,3 +1142,129 @@ class GlobalRouter:
         else:
             log.warning(f"Found {violations} crossing/overlap violations.")
         log.info(f"--- End of Diagnosis ---")
+
+    @staticmethod
+    def _subtract_intervals(
+        source_intervals: List[Tuple[int, int]],
+        subtraction_intervals: List[Tuple[int, int]],
+    ) -> List[Tuple[int, int]]:
+        """
+        Subtracts a list of intervals from another list of intervals.
+
+        For example:
+        source: [(0, 100)]
+        subtraction: [(20, 30), (50, 60)]
+        returns: [(0, 20), (30, 50), (60, 100)]
+        """
+        if not subtraction_intervals:
+            return source_intervals
+
+        remaining_parts = source_intervals
+        for sub_start, sub_end in subtraction_intervals:
+            next_remaining_parts = []
+            for part_start, part_end in remaining_parts:
+                # Calculate the actual overlap region
+                overlap_start = max(part_start, sub_start)
+                overlap_end = min(part_end, sub_end)
+
+                # If there's a valid overlap to subtract
+                if overlap_start < overlap_end:
+                    # Keep the part before the overlap
+                    if part_start < overlap_start:
+                        next_remaining_parts.append((part_start, overlap_start))
+                    # Keep the part after the overlap
+                    if overlap_end < part_end:
+                        next_remaining_parts.append((overlap_end, part_end))
+                else:
+                    # No overlap, keep the original part
+                    next_remaining_parts.append((part_start, part_end))
+
+            remaining_parts = next_remaining_parts
+
+        return remaining_parts
+
+    def remove_macros_from_tracks(
+        self,
+        h_tracks: Dict[int, List[Tuple[int, int]]],
+        v_tracks: Dict[int, List[Tuple[int, int]]],
+        pin_macros: Dict[Pin, Polygon],  # Key can be any object, value is Polygon
+    ) -> Tuple[Dict[int, List[Tuple[int, int]]], Dict[int, List[Tuple[int, int]]]]:
+        """
+        Removes areas covered by macros from track occupancy maps.
+
+        Args:
+            h_tracks: Dictionary of horizontal tracks {y: [(x1, x2), ...]}.
+            v_tracks: Dictionary of vertical tracks {x: [(y1, y2), ...]}.
+            pin_macros: A dictionary of Shapely Polygons representing macro areas.
+
+        Returns:
+            A tuple containing the modified (h_tracks, v_tracks).
+        """
+        new_h_tracks = defaultdict(list)
+        new_v_tracks = defaultdict(list)
+        macros = list(pin_macros.values())
+
+        if not macros:
+            return h_tracks, v_tracks
+
+        # Find the global bounding box of all macros to create "infinite" lines
+        # for intersection tests.
+        all_bounds = [m.bounds for m in macros]
+        min_x = min(b[0] for b in all_bounds) - 1
+        min_y = min(b[1] for b in all_bounds) - 1
+        max_x = max(b[2] for b in all_bounds) + 1
+        max_y = max(b[3] for b in all_bounds) + 1
+
+        # Process Horizontal Tracks
+        for y, segments in h_tracks.items():
+            current_segments = segments
+            for macro in macros:
+                # Quick check to see if the track can possibly intersect the macro
+                if not (macro.bounds[1] <= y <= macro.bounds[3]):
+                    continue
+
+                # Create a long horizontal line to find the macro's slice at this y
+                intersection_line = LineString([(min_x, y), (max_x, y)])
+                macro_slice = macro.intersection(intersection_line)
+
+                subtraction_intervals = []
+                if not macro_slice.is_empty:
+                    # Handle both single and multiple intersection segments
+                    geoms = macro_slice.geoms if hasattr(macro_slice, "geoms") else [macro_slice]
+                    for geom in geoms:
+                        coords = geom.coords
+                        subtraction_intervals.append(tuple(sorted((int(round(coords[0][0])), int(round(coords[1][0]))))))
+
+                current_segments = self._subtract_intervals(current_segments, subtraction_intervals)
+
+            if current_segments:
+                new_h_tracks[y] = current_segments
+
+        # Process Vertical Tracks
+        for x, segments in v_tracks.items():
+            current_segments = segments
+            for macro in macros:
+                # Quick check to see if the track can possibly intersect the macro
+                if not (macro.bounds[0] <= x <= macro.bounds[2]):
+                    continue
+
+                # Create a long vertical line to find the macro's slice at this x
+                intersection_line = LineString([(x, min_y), (x, max_y)])
+                macro_slice = macro.intersection(intersection_line)
+
+                subtraction_intervals = []
+                if not macro_slice.is_empty:
+                    geoms = macro_slice.geoms if hasattr(macro_slice, "geoms") else [macro_slice]
+                    for geom in geoms:
+                        coords = geom.coords
+                        subtraction_intervals.append(tuple(sorted((int(round(coords[0][1])), int(round(coords[1][1]))))))
+
+                current_segments = self._subtract_intervals(current_segments, subtraction_intervals)
+
+            if current_segments:
+                new_v_tracks[x] = current_segments
+
+        log.info(f"before {h_tracks=} {v_tracks=} ")
+        log.info(f"after {new_h_tracks=}  {new_v_tracks=} ")
+        log.info(f"macros = {macros}")
+        return new_h_tracks, new_v_tracks
