@@ -10,8 +10,8 @@ from shapely.geometry import LineString, MultiLineString, MultiPolygon, Point, P
 from tabulate import tabulate
 
 from schematic_from_netlist.database.netlist_structures import Module
-from schematic_from_netlist.graph.routing_helpers import get_halo_geometries, get_macro_geometries
-from schematic_from_netlist.graph.routing_utils import Junction, Pin, Topology
+from schematic_from_netlist.global_router.gr_helpers import get_halo_geometries, get_macro_geometries
+from schematic_from_netlist.global_router.gr_structure import Junction, Pin, Topology
 
 if TYPE_CHECKING:
     from schematic_from_netlist.database.netlist_structures import Module

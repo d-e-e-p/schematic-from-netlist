@@ -19,16 +19,15 @@ from shapely.ops import linemerge, nearest_points, snap, unary_union
 from shapely.strtree import STRtree
 
 from schematic_from_netlist.database.netlist_structures import Module, Net, Pin
-from schematic_from_netlist.graph.cost_calculator import CostCalculator
-from schematic_from_netlist.graph.router_debug import RouterDebugger
-from schematic_from_netlist.graph.routing_helpers import (
+from schematic_from_netlist.global_router.gr_cost_calculator import CostCalculator
+from schematic_from_netlist.global_router.gr_debug import RouterDebugger
+from schematic_from_netlist.global_router.gr_helpers import (
     generate_candidate_paths,
-    generate_lz_paths,
     get_halo_geometries,
     get_l_path_corner,
     get_macro_geometries,
 )
-from schematic_from_netlist.graph.routing_utils import Junction, RoutingContext, Topology
+from schematic_from_netlist.global_router.gr_structures import Junction, RoutingContext, Topology
 
 # Pattern Route parameters
 ROUTE_WEIGHTS = {"wirelength": 1.0, "congestion": 2.0, "halo": 5.0, "crossing": 5.0, "macro": 1000.0, "track": 20.0}

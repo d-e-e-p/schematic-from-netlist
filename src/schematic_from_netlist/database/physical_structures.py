@@ -100,7 +100,7 @@ class PointPhysical:
 
 @dataclass
 class PortPhysical(PointPhysical):
-    pass
+    fixed: bool = False
 
 
 # -----------------------------
@@ -108,7 +108,7 @@ class PortPhysical(PointPhysical):
 # -----------------------------
 @dataclass
 class PinPhysical(PointPhysical):
-    pass
+    fixed: bool = False
 
 
 # -----------------------------

@@ -1,5 +1,4 @@
 pyslang
-kahypar
 networkx
 pygraphviz
 igraph
@@ -7,4 +6,3 @@ matplotlib
 colorlog
 rtree
 networkx
-jpype

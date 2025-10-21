@@ -9,9 +9,9 @@ from shapely.geometry import GeometryCollection, LineString, MultiLineString, Mu
 from shapely.ops import unary_union
 
 from schematic_from_netlist.database.netlist_structures import Pin
-from schematic_from_netlist.graph.router_debug import RouterDebugger
-from schematic_from_netlist.graph.routing_helpers import generate_candidate_paths, get_l_path_corner
-from schematic_from_netlist.graph.routing_utils import Junction, Metrics, RoutingContext, Topology
+from schematic_from_netlist.global_router.gr_debug import RouterDebugger
+from schematic_from_netlist.global_router.gr_helpers import generate_candidate_paths, get_l_path_corner
+from schematic_from_netlist.global_router.gr_structures import Junction, Metrics, RoutingContext, Topology
 
 # Pattern Route parameters
 ROUTE_WEIGHTS = {"wirelength": 1.0, "congestion": 2.0, "halo": 5.0, "crossing": 5.0, "macro": 1000.0, "track": 20.0}

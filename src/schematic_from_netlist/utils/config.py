@@ -22,10 +22,10 @@ def setup_logging(verbose: bool = False, log_file: Optional[str] = None) -> None
     # Make sure directory exists
     os.makedirs(os.path.dirname(log_file), exist_ok=True)
 
-    # Clear existing handlers to prevent duplicates
+    # Configure root logger
     root_logger = log.getLogger()
     root_logger.handlers.clear()
-    root_logger.propagate = False
+    root_logger.setLevel(log.DEBUG if verbose else log.INFO)
 
     # Console handler with color
     console_handler = colorlog.StreamHandler()
@@ -38,9 +38,6 @@ def setup_logging(verbose: bool = False, log_file: Optional[str] = None) -> None
     # Attach handlers
     root_logger.addHandler(console_handler)
     root_logger.addHandler(file_handler)
-
-    # Set level
-    root_logger.setLevel(log.DEBUG if verbose else log.INFO)
 
 
 def setup_elk(jvm_path: Optional[str] = None) -> None:
