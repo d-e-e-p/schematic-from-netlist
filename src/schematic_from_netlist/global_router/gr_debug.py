@@ -11,7 +11,7 @@ from tabulate import tabulate
 
 from schematic_from_netlist.database.netlist_structures import Module
 from schematic_from_netlist.global_router.gr_helpers import get_halo_geometries, get_macro_geometries
-from schematic_from_netlist.global_router.gr_structure import Junction, Pin, Topology
+from schematic_from_netlist.global_router.gr_structures import Junction, Pin, Topology
 
 if TYPE_CHECKING:
     from schematic_from_netlist.database.netlist_structures import Module
@@ -69,6 +69,7 @@ class RouterDebugger:
             ax.set_title(f"Module: {module.name} {title}")
             ax.set_xlabel("X")
             ax.set_ylabel("Y")
+            log.info(f"creating {stage}{module.name}_junctions.png")
 
             # --- Draw macros ---
             macros = get_macro_geometries(module)
@@ -148,7 +149,7 @@ class RouterDebugger:
             plt.savefig(fname, dpi=200)
             plt.close(fig)
 
-            log.info(f"Saved schematic plot for module {module.name} → {fname}")
+            log.info(f"Saved summary plot for module {module.name} → {fname}")
 
     def plot_cost_calculation(
         self,
@@ -257,9 +258,7 @@ class RouterDebugger:
         fig.tight_layout()
 
         # Save figure
-        safe_module_name = context.module.name.replace("/", "_") if context.module else "unknown_module"
-        safe_net_name = topology.net.name.replace("/", "_")
-        filename = f"{plot_filename_prefix or ''}{safe_module_name}_{safe_net_name}_cost.png"
+        filename = f"{plot_filename_prefix or ''}{context.module.name}_{topology.net.name}_cost.png"
         full_path = os.path.join(out_dir, filename)
         plt.savefig(full_path, dpi=200)
         plt.close(fig)

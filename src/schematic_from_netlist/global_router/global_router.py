@@ -98,6 +98,10 @@ class GlobalRouter:
                         pin_macros=pin_macros,
                     )
                     self._rebuild_net_geometry(topo, context)  # Update geometry for next net
+            junctions = defaultdict(list)
+            for net, topo in net_topologies.items():
+                junctions[module].append(topo)
+            self._debugger.plot_junction_summary(junctions, stage="1", title="Initial Topology")
 
             # --- STAGE 2
             log.info(f"--- Stage 2: Pruning Junctions ---")
@@ -116,6 +120,10 @@ class GlobalRouter:
                 )
                 self._rebuild_net_geometry(topo, context)
 
+            junctions = defaultdict(list)
+            for net, topo in net_topologies.items():
+                junctions[module].append(topo)
+            self._debugger.plot_junction_summary(junctions, stage="2", title="Pruning Junctions")
             # --- STAGE 3
             log.info(f"--- Stage 3: Optimizing Junction Locations ---")
             for net, topo in net_topologies.items():
@@ -133,6 +141,10 @@ class GlobalRouter:
                 )
                 self._rebuild_net_geometry(topo, context)
 
+            junctions = defaultdict(list)
+            for net, topo in net_topologies.items():
+                junctions[module].append(topo)
+            self._debugger.plot_junction_summary(junctions, stage="3", title="Opt junc loc")
             # --- STAGE 4
             log.info("--- Stage 4: Global Search by jumping junctions over macros ---")
             num_iterations = 3
@@ -163,6 +175,10 @@ class GlobalRouter:
                     )
                     self._rebuild_net_geometry(topo, context)
 
+            junctions = defaultdict(list)
+            for net, topo in net_topologies.items():
+                junctions[module].append(topo)
+            self._debugger.plot_junction_summary(junctions, stage="4", title="jumping")
             # --- STAGE 5
             log.info(f"--- Stage 5: Local search: sliding junctions around a bit ---")
             for net, topo in net_topologies.items():
@@ -191,6 +207,10 @@ class GlobalRouter:
                 )
                 self._rebuild_net_geometry(topo, context)
 
+            junctions = defaultdict(list)
+            for net, topo in net_topologies.items():
+                junctions[module].append(topo)
+            self._debugger.plot_junction_summary(junctions, stage="5", title="sliding")
             # --- STAGE 6
             log.info(f"--- Stage 6: Finalizing Routes and Pin Locations ---")
             for net, topo in net_topologies.items():
@@ -201,7 +221,7 @@ class GlobalRouter:
 
         # Log detailed junction summary
         self._debugger.log_junction_summary(self.junctions)
-        self._debugger.plot_junction_summary(self.junctions)
+        self._debugger.plot_junction_summary(self.junctions, stage="6", title="final")
 
         for module in self.db.design.modules.values():
             self._diagnose_crossings(module)

@@ -11,7 +11,7 @@ from typing import Dict, List, Optional
 from shapely.geometry import box
 from tabulate import tabulate
 
-from schematic_from_netlist.graph.global_router import Junction
+from schematic_from_netlist.global_router.gr_structures import Junction
 from schematic_from_netlist.graph.graph_partition import Edge, HypergraphData
 
 from .netlist_structures import Cluster, Design, Instance, Module, Net, Pin, PinDirection
