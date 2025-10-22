@@ -9,11 +9,11 @@ import os
 import time
 from collections import defaultdict
 from dataclasses import asdict, dataclass, field
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import numpy as np
 from rtree import index
-from shapely.geometry import LineString, MultiLineString, MultiPoint, MultiPolygon, Point, Polygon
+from shapely.geometry import GeometryCollection, LineString, MultiLineString, MultiPoint, MultiPolygon, Point, Polygon
 from shapely.geometry.base import BaseGeometry
 from shapely.ops import linemerge, nearest_points, snap, unary_union
 from shapely.strtree import STRtree
@@ -524,7 +524,7 @@ class GlobalRouter:
                     # If the ideal location is restricted, find the nearest valid point on the boundary
                     if new_loc.within(context.macros) or new_loc.within(context.halos):
                         restricted_area = unary_union([context.macros, context.halos])
-                        if not restricted_area.boundary.is_empty:
+                        if restricted_area.boundary and not restricted_area.boundary.is_empty:
                             new_loc = nearest_points(new_loc, restricted_area.boundary)[1]
 
                     j.location = new_loc
@@ -544,6 +544,8 @@ class GlobalRouter:
         2. After checking all junctions, apply all the beneficial moves simultaneously.
         3. Re-plot the routing and repeat until no more cost reduction is possible.
         """
+        if not topology.net:
+            return
         search_step_size = 4
         log.debug(f"Starting junction sliding for net {topology.net.name}")
 
@@ -575,7 +577,7 @@ class GlobalRouter:
                     context,
                 )
                 best_location = initial_location
-                tried_locations_costs = {(initial_location.x, initial_location.y): min_cost}
+                tried_locations_costs = {(int(round(initial_location.x)), int(round(initial_location.y))): min_cost}
 
                 # --- Calculate dynamic search step size ---
                 connected_points = []
@@ -611,7 +613,7 @@ class GlobalRouter:
                             log.info(f" testing new location {new_location} for {junction.name}")
 
                         if new_location.within(macros) or new_location.within(halos):
-                            tried_locations_costs[(new_location.x, new_location.y)] = float("inf")
+                            tried_locations_costs[(int(round(new_location.x)), int(round(new_location.y)))] = float("inf")
                             continue
 
                         junction.location = new_location
@@ -619,7 +621,7 @@ class GlobalRouter:
                             topology,
                             context,
                         )
-                        if topology.net.name == "n6":
+                        if topology.net.name == "n6":  # pyright: ignore
                             current_cost = self._cost_calculator.calculate_total_cost(
                                 topology, context, True, f"debug_{topology.net.name}_{j_idx}_iter_{i}_{int(current_cost)}_"
                             )
@@ -629,7 +631,7 @@ class GlobalRouter:
                             nearby_junctions = junction_tree.query(new_location.buffer(4))
                             current_cost += JUNCTION_SPACING_PENALTY * len(nearby_junctions)
 
-                        tried_locations_costs[(new_location.x, new_location.y)] = current_cost
+                        tried_locations_costs[(int(round(new_location.x)), int(round(new_location.y)))] = current_cost
 
                         if current_cost < min_cost:
                             min_cost = current_cost
@@ -673,7 +675,7 @@ class GlobalRouter:
         # After all iterations, generate a summary heatmap for each junction
         for junction, tried_locations in all_tried_locations.items():
             if len(tried_locations) > 1:
-                best_loc_tuple = min(tried_locations, key=tried_locations.get)
+                best_loc_tuple = min(tried_locations.keys(), key=lambda k: tried_locations[k])
                 best_location = Point(best_loc_tuple)
                 min_cost = tried_locations[best_loc_tuple]
                 self._debugger._plot_junction_move_heatmap(
@@ -807,7 +809,7 @@ class GlobalRouter:
         # After all iterations, generate a summary heatmap for each junction
         for junction, tried_locations in all_tried_locations.items():
             if tried_locations:
-                best_loc_tuple = min(tried_locations, key=tried_locations.get)
+                best_loc_tuple = min(tried_locations.keys(), key=lambda k: tried_locations[k])
                 best_location = Point(best_loc_tuple)
                 min_cost = tried_locations[best_loc_tuple]
                 self._debugger._plot_junction_move_heatmap(
@@ -882,7 +884,7 @@ class GlobalRouter:
         def rounded_Point(pt):
             return Point(round(pt.x), round(pt.y))
 
-        pin_locations = [p.draw.geom for p in downstream_pins if hasattr(p.draw, "geom") and p.draw.geom]
+        pin_locations = [p.draw.geom for p in downstream_pins if p.draw and p.draw.geom]
         pin_locations = [p.centroid if not isinstance(p, Point) else p for p in pin_locations]
         if not test_for_int_list_of_points(pin_locations):
             log.warning(f"not int list of points: {pin_locations=}")
@@ -1008,7 +1010,10 @@ class GlobalRouter:
                         path = linemerge([clipped])
                     else:
                         path = linemerge(clipped)
-            junction.geom = path
+            if isinstance(path, LineString):
+                junction.geom = MultiLineString([path])
+            else:
+                junction.geom = path
 
         # --- 2. Update net geometry ---
         new_geoms = [j.geom for j in topology.junctions]
@@ -1167,7 +1172,10 @@ class GlobalRouter:
                 subtraction_intervals = []
                 if not macro_slice.is_empty:
                     # Handle both single and multiple intersection segments
-                    geoms = macro_slice.geoms if hasattr(macro_slice, "geoms") else [macro_slice]
+                    if isinstance(macro_slice, (MultiPoint, MultiLineString, MultiPolygon, GeometryCollection)):
+                        geoms = list(macro_slice.geoms)
+                    else:
+                        geoms = [macro_slice]
                     for geom in geoms:
                         coords = geom.coords
                         subtraction_intervals.append(tuple(sorted((int(round(coords[0][0])), int(round(coords[1][0]))))))
@@ -1191,7 +1199,10 @@ class GlobalRouter:
 
                 subtraction_intervals = []
                 if not macro_slice.is_empty:
-                    geoms = macro_slice.geoms if hasattr(macro_slice, "geoms") else [macro_slice]
+                    if isinstance(macro_slice, (MultiPoint, MultiLineString, MultiPolygon, GeometryCollection)):
+                        geoms = list(macro_slice.geoms)
+                    else:
+                        geoms = [macro_slice]
                     for geom in geoms:
                         coords = geom.coords
                         subtraction_intervals.append(tuple(sorted((int(round(coords[0][1])), int(round(coords[1][1]))))))

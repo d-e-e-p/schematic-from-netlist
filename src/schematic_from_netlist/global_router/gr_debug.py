@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Dict, List, Tuple
 
 import matplotlib.pyplot as plt
 from shapely.geometry import LineString, MultiLineString, MultiPolygon, Point, Polygon
+from shapely.geometry.base import BaseGeometry
 from tabulate import tabulate
 
 from schematic_from_netlist.database.netlist_structures import Module
@@ -289,8 +290,8 @@ class RouterDebugger:
         tried_locations_costs: Dict[Tuple[int, int], float],
         best_location: Point,
         min_cost: float,
-        macros: Polygon,
-        halos: Polygon,
+        macros: BaseGeometry,
+        halos: BaseGeometry,
         filename_prefix: str,
     ):
         """Generate a heatmap of junction move costs."""

@@ -52,15 +52,15 @@ class Metrics:
 
 @dataclass
 class RoutingContext:
-    macros: Polygon = field(default_factory=Polygon)
-    halos: Polygon = field(default_factory=Polygon)
+    macros: BaseGeometry = field(default_factory=Polygon)
+    halos: BaseGeometry = field(default_factory=Polygon)
     congestion_idx: index.Index = field(default_factory=index.Index)
     other_nets_geoms: List[LineString] = field(default_factory=list)
     h_tracks: Dict[int, List[Tuple[int, int]]] = field(default_factory=dict)
     v_tracks: Dict[int, List[Tuple[int, int]]] = field(default_factory=dict)
     pin_macros: Dict[Pin, Polygon] = field(default_factory=dict)
-    module: Optional[Module] = None
-    net: Optional[Net] = None
+    module: Module = field(default_factory=Module)
+    net: Net = field(default_factory=Net)
 
 
 @dataclass
