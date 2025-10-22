@@ -519,7 +519,7 @@ class GlobalRouter:
 
                 if coords_x:
                     # Update location to the median of connection points
-                    new_loc = Point(float(np.median(coords_x)), float(np.median(coords_y)))
+                    new_loc = Point(int(round(np.median(coords_x))), int(round((np.median(coords_y)))))
 
                     # If the ideal location is restricted, find the nearest valid point on the boundary
                     if new_loc.within(context.macros) or new_loc.within(context.halos):
@@ -562,7 +562,7 @@ class GlobalRouter:
 
         parent_map = self._build_junction_parent_map(topology)
         max_iterations = 10  # To prevent infinite loops
-        all_tried_locations: Dict[Junction, Dict[Tuple[float, float], float]] = defaultdict(dict)
+        all_tried_locations: Dict[Junction, Dict[Tuple[int, int], float]] = defaultdict(dict)
         for i in range(max_iterations):
             proposed_moves = {}
             cost_reduced_this_iter = False
@@ -727,7 +727,7 @@ class GlobalRouter:
 
         parent_map = self._build_junction_parent_map(topology)
         memo_downstream_pins = {}
-        all_tried_locations: Dict[Junction, Dict[Tuple[float, float], float]] = defaultdict(dict)
+        all_tried_locations: Dict[Junction, Dict[Tuple[int, int], float]] = defaultdict(dict)
 
         max_iterations = 10
         for i in range(max_iterations):
@@ -763,7 +763,7 @@ class GlobalRouter:
                     f"For net {topology.net.name}, skipping combinatorial optimization in jump phase due to too many combinations: {num_combinations}"
                 )
             else:
-                min_cost_for_loc: Dict[Tuple[Junction, Tuple[float, float]], float] = defaultdict(lambda: float("inf"))
+                min_cost_for_loc: Dict[Tuple[Junction, Tuple[int, int]], float] = defaultdict(lambda: float("inf"))
 
                 for location_combination in itertools.product(*location_lists):
                     current_combination = {j: loc for j, loc in zip(junctions_to_optimize, location_combination)}
@@ -779,7 +779,7 @@ class GlobalRouter:
 
                     # For heatmap data
                     for junction, new_loc in current_combination.items():
-                        loc_tuple = (new_loc.x, new_loc.y)
+                        loc_tuple = (int(round(new_loc.x)), int(round(new_loc.y)))
                         if current_cost < min_cost_for_loc[(junction, loc_tuple)]:
                             min_cost_for_loc[(junction, loc_tuple)] = current_cost
 
@@ -811,14 +811,14 @@ class GlobalRouter:
                 best_location = Point(best_loc_tuple)
                 min_cost = tried_locations[best_loc_tuple]
                 self._debugger._plot_junction_move_heatmap(
-                    module,
+                    topology.context.module,
                     topology,
                     junction,
                     tried_locations,
                     best_location,
                     min_cost,
-                    macros,
-                    halos,
+                    topology.context.macros,
+                    topology.context.halos,
                     filename_prefix="jump_summary_",
                 )
 

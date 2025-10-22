@@ -11,25 +11,6 @@ from schematic_from_netlist.database.netlist_structures import Module, Net, Pin
 
 
 @dataclass
-class Topology:
-    net: Net
-    junctions: List[Junction] = field(default_factory=list)
-    metrics: Metrics | None = None
-    context: RoutingContext | None = None
-
-
-@dataclass
-class Junction:
-    name: str
-    location: Point
-    children: Set[Junction | Pin] = field(default_factory=set)
-    geom: Optional[MultiLineString] = None
-
-    def __hash__(self):
-        return hash((self.name, self.location))
-
-
-@dataclass
 class Metrics:
     # Geometric parameters
     wirelength: float = 0.0
@@ -71,8 +52,8 @@ class Metrics:
 
 @dataclass
 class RoutingContext:
-    macros: Polygon | BaseGeometry = field(default_factory=Polygon)
-    halos: Polygon | BaseGeometry = field(default_factory=Polygon)
+    macros: Polygon = field(default_factory=Polygon)
+    halos: Polygon = field(default_factory=Polygon)
     congestion_idx: index.Index = field(default_factory=index.Index)
     other_nets_geoms: List[LineString] = field(default_factory=list)
     h_tracks: Dict[int, List[Tuple[int, int]]] = field(default_factory=dict)
@@ -80,3 +61,22 @@ class RoutingContext:
     pin_macros: Dict[Pin, Polygon] = field(default_factory=dict)
     module: Optional[Module] = None
     net: Optional[Net] = None
+
+
+@dataclass
+class Topology:
+    net: Net
+    junctions: List[Junction] = field(default_factory=list)
+    metrics: Metrics = field(default_factory=Metrics)
+    context: RoutingContext = field(default_factory=RoutingContext)
+
+
+@dataclass
+class Junction:
+    name: str
+    location: Point
+    children: Set[Junction | Pin] = field(default_factory=set)
+    geom: Optional[MultiLineString] = None
+
+    def __hash__(self):
+        return hash((self.name, self.location))

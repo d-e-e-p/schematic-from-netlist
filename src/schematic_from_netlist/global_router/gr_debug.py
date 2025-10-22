@@ -286,7 +286,7 @@ class RouterDebugger:
         module: Module,
         topology: Topology,
         moved_junction: Junction,
-        tried_locations_costs: Dict[Tuple[float, float], float],
+        tried_locations_costs: Dict[Tuple[int, int], float],
         best_location: Point,
         min_cost: float,
         macros: Polygon,
