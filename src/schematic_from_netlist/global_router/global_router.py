@@ -56,6 +56,46 @@ class GlobalRouter:
         self._debugger = RouterDebugger()
         self._cost_calculator = CostCalculator(self._debugger)
 
+    def create_routing_context(
+        self,
+        topo: Topology,
+    ):
+        """Create and attach a RoutingContext to the topology."""
+        # For pins inside macros, route to the macro center
+        pin_macros: Dict[Pin, Polygon] = {}
+        pins = [p for p in topo.net.pins.values() if hasattr(p.draw, "geom") and p.draw.geom is not None]
+        for p in pins:
+            if macro := p.instance.draw.geom:
+                pin_macros[p] = macro
+                p.draw.geom = Point(round(macro.centroid.x), round(macro.centroid.y))
+            else:
+                log.warning(f"Pin {p.name} instance {p.instance.name} has no geom .")
+
+        topo.context = RoutingContext()
+        module = topo.net.module
+        topo.context.macros = get_macro_geometries(module)
+        topo.context.halos = get_halo_geometries(topo.context.macros)
+        topo.context.module = module
+        topo.context.pin_macros = pin_macros
+        self.update_routing_context(topo)
+
+    def update_routing_context(
+        self,
+        topo: Topology,
+    ):
+        """Create and attach a RoutingContext to the topology."""
+        net = topo.net
+        congestion_idx, other_nets_geoms = self._build_congestion_index(net.module, net)
+
+        h_tracks, v_tracks = self._build_track_occupancy(other_nets_geoms)
+        h_tracks, v_tracks = self.remove_macros_from_tracks(h_tracks, v_tracks, topo.context.pin_macros)
+
+        topo.context.net = net
+        topo.context.congestion_idx = congestion_idx
+        topo.context.other_nets_geoms = other_nets_geoms
+        topo.context.h_tracks = h_tracks
+        topo.context.v_tracks = v_tracks
+
     def insert_routing_junctions(self):
         # Process groups
         for module in self.db.design.modules.values():
@@ -74,31 +114,16 @@ class GlobalRouter:
 
             # --- Data structures to hold intermediate results ---
             net_topologies: Dict[Net, Topology] = {}
-            net_pin_macros: Dict[Net, Dict[Pin, Polygon]] = {}
 
             # --- STAGE 1
             log.info(f"--- Stage 1: Initial Topology Generation for {len(sorted_nets)} nets ---")
             for net in sorted_nets:
                 net.draw.geom = None  # Clear existing geometry
-                congestion_idx, other_nets_geoms = self._build_congestion_index(module, net)
-                h_tracks, v_tracks = self._build_track_occupancy(other_nets_geoms)
-                topo, pin_macros = self._create_initial_topology(
-                    net, macros, halos, congestion_idx, other_nets_geoms, h_tracks, v_tracks
-                )
-                if topo:
-                    net_topologies[net] = topo
-                    net_pin_macros[net] = pin_macros or {}
-                    context = RoutingContext(
-                        macros=macros,
-                        halos=halos,
-                        congestion_idx=congestion_idx,
-                        other_nets_geoms=other_nets_geoms,
-                        h_tracks=h_tracks,
-                        v_tracks=v_tracks,
-                        pin_macros=pin_macros,
-                        net=net,
-                    )
-                    self._rebuild_net_geometry(topo, context)  # Update geometry for next net
+                topo = Topology(net=net)
+                self.create_routing_context(topo)
+                net_topologies[net] = topo
+                self.create_initial_junctions(topo)
+                self._rebuild_net_geometry(topo)  # Update geometry for next net
             junctions = defaultdict(list)
             for net, topo in net_topologies.items():
                 junctions[module].append(topo)
@@ -108,20 +133,8 @@ class GlobalRouter:
             log.info(f"--- Stage 2: Pruning Junctions ---")
             for net, topo in net_topologies.items():
                 self._prune_redundant_junctions(topo)
-                congestion_idx, other_nets_geoms = self._build_congestion_index(module, net)
-                h_tracks, v_tracks = self._build_track_occupancy(other_nets_geoms)
-                h_tracks, v_tracks = self.remove_macros_from_tracks(h_tracks, v_tracks, net_pin_macros.get(net))
-                context = RoutingContext(
-                    macros=macros,
-                    halos=halos,
-                    congestion_idx=congestion_idx,
-                    other_nets_geoms=other_nets_geoms,
-                    h_tracks=h_tracks,
-                    v_tracks=v_tracks,
-                    pin_macros=net_pin_macros.get(net, {}),
-                    net=net,
-                )
-                self._rebuild_net_geometry(topo, context)
+                self.update_routing_context(topo)
+                self._rebuild_net_geometry(topo)
 
             junctions = defaultdict(list)
             for net, topo in net_topologies.items():
@@ -130,21 +143,9 @@ class GlobalRouter:
             # --- STAGE 3
             log.info(f"--- Stage 3: Optimizing Junction Locations ---")
             for net, topo in net_topologies.items():
-                self._optimize_junction_locations(topo, macros, halos, net_pin_macros[net])
-                congestion_idx, other_nets_geoms = self._build_congestion_index(module, net)
-                h_tracks, v_tracks = self._build_track_occupancy(other_nets_geoms)
-                h_tracks, v_tracks = self.remove_macros_from_tracks(h_tracks, v_tracks, net_pin_macros.get(net))
-                context = RoutingContext(
-                    macros=macros,
-                    halos=halos,
-                    congestion_idx=congestion_idx,
-                    other_nets_geoms=other_nets_geoms,
-                    h_tracks=h_tracks,
-                    v_tracks=v_tracks,
-                    pin_macros=net_pin_macros.get(net, {}),
-                    net=net,
-                )
-                self._rebuild_net_geometry(topo, context)
+                self._optimize_junction_locations(topo)
+                self.update_routing_context(topo)
+                self._rebuild_net_geometry(topo)
 
             junctions = defaultdict(list)
             for net, topo in net_topologies.items():
@@ -155,32 +156,13 @@ class GlobalRouter:
             num_iterations = 3
             for _ in range(num_iterations):
                 for net, topo in net_topologies.items():
-                    congestion_idx, other_nets_geoms = self._build_congestion_index(module, net)
-                    h_tracks, v_tracks = self._build_track_occupancy(other_nets_geoms)
-                    h_tracks, v_tracks = self.remove_macros_from_tracks(h_tracks, v_tracks, net_pin_macros.get(net))
+                    self.update_routing_context(topo)
                     self._jump_junctions_over_macros(
                         topo,
-                        macros,
-                        halos,
-                        congestion_idx,
-                        other_nets_geoms,
-                        module,
-                        net_pin_macros[net],
+                        topo.context,
                         net_topologies,
-                        h_tracks,
-                        v_tracks,
                     )
-                    context = RoutingContext(
-                        macros=macros,
-                        halos=halos,
-                        congestion_idx=congestion_idx,
-                        other_nets_geoms=other_nets_geoms,
-                        h_tracks=h_tracks,
-                        v_tracks=v_tracks,
-                        pin_macros=net_pin_macros.get(net, {}),
-                        net=net,
-                    )
-                    self._rebuild_net_geometry(topo, context)
+                    self._rebuild_net_geometry(topo)
 
             junctions = defaultdict(list)
             for net, topo in net_topologies.items():
@@ -189,32 +171,12 @@ class GlobalRouter:
             # --- STAGE 5
             log.info(f"--- Stage 5: Local search: sliding junctions around a bit ---")
             for net, topo in net_topologies.items():
-                congestion_idx, other_nets_geoms = self._build_congestion_index(module, net)
-                h_tracks, v_tracks = self._build_track_occupancy(other_nets_geoms)
-                h_tracks, v_tracks = self.remove_macros_from_tracks(h_tracks, v_tracks, net_pin_macros.get(net))
+                self.update_routing_context(topo)
                 self._slide_junctions(
                     topo,
-                    macros,
-                    halos,
-                    congestion_idx,
-                    other_nets_geoms,
-                    module,
-                    net_pin_macros[net],
                     net_topologies,
-                    h_tracks,
-                    v_tracks,
                 )
-                context = RoutingContext(
-                    macros=macros,
-                    halos=halos,
-                    congestion_idx=congestion_idx,
-                    other_nets_geoms=other_nets_geoms,
-                    h_tracks=h_tracks,
-                    v_tracks=v_tracks,
-                    pin_macros=net_pin_macros.get(net, {}),
-                    net=net,
-                )
-                self._rebuild_net_geometry(topo, context)
+                self._rebuild_net_geometry(topo)
 
             junctions = defaultdict(list)
             for net, topo in net_topologies.items():
@@ -223,7 +185,7 @@ class GlobalRouter:
             # --- STAGE 6
             log.info(f"--- Stage 6: Finalizing Routes and Pin Locations ---")
             for net, topo in net_topologies.items():
-                self._finalize_routes_and_pin_locations(topo, module, net_pin_macros[net])
+                self._finalize_routes_and_pin_locations(topo)
                 self.junctions[module].append(topo)
 
         log.info(f"Total junctions created: {sum(len(v) for v in self.junctions.values())}")
@@ -316,48 +278,19 @@ class GlobalRouter:
 
         return h_tracks, v_tracks
 
-    def _create_initial_topology(
+    def create_initial_junctions(
         self,
-        net: Net,
-        macros: Polygon | BaseGeometry,
-        halos: Polygon | BaseGeometry,
-        congestion_idx,
-        other_nets_geoms,
-        h_tracks,
-        v_tracks,
-    ) -> Tuple[Optional[Topology], Optional[Dict[Pin, Polygon]]]:
+        topo: Topology,
+    ):
         """Creates the initial MST-based topology for a single net."""
-        pins = [p for p in net.pins.values() if hasattr(p.draw, "geom") and p.draw.geom is not None]
-        if len(pins) < 3:
-            return None, None
 
-        log.debug(f"Creating initial topology for net {net.name} with {len(pins)} pins.")
-
-        # For pins inside macros, route to the macro center
-        pin_macros: Dict[Pin, Polygon] = {}
-        for p in pins:
-            if macro := p.instance.draw.geom:
-                pin_macros[p] = macro
-                p.draw.geom = Point(round(macro.centroid.x), round(macro.centroid.y))
-            else:
-                log.warning(f"Pin {p.name} instance {p.instance.name} has no geom .")
+        log.debug(f"Creating initial topology for net {topo.net.name} ")
 
         # Initialize MST algorithm (Prim's)
+        pins = [p for p in topo.net.pins.values() if hasattr(p.draw, "geom") and p.draw.geom is not None]
         unconnected_pins = set(pins)
         start_pin = unconnected_pins.pop()
         tree_connection_points: Set[Pin | Junction] = {start_pin}
-        topology = Topology(net=net)
-        h_tracks, v_tracks = self.remove_macros_from_tracks(h_tracks, v_tracks, pin_macros)
-
-        context = RoutingContext(
-            macros=macros,
-            halos=halos,
-            congestion_idx=congestion_idx,
-            other_nets_geoms=other_nets_geoms,
-            h_tracks=h_tracks,
-            v_tracks=v_tracks,
-            pin_macros=pin_macros,
-        )
 
         # Greedy merge loop
         while unconnected_pins:
@@ -371,13 +304,13 @@ class GlobalRouter:
                     p1 = conn_point.draw.geom if isinstance(conn_point, Pin) else conn_point.location
                     p2 = new_pin.draw.geom
 
-                    candidate_paths = generate_candidate_paths(p1, p2, context)
+                    candidate_paths = generate_candidate_paths(p1, p2, topo.context)
                     for path_geom in candidate_paths:
-                        p1_macro = pin_macros.get(conn_point) if isinstance(conn_point, Pin) else None
-                        p2_macro = pin_macros.get(new_pin)
+                        p1_macro = topo.context.pin_macros.get(conn_point) if isinstance(conn_point, Pin) else None
+                        p2_macro = topo.context.pin_macros.get(new_pin)
                         metrics, _ = self._cost_calculator.calculate_path_cost(
                             path_geom,
-                            context,
+                            topo.context,
                             p1_macro,
                             p2_macro,
                         )
@@ -388,14 +321,14 @@ class GlobalRouter:
                             best_connection_point = conn_point
 
             if best_path is None:
-                log.warning(f"Could not find a path for net {net.name}, skipping initial topology.")
-                return None, None
+                log.warning(f"Could not find a path for net {topo.net.name}, skipping initial topology.")
+                return
 
             # Add new pin and junction to the tree
             if best_new_pin:
                 unconnected_pins.remove(best_new_pin)
             corner = get_l_path_corner(best_path)
-            junction_name = f"J_{net.name}_{len(topology.junctions)}"
+            junction_name = f"J_{topo.net.name}_{len(topo.junctions)}"
             # Ensure we only add valid Pin or Junction objects to children
             children = set()
             if best_new_pin is not None:
@@ -403,16 +336,15 @@ class GlobalRouter:
             if best_connection_point is not None:
                 children.add(best_connection_point)
             junction = Junction(name=junction_name, location=corner, children=children)
-            topology.junctions.append(junction)
+            topo.junctions.append(junction)
             tree_connection_points.add(junction)
 
             if isinstance(best_connection_point, Pin):
                 tree_connection_points.remove(best_connection_point)
 
-        return topology, pin_macros
-
-    def _rebuild_net_geometry(self, topology: Topology, context: RoutingContext):
+    def _rebuild_net_geometry(self, topology: Topology):
         """Rebuilds the net's geometry based on its current topology of junctions and pins."""
+        context = topology.context
 
         def rounded_point(pt):
             return Point(round(pt[0]), round(pt[1]))
@@ -545,13 +477,11 @@ class GlobalRouter:
     def _optimize_junction_locations(
         self,
         topology: Topology,
-        macros: Polygon | BaseGeometry,
-        halos: Polygon | BaseGeometry,
-        pin_macros: Dict[Pin, Polygon],
         passes: int = 3,
     ):
         """Iteratively improve junction locations based on a weighted median of their connections."""
         # Build parent map
+        context = topology.context
         parent_map: Dict[Junction, Junction] = {}
         for p in topology.junctions:
             for c in p.children:
@@ -592,8 +522,8 @@ class GlobalRouter:
                     new_loc = Point(float(np.median(coords_x)), float(np.median(coords_y)))
 
                     # If the ideal location is restricted, find the nearest valid point on the boundary
-                    if new_loc.within(macros) or new_loc.within(halos):
-                        restricted_area = unary_union([macros, halos])
+                    if new_loc.within(context.macros) or new_loc.within(context.halos):
+                        restricted_area = unary_union([context.macros, context.halos])
                         if not restricted_area.boundary.is_empty:
                             new_loc = nearest_points(new_loc, restricted_area.boundary)[1]
 
@@ -605,15 +535,7 @@ class GlobalRouter:
     def _slide_junctions(
         self,
         topology: Topology,
-        macros: Polygon | BaseGeometry,
-        halos: Polygon | BaseGeometry,
-        congestion_idx,
-        other_nets_geoms,
-        module: Module,
-        pin_macros: Dict[Pin, Polygon],
         all_topologies: Dict[Net, Topology],
-        h_tracks,
-        v_tracks,
     ):
         """
         Post-processing step to slide each junction in all directions to see if cost is reduced.
@@ -625,6 +547,11 @@ class GlobalRouter:
         search_step_size = 4
         log.debug(f"Starting junction sliding for net {topology.net.name}")
 
+        context = topology.context
+        macros = context.macros
+        halos = context.halos
+        module = context.module
+
         # Build an STRtree of all junctions from OTHER nets for quick spatial queries
         other_junction_points = []
         for net, topo in all_topologies.items():
@@ -632,17 +559,6 @@ class GlobalRouter:
                 for j in topo.junctions:
                     other_junction_points.append(j.location)
         junction_tree = STRtree(other_junction_points) if other_junction_points else None
-
-        context = RoutingContext(
-            macros=macros,
-            halos=halos,
-            congestion_idx=congestion_idx,
-            other_nets_geoms=other_nets_geoms,
-            h_tracks=h_tracks,
-            v_tracks=v_tracks,
-            pin_macros=pin_macros,
-            module=module,
-        )
 
         parent_map = self._build_junction_parent_map(topology)
         max_iterations = 10  # To prevent infinite loops
@@ -796,33 +712,18 @@ class GlobalRouter:
     def _jump_junctions_over_macros(
         self,
         topology: Topology,
-        macros: Polygon | BaseGeometry,
-        halos: Polygon | BaseGeometry,
-        congestion_idx,
-        other_nets_geoms,
-        module: Module,
-        pin_macros: Dict[Pin, Polygon],
+        context: RoutingContext,
         all_topologies: Dict[Net, Topology],
-        h_tracks,
-        v_tracks,
     ):
         """
         Tries to find better junction locations by jumping over macros.
         This is for cases where a junction is stuck on one side of a macro due to a halo,
         while all its connected pins are on the same side.
         """
+        macros = context.macros
+        halos = context.halos
+        module = context.module
         log.info(f"Starting junction jumping for module:{module.name} net:{topology.net.name}")
-
-        context = RoutingContext(
-            macros=macros,
-            halos=halos,
-            congestion_idx=congestion_idx,
-            other_nets_geoms=other_nets_geoms,
-            h_tracks=h_tracks,
-            v_tracks=v_tracks,
-            pin_macros=pin_macros,
-            module=module,
-        )
 
         parent_map = self._build_junction_parent_map(topology)
         memo_downstream_pins = {}
@@ -1069,20 +970,19 @@ class GlobalRouter:
     def _finalize_routes_and_pin_locations(
         self,
         topology: Topology,
-        module: Module,
-        pin_macros: Dict[Pin, Polygon],
     ):
         """
         Finalize routes by updating pin locations for pins inside macros and then
         clipping wire geometry to exclude regions inside macros.
         """
+        context = topology.context
         # --- 1. Update pin locations ---
         for junction in topology.junctions:
             start_point = junction.location
             path = junction.geom
             path = self.round_lines(path)
             for child in junction.children:
-                if isinstance(child, Pin) and child in pin_macros:
+                if isinstance(child, Pin) and child in context.pin_macros:
                     macro_poly = child.instance.draw.geom
                     intersection = path.intersection(macro_poly)
                     new_pin_loc = None
@@ -1102,7 +1002,7 @@ class GlobalRouter:
                     # Subtract macro interiors
                     clipped = path.difference(macro_poly)
                     if clipped.is_empty:
-                        log.warning(f"All wire geometry for net {net.name} lies inside macros — removed.")
+                        log.warning(f"All wire geometry for net {topology.net.name} lies inside macros — removed.")
                         continue
                     if type(clipped) == LineString:
                         path = linemerge([clipped])

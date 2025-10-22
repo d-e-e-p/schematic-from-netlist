@@ -15,6 +15,7 @@ class Topology:
     net: Net
     junctions: List[Junction] = field(default_factory=list)
     metrics: Metrics | None = None
+    context: RoutingContext | None = None
 
 
 @dataclass
@@ -70,12 +71,12 @@ class Metrics:
 
 @dataclass
 class RoutingContext:
-    macros: Polygon | BaseGeometry
-    halos: Polygon | BaseGeometry
-    congestion_idx: index.Index
-    other_nets_geoms: List[LineString]
-    h_tracks: Dict[float, List[Tuple[float, float]]]
-    v_tracks: Dict[float, List[Tuple[float, float]]]
-    pin_macros: Dict[Pin, Polygon]
+    macros: Polygon | BaseGeometry = field(default_factory=Polygon)
+    halos: Polygon | BaseGeometry = field(default_factory=Polygon)
+    congestion_idx: index.Index = field(default_factory=index.Index)
+    other_nets_geoms: List[LineString] = field(default_factory=list)
+    h_tracks: Dict[int, List[Tuple[int, int]]] = field(default_factory=dict)
+    v_tracks: Dict[int, List[Tuple[int, int]]] = field(default_factory=dict)
+    pin_macros: Dict[Pin, Polygon] = field(default_factory=dict)
     module: Optional[Module] = None
     net: Optional[Net] = None
