@@ -1073,30 +1073,60 @@ class GlobalRouter:
         pin_macros: Dict[Pin, Polygon],
     ):
         """
-        Finalize routes by updating pin locations for those inside macros and then rebuilding the net's geometry
-        with orthogonal paths.
+        Finalize routes by updating pin locations for pins inside macros and then
+        clipping wire geometry to exclude regions inside macros.
         """
-        # 1. First pass: Update pin locations for pins inside macros
+        # --- 1. Update pin locations ---
         for junction in topology.junctions:
             start_point = junction.location
             path = junction.geom
+            path = self.round_lines(path)
             for child in junction.children:
                 if isinstance(child, Pin) and child in pin_macros:
-                    intersection = path.intersection(child.instance.draw.geom)
+                    macro_poly = child.instance.draw.geom
+                    intersection = path.intersection(macro_poly)
                     new_pin_loc = None
                     if not intersection.is_empty:
                         if isinstance(intersection, Point):
                             new_pin_loc = intersection
-                        else:  # MultiPoint, LineString, etc.
+                        else:
+                            # Pick closest boundary point
                             new_pin_loc = nearest_points(start_point, intersection)[1]
-
                     if new_pin_loc:
                         child.draw.geom = new_pin_loc
                     else:
                         log.warning(
-                            f"Could not find intersection for pin {child.full_name} on macro boundary. "
-                            f"Junction at {start_point}, macro centroid at {end_point}. Using original pin location."
+                            f"Could not find intersection for pin {child.full_name} on macro boundary. Using original pin location."
                         )
+
+                    # Subtract macro interiors
+                    clipped = path.difference(macro_poly)
+                    if clipped.is_empty:
+                        log.warning(f"All wire geometry for net {net.name} lies inside macros — removed.")
+                        continue
+                    if type(clipped) == LineString:
+                        path = linemerge([clipped])
+                    else:
+                        path = linemerge(clipped)
+            junction.geom = path
+
+        # --- 2. Update net geometry ---
+        new_geoms = [j.geom for j in topology.junctions]
+        if new_geoms:
+            union_geom = unary_union(new_geoms)
+            merged_geom = None
+            if isinstance(union_geom, LineString):
+                merged_geom = linemerge([union_geom])
+            elif isinstance(union_geom, MultiLineString):
+                merged_geom = linemerge(union_geom)
+            if isinstance(merged_geom, LineString):
+                topology.net.draw.geom = MultiLineString([merged_geom])
+            elif isinstance(merged_geom, MultiLineString):
+                topology.net.draw.geom = merged_geom
+            else:
+                topology.net.draw.geom = MultiLineString([g for g in new_geoms if isinstance(g, LineString)])
+        else:
+            topology.net.draw.geom = None
 
     def _diagnose_crossings(self, module: Module):
         """Checks all routed nets in a module for crossings or overlaps and logs them."""
@@ -1275,3 +1305,18 @@ class GlobalRouter:
         log.debug(f"after {new_h_tracks=}  {new_v_tracks=} ")
         log.debug(f"macros = {macros}")
         return new_h_tracks, new_v_tracks
+
+    def round_lines(self, geom):
+        """Round coordinates of a LineString or MultiLineString to integer grid."""
+        if geom.is_empty:
+            return geom
+
+        if geom.geom_type == "LineString":
+            return LineString([(int(round(x)), int(round(y))) for x, y in geom.coords])
+
+        elif geom.geom_type == "MultiLineString":
+            rounded_lines = [LineString([(int(round(x)), int(round(y))) for x, y in line.coords]) for line in geom.geoms]
+            return MultiLineString(rounded_lines)
+
+        else:
+            raise TypeError(f"Unsupported geometry type: {geom.geom_type}")

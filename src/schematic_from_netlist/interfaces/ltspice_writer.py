@@ -219,8 +219,13 @@ class LTSpiceWriter:
             if not pin.draw.shape:
                 continue
             port_center_x, port_center_y = self.upscale_point(pin.draw.shape)
-            x = port_center_x - hw
-            y = port_center_y - hh
+            from_router = True
+            if from_router:
+                x = port_center_x - inst_offset_x
+                y = port_center_y - inst_offset_y
+            else:
+                x = port_center_x - hw
+                y = port_center_y - hh
             pt = (x, y)
             side = self._get_pin_side(pt, cell_rect)
             asy += f"PIN {x} {y} {side} 0\n"

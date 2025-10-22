@@ -95,6 +95,23 @@ class RouterDebugger:
                         x, y = halos.exterior.xy
                         ax.plot(x, y, color="blue", ls="--", lw=1)
 
+            toponets = [topo.net for topo in topos]
+            for name, net in module.nets.items():
+                if net not in toponets:
+                    color = cmap(21)  # assign one color per other nets
+                    if net.draw.geom:
+                        geom = net.draw.geom
+                        if isinstance(geom, LineString):
+                            geom = [geom]
+                        elif isinstance(geom, MultiLineString):
+                            geom = list(geom.geoms)
+                        for line in geom:
+                            x, y = line.xy
+                            ax.plot(x, y, color=color, lw=1.5)
+                        # Label the net at first point
+                        first_line = geom[0]
+                        ax.text(first_line.coords[0][0], first_line.coords[0][1], net.name, fontsize=6, color=color)
+
             # --- Draw junctions, pins, and nets ---
             for idx, topo in enumerate(topos):
                 color = cmap(idx % 20)  # assign color per net
