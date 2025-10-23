@@ -112,87 +112,78 @@ class GlobalRouter:
                 key=lambda net: net.num_conn,
             )
 
-            # --- Data structures to hold intermediate results ---
-            net_topologies: Dict[Net, Topology] = {}
-
             # --- STAGE 1
             log.info(f"--- Stage 1: Initial Topology Generation for {len(sorted_nets)} nets ---")
             for net in sorted_nets:
                 net.draw.geom = None  # Clear existing geometry
                 topo = Topology(net=net)
                 self.create_routing_context(topo)
-                net_topologies[net] = topo
+                net.draw.topo = topo
                 self.create_initial_junctions(topo)
                 self._rebuild_net_geometry(topo)  # Update geometry for next net
-            junctions = defaultdict(list)
-            for net, topo in net_topologies.items():
-                junctions[module].append(topo)
-            self._debugger.plot_junction_summary(junctions, stage="1", title="Initial Topology")
+            self._debugger.plot_junction_summary(module, stage="1", title="Initial Topology")
 
             # --- STAGE 2
             log.info(f"--- Stage 2: Pruning Junctions ---")
-            for net, topo in net_topologies.items():
-                self._prune_redundant_junctions(topo)
-                self.update_routing_context(topo)
-                self._rebuild_net_geometry(topo)
+            for net in sorted_nets:
+                if hasattr(net.draw, "topo") and net.draw.topo:
+                    topo = net.draw.topo
+                    self._prune_redundant_junctions(topo)
+                    self.update_routing_context(topo)
+                    self._rebuild_net_geometry(topo)
 
-            junctions = defaultdict(list)
-            for net, topo in net_topologies.items():
-                junctions[module].append(topo)
-            self._debugger.plot_junction_summary(junctions, stage="2", title="Pruning Junctions")
+            self._debugger.plot_junction_summary(module, stage="2", title="Pruning Junctions")
             # --- STAGE 3
             log.info(f"--- Stage 3: Optimizing Junction Locations ---")
-            for net, topo in net_topologies.items():
-                self._optimize_junction_locations(topo)
-                self.update_routing_context(topo)
-                self._rebuild_net_geometry(topo)
+            for net in sorted_nets:
+                if hasattr(net.draw, "topo") and net.draw.topo:
+                    topo = net.draw.topo
+                    self._optimize_junction_locations(topo)
+                    self.update_routing_context(topo)
+                    self._rebuild_net_geometry(topo)
 
-            junctions = defaultdict(list)
-            for net, topo in net_topologies.items():
-                junctions[module].append(topo)
-            self._debugger.plot_junction_summary(junctions, stage="3", title="Opt junc loc")
+            self._debugger.plot_junction_summary(module, stage="3", title="Opt junc loc")
             # --- STAGE 4
             log.info("--- Stage 4: Global Search by jumping junctions over macros ---")
             num_iterations = 3
             for _ in range(num_iterations):
-                for net, topo in net_topologies.items():
+                for net in sorted_nets:
+                    if hasattr(net.draw, "topo") and net.draw.topo:
+                        topo = net.draw.topo
+                        self.update_routing_context(topo)
+                        self._jump_junctions_over_macros(
+                            topo,
+                            topo.context,
+                        )
+                        self._rebuild_net_geometry(topo)
+
+            self._debugger.plot_junction_summary(module, stage="4", title="jumping")
+            # --- STAGE 5
+            log.info(f"--- Stage 5: Local search: sliding junctions around a bit ---")
+            for net in sorted_nets:
+                if hasattr(net.draw, "topo") and net.draw.topo:
+                    topo = net.draw.topo
                     self.update_routing_context(topo)
-                    self._jump_junctions_over_macros(
+                    self._slide_junctions(
                         topo,
-                        topo.context,
-                        net_topologies,
                     )
                     self._rebuild_net_geometry(topo)
 
-            junctions = defaultdict(list)
-            for net, topo in net_topologies.items():
-                junctions[module].append(topo)
-            self._debugger.plot_junction_summary(junctions, stage="4", title="jumping")
-            # --- STAGE 5
-            log.info(f"--- Stage 5: Local search: sliding junctions around a bit ---")
-            for net, topo in net_topologies.items():
-                self.update_routing_context(topo)
-                self._slide_junctions(
-                    topo,
-                    net_topologies,
-                )
-                self._rebuild_net_geometry(topo)
-
-            junctions = defaultdict(list)
-            for net, topo in net_topologies.items():
-                junctions[module].append(topo)
-            self._debugger.plot_junction_summary(junctions, stage="5", title="sliding")
+            self._debugger.plot_junction_summary(module, stage="5", title="sliding")
             # --- STAGE 6
             log.info(f"--- Stage 6: Finalizing Routes and Pin Locations ---")
-            for net, topo in net_topologies.items():
-                self._finalize_routes_and_pin_locations(topo)
-                self.junctions[module].append(topo)
+            for net in sorted_nets:
+                if hasattr(net.draw, "topo") and net.draw.topo:
+                    topo = net.draw.topo
+                    self._finalize_routes_and_pin_locations(topo)
+                    self.junctions[module].append(topo)
 
         log.info(f"Total junctions created: {sum(len(v) for v in self.junctions.values())}")
 
         # Log detailed junction summary
         self._debugger.log_junction_summary(self.junctions)
-        self._debugger.plot_junction_summary(self.junctions, stage="6", title="final")
+        for module in self.junctions:
+            self._debugger.plot_junction_summary(module, stage="6", title="final")
 
         for module in self.db.design.modules.values():
             self._diagnose_crossings(module)
@@ -535,7 +526,6 @@ class GlobalRouter:
     def _slide_junctions(
         self,
         topology: Topology,
-        all_topologies: Dict[Net, Topology],
     ):
         """
         Post-processing step to slide each junction in all directions to see if cost is reduced.
@@ -556,9 +546,9 @@ class GlobalRouter:
 
         # Build an STRtree of all junctions from OTHER nets for quick spatial queries
         other_junction_points = []
-        for net, topo in all_topologies.items():
-            if net is not topology.net:
-                for j in topo.junctions:
+        for net in module.nets.values():
+            if net is not topology.net and hasattr(net.draw, "topo") and net.draw.topo:
+                for j in net.draw.topo.junctions:
                     other_junction_points.append(j.location)
         junction_tree = STRtree(other_junction_points) if other_junction_points else None
 
@@ -715,7 +705,6 @@ class GlobalRouter:
         self,
         topology: Topology,
         context: RoutingContext,
-        all_topologies: Dict[Net, Topology],
     ):
         """
         Tries to find better junction locations by jumping over macros.

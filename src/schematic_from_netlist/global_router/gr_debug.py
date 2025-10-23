@@ -55,7 +55,7 @@ class RouterDebugger:
         headers = ["Module", "Net", "Connections", "Junctions", "Children"]
         log.info("Junction Insertion Summary:\n" + tabulate(summary, headers=headers, tablefmt="pipe"))
 
-    def plot_junction_summary(self, junctions: Dict[Module, List[Topology]], stage: str = "", title: str = ""):
+    def plot_junction_summary(self, module: Module, stage: str = "", title: str = ""):
         """
         Generate per-module schematic overview plots showing macros, pins, junctions, and existing net geometries.
         """
@@ -64,62 +64,48 @@ class RouterDebugger:
 
         cmap = plt.get_cmap("tab20")  # color map for nets
 
-        for module, topos in junctions.items():
-            fig, ax = plt.subplots(figsize=(10, 10))
-            ax.set_aspect("equal", adjustable="box")
-            ax.set_title(f"Module: {module.name} {title}")
-            ax.set_xlabel("X")
-            ax.set_ylabel("Y")
-            log.info(f"creating {stage}{module.name}_junctions.png")
+        topos = [net.draw.topo for net in module.nets.values() if hasattr(net.draw, "topo") and net.draw.topo]
+        if not topos:
+            log.info(f"No topologies to plot for module {module.name} at stage {stage}")
+            return
 
-            # --- Draw macros ---
-            macros = get_macro_geometries(module)
-            if not macros.is_empty:
-                if isinstance(macros, MultiPolygon):
-                    for sub in macros.geoms:
-                        x, y = sub.exterior.xy
-                        ax.fill(x, y, color="lightgrey", alpha=0.6)
-                else:
-                    if isinstance(macros, Polygon):
-                        x, y = macros.exterior.xy
-                        ax.fill(x, y, color="lightgrey", alpha=0.6)
+        fig, ax = plt.subplots(figsize=(10, 10))
+        ax.set_aspect("equal", adjustable="box")
+        ax.set_title(f"Module: {module.name} {title}")
+        ax.set_xlabel("X")
+        ax.set_ylabel("Y")
+        log.info(f"creating {stage}{module.name}_junctions.png")
 
-            # --- Draw halos ---
-            halos = get_halo_geometries(macros)
-            if not halos.is_empty:
-                if isinstance(halos, MultiPolygon):
-                    for sub in halos.geoms:
-                        x, y = sub.exterior.xy
-                        ax.plot(x, y, color="blue", ls="--", lw=1)
-                else:
-                    if isinstance(halos, Polygon):
-                        x, y = halos.exterior.xy
-                        ax.plot(x, y, color="blue", ls="--", lw=1)
+        # --- Draw macros ---
+        macros = get_macro_geometries(module)
+        if not macros.is_empty:
+            if isinstance(macros, MultiPolygon):
+                for sub in macros.geoms:
+                    x, y = sub.exterior.xy
+                    ax.fill(x, y, color="lightgrey", alpha=0.6)
+            else:
+                if isinstance(macros, Polygon):
+                    x, y = macros.exterior.xy
+                    ax.fill(x, y, color="lightgrey", alpha=0.6)
 
-            toponets = [topo.net for topo in topos]
-            for name, net in module.nets.items():
-                if net not in toponets:
-                    color = cmap(21)  # assign one color per other nets
-                    if net.draw.geom:
-                        geom = net.draw.geom
-                        if isinstance(geom, LineString):
-                            geom = [geom]
-                        elif isinstance(geom, MultiLineString):
-                            geom = list(geom.geoms)
-                        for line in geom:
-                            x, y = line.xy
-                            ax.plot(x, y, color=color, lw=1.5)
-                        # Label the net at first point
-                        first_line = geom[0]
-                        ax.text(first_line.coords[0][0], first_line.coords[0][1], net.name, fontsize=6, color=color)
+        # --- Draw halos ---
+        halos = get_halo_geometries(macros)
+        if not halos.is_empty:
+            if isinstance(halos, MultiPolygon):
+                for sub in halos.geoms:
+                    x, y = sub.exterior.xy
+                    ax.plot(x, y, color="blue", ls="--", lw=1)
+            else:
+                if isinstance(halos, Polygon):
+                    x, y = halos.exterior.xy
+                    ax.plot(x, y, color="blue", ls="--", lw=1)
 
-            # --- Draw junctions, pins, and nets ---
-            for idx, topo in enumerate(topos):
-                color = cmap(idx % 20)  # assign color per net
-
-                # Plot net geometry if exists
-                if topo.net.draw.geom:
-                    geom = topo.net.draw.geom
+        toponets = [topo.net for topo in topos]
+        for name, net in module.nets.items():
+            if net not in toponets:
+                color = cmap(21)  # assign one color per other nets
+                if net.draw.geom:
+                    geom = net.draw.geom
                     if isinstance(geom, LineString):
                         geom = [geom]
                     elif isinstance(geom, MultiLineString):
@@ -129,45 +115,63 @@ class RouterDebugger:
                         ax.plot(x, y, color=color, lw=1.5)
                     # Label the net at first point
                     first_line = geom[0]
-                    ax.text(first_line.coords[0][0], first_line.coords[0][1], topo.net.name, fontsize=8, color=color)
+                    ax.text(first_line.coords[0][0], first_line.coords[0][1], net.name, fontsize=6, color=color)
 
-                # Plot junctions
-                for junction in topo.junctions:
-                    jx, jy = junction.location.x, junction.location.y
-                    ax.scatter(jx, jy, c=color, s=80, marker="x")
-                    ax.text(jx + 0.5, jy + 0.5, junction.name, fontsize=7, color=color)
+        # --- Draw junctions, pins, and nets ---
+        for idx, topo in enumerate(topos):
+            color = cmap(idx % 20)  # assign color per net
 
-                    # Draw connections to children
-                    if False:
-                        for child in junction.children:
-                            if isinstance(child, Pin) and hasattr(child.draw, "geom") and child.draw.geom:
-                                pgeom = child.draw.geom
-                                if pgeom is None:
-                                    continue
-                                if pgeom is None:
-                                    continue
-                                if isinstance(pgeom, Point):
-                                    px, py = float(pgeom.x), float(pgeom.y)
-                                else:
-                                    centroid = pgeom.centroid
-                                    px, py = float(centroid.x), float(centroid.y)
-                                ax.plot([jx, px], [jy, py], color=color, lw=1)
-                                ax.scatter(px, py, c="black", s=20, marker="o")
-                                ax.text(px + 0.5, py + 0.5, child.full_name, fontsize=6, color="black")
-                            elif isinstance(child, Junction):
-                                cx, cy = child.location.x, child.location.y
-                                ax.plot([jx, cx], [jy, cy], color=color, lw=1, ls="--")
+            # Plot net geometry if exists
+            if topo.net.draw.geom:
+                geom = topo.net.draw.geom
+                if isinstance(geom, LineString):
+                    geom = [geom]
+                elif isinstance(geom, MultiLineString):
+                    geom = list(geom.geoms)
+                for line in geom:
+                    x, y = line.xy
+                    ax.plot(x, y, color=color, lw=1.5)
+                # Label the net at first point
+                first_line = geom[0]
+                ax.text(first_line.coords[0][0], first_line.coords[0][1], topo.net.name, fontsize=8, color=color)
 
-            ax.set_xlabel("X")
-            ax.set_ylabel("Y")
-            fig.tight_layout()
+            # Plot junctions
+            for junction in topo.junctions:
+                jx, jy = junction.location.x, junction.location.y
+                ax.scatter(jx, jy, c=color, s=80, marker="x")
+                ax.text(jx + 0.5, jy + 0.5, junction.name, fontsize=7, color=color)
 
-            # Save figure
-            fname = os.path.join(out_dir, f"{stage}{module.name}_junctions.png")
-            plt.savefig(fname, dpi=200)
-            plt.close(fig)
+                # Draw connections to children
+                if False:
+                    for child in junction.children:
+                        if isinstance(child, Pin) and hasattr(child.draw, "geom") and child.draw.geom:
+                            pgeom = child.draw.geom
+                            if pgeom is None:
+                                continue
+                            if pgeom is None:
+                                continue
+                            if isinstance(pgeom, Point):
+                                px, py = float(pgeom.x), float(pgeom.y)
+                            else:
+                                centroid = pgeom.centroid
+                                px, py = float(centroid.x), float(centroid.y)
+                            ax.plot([jx, px], [jy, py], color=color, lw=1)
+                            ax.scatter(px, py, c="black", s=20, marker="o")
+                            ax.text(px + 0.5, py + 0.5, child.full_name, fontsize=6, color="black")
+                        elif isinstance(child, Junction):
+                            cx, cy = child.location.x, child.location.y
+                            ax.plot([jx, cx], [jy, cy], color=color, lw=1, ls="--")
 
-            log.info(f"Saved summary plot for module {module.name} → {fname}")
+        ax.set_xlabel("X")
+        ax.set_ylabel("Y")
+        fig.tight_layout()
+
+        # Save figure
+        fname = os.path.join(out_dir, f"{stage}{module.name}_junctions.png")
+        plt.savefig(fname, dpi=200)
+        plt.close(fig)
+
+        log.info(f"Saved summary plot for module {module.name} → {fname}")
 
     def plot_cost_calculation(
         self,
