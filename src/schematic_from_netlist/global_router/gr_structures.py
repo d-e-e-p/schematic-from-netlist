@@ -64,14 +64,6 @@ class RoutingContext:
 
 
 @dataclass
-class Topology:
-    net: Net
-    junctions: List[Junction] = field(default_factory=list)
-    metrics: Metrics = field(default_factory=Metrics)
-    context: RoutingContext = field(default_factory=RoutingContext)
-
-
-@dataclass
 class Junction:
     name: str
     location: Point
@@ -80,3 +72,11 @@ class Junction:
 
     def __hash__(self):
         return hash((self.name, self.location))
+
+@dataclass
+class Topology:
+    net: Net
+    junctions: List[Junction] = field(default_factory=list)
+    metrics: Metrics = field(default_factory=Metrics)
+    context: RoutingContext = field(default_factory=RoutingContext)
+

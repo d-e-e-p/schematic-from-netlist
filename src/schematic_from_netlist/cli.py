@@ -7,7 +7,6 @@ import colorlog
 from schematic_from_netlist.global_router.global_router import GlobalRouter
 from schematic_from_netlist.graph.gen_sch_data import GenSchematicData
 from schematic_from_netlist.graph.group_maker import SteinerGroupMaker
-from schematic_from_netlist.graph.layout_optimizer import LayoutOptimizer
 from schematic_from_netlist.interfaces.graphviz import Graphviz
 from schematic_from_netlist.interfaces.ltspice_writer import LTSpiceWriter
 from schematic_from_netlist.interfaces.verilog_parser import VerilogParser

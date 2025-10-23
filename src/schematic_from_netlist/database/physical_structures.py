@@ -1,11 +1,12 @@
+from __future__ import annotations
+
 import logging as log
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set, Tuple
-
-if TYPE_CHECKING:
-    from schematic_from_netlist.database.netlist_structures import Design  # type hints only
+from typing import Callable, Dict, List, Optional, Set, Tuple
 
 from shapely.geometry import LineString, MultiLineString, Point, Polygon, box
+
+from schematic_from_netlist.database.netlist_structures import Design  # type hints only
 
 # TODO: scaling from gv should depend on pin-to-pin or wire-to-wire spacing
 scaling_from_gv_to_dr = 0.24  # from graphviz to LTspice, about 72/0.24 = 300dpi
@@ -120,6 +121,7 @@ class NetPhysical:
     shape: List[Tuple[Tuple[int, int], Tuple[int, int]]] = field(default_factory=list)
     geom: Optional[MultiLineString] = None
     buffer_patch_points: List[Tuple[Tuple[int, int], Tuple[int, int]]] = field(default_factory=list)
+    topo: Optional["Topology"] = None
 
     def fig2shape(self):
         if not self.fig:
