@@ -751,6 +751,7 @@ class GlobalRouter:
 
             # 2. Test out the topo cost for all combinations of positions
             junctions_to_optimize = topology.junctions
+            num_junctions = len(junctions_to_optimize)
             location_lists = [junction_candidate_locations[j] for j in junctions_to_optimize]
             original_locations = {j: j.location for j in junctions_to_optimize}
 
@@ -759,33 +760,75 @@ class GlobalRouter:
             cost_reduced_this_iter = False
             proposed_moves = {}
 
-            num_combinations = np.prod([len(l) for l in location_lists]) if location_lists else 0
-            if num_combinations > 100_000:
-                log.warning(
-                    f"For net {topology.net.name}, skipping combinatorial optimization in jump phase due to too many combinations: {num_combinations}"
-                )
-            else:
+            if num_junctions <= 4:
+                num_combinations = np.prod([len(l) for l in location_lists]) if location_lists else 0
+                if num_combinations > 100_000:
+                    log.warning(
+                        f"For net {topology.net.name}, skipping combinatorial optimization in jump phase due to too many combinations: {num_combinations}"
+                    )
+                else:
+                    min_cost_for_loc: Dict[Tuple[Junction, Tuple[int, int]], float] = defaultdict(lambda: float("inf"))
+
+                    for location_combination in itertools.product(*location_lists):
+                        current_combination = {j: loc for j, loc in zip(junctions_to_optimize, location_combination)}
+                        # Apply new locations
+                        for junction, new_loc in current_combination.items():
+                            junction.location = new_loc
+
+                        current_cost = self._cost_calculator.calculate_total_cost(topology, context)
+
+                        if current_cost < min_cost:
+                            min_cost = current_cost
+                            best_combination = current_combination
+
+                        # For heatmap data
+                        for junction, new_loc in current_combination.items():
+                            loc_tuple = (int(round(new_loc.x)), int(round(new_loc.y)))
+                            if current_cost < min_cost_for_loc[(junction, loc_tuple)]:
+                                min_cost_for_loc[(junction, loc_tuple)] = current_cost
+
+                    # After iterating through combinations, populate all_tried_locations
+                    for (junction, loc_tuple), cost in min_cost_for_loc.items():
+                        all_tried_locations[junction][loc_tuple] = cost
+            else:  # num_junctions > 4, optimize one at a time
                 min_cost_for_loc: Dict[Tuple[Junction, Tuple[int, int]], float] = defaultdict(lambda: float("inf"))
+                new_best_combination = {}
+                for j_to_opt in junctions_to_optimize:
+                    # Restore all other junctions to original locations for a clean test
+                    for j, loc in original_locations.items():
+                        if j != j_to_opt:
+                            j.location = loc
 
-                for location_combination in itertools.product(*location_lists):
-                    current_combination = {j: loc for j, loc in zip(junctions_to_optimize, location_combination)}
-                    # Apply new locations
-                    for junction, new_loc in current_combination.items():
-                        junction.location = new_loc
+                    best_loc_for_j = original_locations[j_to_opt]
+                    # Set all junctions to original locations to get baseline cost for this sub-problem
+                    for j, loc in original_locations.items():
+                        j.location = loc
+                    min_cost_for_j = self._cost_calculator.calculate_total_cost(topology, context)
 
-                    current_cost = self._cost_calculator.calculate_total_cost(topology, context)
+                    for new_loc in junction_candidate_locations[j_to_opt]:
+                        j_to_opt.location = new_loc
+                        current_cost = self._cost_calculator.calculate_total_cost(topology, context)
 
-                    if current_cost < min_cost:
-                        min_cost = current_cost
-                        best_combination = current_combination
-
-                    # For heatmap data
-                    for junction, new_loc in current_combination.items():
                         loc_tuple = (int(round(new_loc.x)), int(round(new_loc.y)))
-                        if current_cost < min_cost_for_loc[(junction, loc_tuple)]:
-                            min_cost_for_loc[(junction, loc_tuple)] = current_cost
+                        if current_cost < min_cost_for_loc[(j_to_opt, loc_tuple)]:
+                            min_cost_for_loc[(j_to_opt, loc_tuple)] = current_cost
 
-                # After iterating through combinations, populate all_tried_locations
+                        if current_cost < min_cost_for_j:
+                            min_cost_for_j = current_cost
+                            best_loc_for_j = new_loc
+
+                    new_best_combination[j_to_opt] = best_loc_for_j
+
+                # Check if this new combination is better than original
+                for j, loc in new_best_combination.items():
+                    j.location = loc
+
+                final_cost = self._cost_calculator.calculate_total_cost(topology, context)
+                if final_cost < min_cost:
+                    min_cost = final_cost
+                    best_combination = new_best_combination
+
+                # After iterating, populate all_tried_locations
                 for (junction, loc_tuple), cost in min_cost_for_loc.items():
                     all_tried_locations[junction][loc_tuple] = cost
 
