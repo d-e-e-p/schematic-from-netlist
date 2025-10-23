@@ -59,8 +59,8 @@ class RoutingContext:
     h_tracks: Dict[int, List[Tuple[int, int]]] = field(default_factory=dict)
     v_tracks: Dict[int, List[Tuple[int, int]]] = field(default_factory=dict)
     pin_macros: Dict[Pin, Polygon] = field(default_factory=dict)
-    module: Module = field(default_factory=Module)
-    net: Net = field(default_factory=Net)
+    module: Optional[Module] = None
+    net: Optional[Net] = None
 
 
 @dataclass
