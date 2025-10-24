@@ -10,7 +10,8 @@ if TYPE_CHECKING:
     from schematic_from_netlist.database.netlist_structures import Design  # type hints only
 
 # TODO: scaling from gv should depend on pin-to-pin or wire-to-wire spacing
-scaling_from_gv_to_dr = 0.24  # from graphviz to LTspice, about 72/0.24 = 300dpi
+# scaling_from_gv_to_dr = 0.24  # from graphviz to LTspice, about 72/0.24 = 300dpi
+scaling_from_gv_to_dr = 1.0 / 6.0  # from graphviz to LTspice, for 36 gv -> 6 units dr
 scaling_from_dr_to_ltspice = 1.0  # from dr to LTspice,
 
 # fig   : extracted from graphviz
@@ -185,6 +186,7 @@ class NetPhysical:
 @dataclass
 class InstancePhysical(RectanglePhysical):
     rank: int = -1
+    orient: str = "R0"
 
 
 # -----------------------------

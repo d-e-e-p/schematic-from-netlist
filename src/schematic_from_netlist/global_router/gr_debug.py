@@ -55,7 +55,7 @@ class RouterDebugger:
         headers = ["Module", "Net", "Connections", "Junctions", "Children"]
         log.info("Junction Insertion Summary:\n" + tabulate(summary, headers=headers, tablefmt="pipe"))
 
-    def plot_junction_summary(self, module: Module, stage: str = "", title: str = ""):
+    def plot_junction_summary(self, module: Module, stage: int = 0, title: str = ""):
         """
         Generate per-module schematic overview plots showing macros, pins, junctions, and existing net geometries.
         """

@@ -18,6 +18,9 @@ class LayoutOptimizer:
     def __init__(self, db):
         self.db = db
 
+    def optimize_component_placement(self, inst):
+        self.adjust_location(inst)
+
     def _calculate_best_orientation(self, old_pins, macro_pins_local, centroid):
         orientations = {"R0": 0, "R90": 90, "R180": 180, "R270": 270}
         min_dist = float("inf")
@@ -47,7 +50,7 @@ class LayoutOptimizer:
         Place and orient a new macro shape to minimize distance to existing pins.
         """
         log.info(f"Optimizing instance {inst.name}")
-        log.info(f"  Initial geom: {inst.draw.geom}, orient: {inst.draw.geom.orient}")
+        log.info(f"  Initial geom: {inst.draw.geom}, orient: {inst.draw.orient}")
         for name, pin in inst.pins.items():
             log.info(f"  Pin {name}: {pin.draw.geom}")
 
@@ -86,7 +89,7 @@ class LayoutOptimizer:
         inst.draw.geom = new_geom
         inst.orient = best_orient
 
-        new_pin.draw.geoms = [
+        new_pin_draw_geoms = [
             Point(
                 final_translation_x + best_rotated_pins_local[best_pin_map[0]].x,
                 final_translation_y + best_rotated_pins_local[best_pin_map[0]].y,
@@ -99,23 +102,23 @@ class LayoutOptimizer:
 
         for i, pin_name in enumerate(pin_names):
             pin = inst.pins[pin_name]
-            old_pin.draw.geom = old_pins[i]
-            new_pin.draw.geom = new_pin.draw.geoms[i]
+            old_pin_draw_geom = old_pins[i]
+            new_pin_draw_geom = new_pin_draw_geoms[i]
 
             if pin.net:
                 log.info(
-                    f"  Net {pin.net.name} updated: {pin.net.draw.geom} with new_segment={LineString([old_pin.draw.geom, new_pin.draw.geom])}"
+                    f"  Net {pin.net.name} updated: {pin.net.draw.geom} with new_segment={LineString([old_pin_draw_geom, new_pin_draw_geom])}"
                 )
-                new_segment = LineString([old_pin.draw.geom, new_pin.draw.geom])
+                new_segment = LineString([old_pin_draw_geom, new_pin_draw_geom])
                 if pin.net.draw.geom and hasattr(pin.net.draw.geom, "geoms"):
                     existing_lines = list(pin.net.draw.geom.geoms)
                 else:
                     existing_lines = []
                 pin.net.draw.geom = MultiLineString(existing_lines + [new_segment])
 
-            pin.draw.geom = new_pin.draw.geom
+            pin.draw.geom = new_pin_draw_geom
 
-        log.info(f"  Final geom: {inst.draw.geom}, orient: {inst.orient}")
+        log.info(f"  Final geom: {inst.draw.geom}, orient: {inst.draw.orient}")
         for name, pin in inst.pins.items():
             log.info(f"  Pin {name}: {pin.draw.geom}")
 
