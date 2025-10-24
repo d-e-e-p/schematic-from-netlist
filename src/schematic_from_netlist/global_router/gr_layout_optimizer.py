@@ -7,9 +7,12 @@ import networkx as nx
 import shapely
 from matplotlib import pyplot as plt
 from rtree import index
+from scipy.optimize import linear_sum_assignment
 from shapely.affinity import rotate, translate
 from shapely.geometry import LineString, MultiLineString, Point, box
 from shapely.ops import linemerge, unary_union
+
+from schematic_from_netlist.interfaces.symbol_library import SymbolLibrary
 
 log.getLogger("matplotlib").setLevel(log.WARNING)
 
@@ -17,6 +20,7 @@ log.getLogger("matplotlib").setLevel(log.WARNING)
 class LayoutOptimizer:
     def __init__(self, db):
         self.db = db
+        self.symbol_outlines = SymbolLibrary().get_symbol_outlines()
 
     def optimize_component_placement(self, inst):
         self.adjust_location(inst)
@@ -29,98 +33,119 @@ class LayoutOptimizer:
         best_rotated_pins_local = None
 
         for orient_name, angle in orientations.items():
-            rotated_new_pins_local = [rotate(p, angle, origin="center") for p in macro_pins_local]
-            new_pins_global_centered = [Point(centroid.x + p.x, centroid.y + p.y) for p in rotated_new_pins_local]
+            #  Rotate macro local pins about centroid
+            rotated_global = [rotate(p, angle, origin=(centroid.x, centroid.y), use_radians=False) for p in macro_pins_local]
 
-            dist1 = old_pins[0].distance(new_pins_global_centered[0]) + old_pins[1].distance(new_pins_global_centered[1])
-            dist2 = old_pins[0].distance(new_pins_global_centered[1]) + old_pins[1].distance(new_pins_global_centered[0])
+            #  Build assignment cost matrix
+            cost_matrix = [[op.distance(rp) for rp in rotated_global] for op in old_pins]
 
-            current_dist, current_pin_map = (dist1, {0: 0, 1: 1}) if dist1 < dist2 else (dist2, {0: 1, 1: 0})
+            #  Hungarian algorithm to find optimal mapping
+            row_ind, col_ind = linear_sum_assignment(cost_matrix)
+            pin_map = {int(i): int(j) for i, j in zip(row_ind, col_ind)}
+            total_dist = sum(cost_matrix[i][j] for i, j in pin_map.items())
 
-            if current_dist < min_dist:
-                min_dist = current_dist
+            log.info(f"{orient_name}: angle={angle}, total_dist={total_dist:.2f}, pin_map={pin_map}")
+
+            if total_dist < min_dist:
+                min_dist = total_dist
                 best_orient = orient_name
-                best_pin_map = current_pin_map
-                best_rotated_pins_local = rotated_new_pins_local
+                best_pin_map = pin_map
+                best_rotated_pins_local = [rotated_global[j] for _, j in sorted(pin_map.items())]
 
+        log.info(f"Best orientation: {best_orient} with distance={min_dist:.2f}, pin_map={best_pin_map}")
         return best_orient, best_pin_map, best_rotated_pins_local
+
+    def _get_local_pin_positions(self, inst):
+        """Convert each global pin position into macro-local coordinates relative to macro center."""
+        macro_center = inst.draw.geom.centroid
+        locals = []
+        for pin in inst.pins.values():
+            gp = pin.draw.geom
+            locals.append(Point(gp.x - macro_center.x, gp.y - macro_center.y))
+        return locals
+
+    def _apply_orientation(self, geom, angle, origin):
+        """Rotate geom around macro center."""
+        return rotate(geom, angle, origin=origin)
+
+    def _translate_macro(self, geom, dx, dy):
+        """Apply a rigid translation to entire geometry."""
+        return translate(geom, xoff=dx, yoff=dy)
+
+    def _orient_to_angle(self, orient):
+        """Convert R90 etc. into a numeric rotation angle."""
+        return {"R0": 0, "R90": 90, "R180": 180, "R270": 270}[orient]
 
     def adjust_location(self, inst):
         """
-        Place and orient a new macro shape to minimize distance to existing pins.
+        Orient and translate a macro to minimize distance
+        between old + new pin positions.
         """
-        log.info(f"Optimizing instance {inst.name}")
-        log.info(f"  Initial geom: {inst.draw.geom}, orient: {inst.draw.orient}")
-        for name, pin in inst.pins.items():
-            log.info(f"  Pin {name}: {pin.draw.geom}")
 
-        old_geom = inst.draw.geom
+        log.info(f"Optimizing instance {inst.name}")
+
+        macro_geom = inst.draw.geom
+        macro_center = macro_geom.centroid
+
+        # Original global pin positions
         old_pins = [p.draw.geom for p in inst.pins.values()]
         pin_names = list(inst.pins.keys())
-        centroid = old_geom.centroid
 
-        macro_box = box(-1, -3, 1, 3)
-        macro_pins_local = [Point(0, 3), Point(0, -3)]
+        log.info(f"{self.symbol_outlines=}")
+        breakpoint()
 
-        best_orient, best_pin_map, best_rotated_pins_local = self._calculate_best_orientation(old_pins, macro_pins_local, centroid)
+        # Convert pins to macro-local space (before rotation)
+        macro_pins_local = self._get_local_pin_positions(inst)
 
-        p1_geom, p2_geom = old_pins[0], old_pins[1]
-        np_local1 = best_rotated_pins_local[best_pin_map[0]]
-        np_local2 = best_rotated_pins_local[best_pin_map[1]]
+        # Best orientation selection
+        best_orient, best_pin_map, rotated_local = self._calculate_best_orientation(old_pins, macro_pins_local, macro_center)
 
-        npgc1 = Point(centroid.x + np_local1.x, centroid.y + np_local1.y)
-        npgc2 = Point(centroid.x + np_local2.x, centroid.y + np_local2.y)
-
-        dx, dy = 0, 0
-        if best_orient in ["R0", "R180"]:
-            dy = (p1_geom.y + p2_geom.y - (npgc1.y + npgc2.y)) / 2
-            dy = max(-1.5, min(1.5, dy))
-        else:  # R90, R270
-            dx = (p1_geom.x + p2_geom.x - (npgc1.x + npgc2.x)) / 2
-            dx = max(-1.5, min(1.5, dx))
-
-        final_translation_x = round(centroid.x + dx)
-        final_translation_y = round(centroid.y + dy)
-
-        orientations = {"R0": 0, "R90": 90, "R180": 180, "R270": 270}
-        angle = orientations[best_orient]
-        new_geom = translate(rotate(macro_box, angle, origin="center"), xoff=final_translation_x, yoff=final_translation_y)
-
-        inst.draw.geom = new_geom
+        angle = self._orient_to_angle(best_orient)
         inst.orient = best_orient
 
-        new_pin_draw_geoms = [
-            Point(
-                final_translation_x + best_rotated_pins_local[best_pin_map[0]].x,
-                final_translation_y + best_rotated_pins_local[best_pin_map[0]].y,
-            ),
-            Point(
-                final_translation_x + best_rotated_pins_local[best_pin_map[1]].x,
-                final_translation_y + best_rotated_pins_local[best_pin_map[1]].y,
-            ),
-        ]
+        # Match using first pin in mapping
+        i0 = 0
+        target_pin_old = old_pins[i0]
+        new_pin_local = rotated_local[best_pin_map[i0]]
 
+        # Compute translation offset
+        dx = target_pin_old.x - new_pin_local.x
+        dy = target_pin_old.y - new_pin_local.y
+
+        # Rotate entire macro shape around center
+        rotated_geom = self._apply_orientation(macro_geom, angle, macro_center)
+
+        # Translate macro shape in world space
+        translated_geom = self._translate_macro(
+            rotated_geom,
+            dx - macro_center.x,
+            dy - macro_center.y,
+        )
+
+        inst.draw.geom = translated_geom
+
+        # Update pins + routing
         for i, pin_name in enumerate(pin_names):
             pin = inst.pins[pin_name]
-            old_pin_draw_geom = old_pins[i]
-            new_pin_draw_geom = new_pin_draw_geoms[i]
 
+            old_pin = old_pins[i]
+            new_local = rotated_local[best_pin_map[i]]
+            new_pin = Point(new_local.x + dx, new_local.y + dy)
+
+            # Update routes if net exists
             if pin.net:
-                log.info(
-                    f"  Net {pin.net.name} updated: {pin.net.draw.geom} with new_segment={LineString([old_pin_draw_geom, new_pin_draw_geom])}"
-                )
-                new_segment = LineString([old_pin_draw_geom, new_pin_draw_geom])
+                new_segment = LineString([old_pin, new_pin])
                 if pin.net.draw.geom and hasattr(pin.net.draw.geom, "geoms"):
-                    existing_lines = list(pin.net.draw.geom.geoms)
+                    existing = list(pin.net.draw.geom.geoms)
                 else:
-                    existing_lines = []
-                pin.net.draw.geom = MultiLineString(existing_lines + [new_segment])
+                    existing = []
+                pin.net.draw.geom = MultiLineString(existing + [new_segment])
 
-            pin.draw.geom = new_pin_draw_geom
+            pin.draw.geom = new_pin
 
-        log.info(f"  Final geom: {inst.draw.geom}, orient: {inst.draw.orient}")
-        for name, pin in inst.pins.items():
-            log.info(f"  Pin {name}: {pin.draw.geom}")
+        log.info(f"Final inst {inst.name}: {inst.draw.geom}, orient: {inst.draw.orient}")
+        for pin_name, pin in inst.pins.items():
+            log.info("  Pin: {pin.name}: {pin.draw.geom}")
 
     def _plot_net_geom(self, net, geom, stage, old_geom=None, all_macros=None):
         fig, ax = plt.subplots()
