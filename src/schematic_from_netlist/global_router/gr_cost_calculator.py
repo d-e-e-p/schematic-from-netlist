@@ -121,6 +121,7 @@ class CostCalculator:
         topology: Topology,
         debug_plot: bool = False,
         plot_filename_prefix: str | None = None,
+        update_geom_cache: bool = False,
     ):
         """
         Calculates the total cost of a given topology and can optionally generate a debug plot.
@@ -141,6 +142,8 @@ class CostCalculator:
                 all_nodes.add(child)
 
         processed_edges = set()
+        junction_geoms_map: Dict[Junction, List[LineString]] = defaultdict(list)
+        topology_geoms: List[LineString] = []
         for u in all_nodes:
             if u not in adj:
                 continue
@@ -167,6 +170,14 @@ class CostCalculator:
 
                 if not candidate_paths:
                     path = LineString([p1, p2])
+                    if update_geom_cache:
+                        if not topology.junctions:
+                            topology_geoms.append(path)
+                        else:
+                            if isinstance(u, Junction):
+                                junction_geoms_map[u].append(path)
+                            if isinstance(v, Junction):
+                                junction_geoms_map[v].append(path)
                     metrics, new_crossings = self.calculate_path_cost(
                         path,
                         context,
@@ -195,12 +206,34 @@ class CostCalculator:
                         best_metrics = metrics
                         best_crossings = crossings
 
+                if best_path and update_geom_cache:
+                    if not topology.junctions:
+                        topology_geoms.append(best_path)
+                    else:
+                        if isinstance(u, Junction):
+                            junction_geoms_map[u].append(best_path)
+                        if isinstance(v, Junction):
+                            junction_geoms_map[v].append(best_path)
+
                 if best_metrics:
                     total_cost += best_metrics.total_cost
                 if debug_plot and best_path and best_metrics:
                     paths_with_metrics.append((best_path, best_metrics))
                     crossing_points.extend(best_crossings)
                     i += 1
+
+        if update_geom_cache:
+            if topology.junctions:
+                for j in topology.junctions:
+                    paths = junction_geoms_map.get(j)
+                    if paths:
+                        j.geom = MultiLineString(list({id(p): p for p in paths}.values()))
+                    else:
+                        j.geom = None
+            elif topology_geoms:
+                topology.geom = MultiLineString(list({id(p): p for p in topology_geoms}.values()))
+            else:
+                topology.geom = None
 
         if debug_plot:
             self._debugger.plot_cost_calculation(

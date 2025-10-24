@@ -79,4 +79,5 @@ class Topology:
     junctions: List[Junction] = field(default_factory=list)
     metrics: Metrics = field(default_factory=Metrics)
     context: RoutingContext = field(default_factory=RoutingContext)
+    geom: Optional[MultiLineString] = None
 

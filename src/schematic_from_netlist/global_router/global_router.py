@@ -223,8 +223,6 @@ class GlobalRouter:
 
         # Log detailed junction summary
         self._debugger.log_junction_summary(self.junctions)
-        for module in self.junctions:
-            self._debugger.plot_junction_summary(module, stage=stage, title=title)
 
         for module in self.db.design.modules.values():
             self._diagnose_crossings(module)
@@ -376,6 +374,20 @@ class GlobalRouter:
 
     def _rebuild_net_geometry(self, topology: Topology):
         """Rebuilds the net's geometry based on its current topology of junctions and pins."""
+        if not topology.junctions:
+            if topology.geom:
+                union_geom = unary_union(topology.geom)
+                merged_geom = linemerge(union_geom)
+                if isinstance(merged_geom, LineString):
+                    topology.net.draw.geom = MultiLineString([merged_geom])
+                elif isinstance(merged_geom, MultiLineString):
+                    topology.net.draw.geom = merged_geom
+                else:
+                    topology.net.draw.geom = topology.geom
+            else:
+                topology.net.draw.geom = None
+            return
+
         context = topology.context
 
         def rounded_point(pt):
@@ -419,7 +431,6 @@ class GlobalRouter:
                     best_path = cached_paths[cached_end_point_found]
 
                 if best_path is None:
-                    log.info(f"  {junction.geom=} best_path is none so generating path from {start_point} to {end_point}")
                     # If not cached, compute, select best, and cache
                     candidate_paths = generate_candidate_paths(start_point, end_point, context)
 
@@ -696,6 +707,7 @@ class GlobalRouter:
                 topology,
                 debug_plot=True,
                 plot_filename_prefix=f"slide_iter_{i}_",
+                update_geom_cache=True,
             )
 
         else:
@@ -1016,15 +1028,6 @@ class GlobalRouter:
         parent_map: Dict[Junction, Optional[Junction]],
     ):
         """Log and plot results of a jump iteration."""
-        context = topology.context
-        module = context.module
-        log.info(f"calculating cost and dumping to prefix jump_iter_{iteration}_ for module:{module.name} net:{topology.net.name}")
-        self._cost_calculator.calculate_total_cost(
-            topology,
-            debug_plot=True,
-            plot_filename_prefix=f"jump_iter_{iteration}_",
-        )
-
         if cost_reduced:
             for junction, new_location in proposed_moves.items():
                 junction.location = new_location
@@ -1032,6 +1035,16 @@ class GlobalRouter:
                 if parent_map.get(junction):
                     parent_map.get(junction).geom = None
                 log.info(f"  Jumped junction {junction.name} to {new_location}")
+
+        log.info(
+            f"calculating cost and dumping to prefix jump_iter_{iteration}_ for module:{topology.context.module.name} net:{topology.net.name}"
+        )
+        self._cost_calculator.calculate_total_cost(
+            topology,
+            debug_plot=True,
+            plot_filename_prefix=f"jump_iter_{iteration}_",
+            update_geom_cache=True,
+        )
 
     def _finalize_routes_and_pin_locations(
         self,
