@@ -288,17 +288,17 @@ class RouterDebugger:
 
     def _plot_junction_move_heatmap(
         self,
-        module: Module,
         topology: Topology,
         moved_junction: Junction,
         tried_locations_costs: Dict[Tuple[int, int], float],
         best_location: Point,
         min_cost: float,
-        macros: BaseGeometry,
-        halos: BaseGeometry,
         filename_prefix: str,
     ):
         """Generate a heatmap of junction move costs."""
+        module = topology.context.module
+        macros = topology.context.macros
+        halos = topology.context.halos
         out_dir = "data/images/heatmaps"
         os.makedirs(out_dir, exist_ok=True)
 

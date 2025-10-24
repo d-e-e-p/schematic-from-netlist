@@ -595,7 +595,6 @@ class LayoutOptimizer:
         for inst in self.db.top_module.get_all_instances().values():
             if len(inst.pins) == 2:
                 self.adjust_location(inst)
-        breakpoint()
         self.beautify_routes()
 
         # Decompose the final, beautiful routes into simple segments for the writer

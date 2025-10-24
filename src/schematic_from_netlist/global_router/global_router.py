@@ -167,7 +167,6 @@ class GlobalRouter:
                         self._rebuild_net_geometry(topo)
 
             self._debugger.plot_junction_summary(module, stage=stage, title=title)
-            breakpoint()
             # --- STAGE
             stage += 1
             title = "Optimizing RLC component placement"
@@ -420,6 +419,7 @@ class GlobalRouter:
                     best_path = cached_paths[cached_end_point_found]
 
                 if best_path is None:
+                    log.info(f"  {junction.geom=} best_path is none so generating path from {start_point} to {end_point}")
                     # If not cached, compute, select best, and cache
                     candidate_paths = generate_candidate_paths(start_point, end_point, context)
 
@@ -606,7 +606,6 @@ class GlobalRouter:
                 context.net = topology.net
                 min_cost = self._cost_calculator.calculate_total_cost(
                     topology,
-                    context,
                 )
                 best_location = initial_location
                 tried_locations_costs = {(int(round(initial_location.x)), int(round(initial_location.y))): min_cost}
@@ -651,11 +650,10 @@ class GlobalRouter:
                         junction.location = new_location
                         current_cost = self._cost_calculator.calculate_total_cost(
                             topology,
-                            context,
                         )
                         if topology.net.name == "n6":  # pyright: ignore
                             current_cost = self._cost_calculator.calculate_total_cost(
-                                topology, context, True, f"debug_{topology.net.name}_{j_idx}_iter_{i}_{int(current_cost)}_"
+                                topology, True, f"debug_{topology.net.name}_{j_idx}_iter_{i}_{int(current_cost)}_"
                             )
 
                         # Add junction spacing penalty
@@ -696,7 +694,6 @@ class GlobalRouter:
             log.info(f"calculating cost and dumping to prefix slide_iter_{i}_ for module:{module.name} net:{topology.net.name}")
             self._cost_calculator.calculate_total_cost(
                 topology,
-                context,
                 debug_plot=True,
                 plot_filename_prefix=f"slide_iter_{i}_",
             )
@@ -711,14 +708,11 @@ class GlobalRouter:
                 best_location = Point(best_loc_tuple)
                 min_cost = tried_locations[best_loc_tuple]
                 self._debugger._plot_junction_move_heatmap(
-                    module,
                     topology,
                     junction,
                     tried_locations,
                     best_location,
                     min_cost,
-                    macros,
-                    halos,
                     filename_prefix="slide_summary_",
                 )
 
@@ -786,7 +780,7 @@ class GlobalRouter:
             location_lists = [junction_candidate_locations[j] for j in junctions_to_optimize]
             original_locations = {j: j.location for j in junctions_to_optimize}
 
-            min_cost = self._cost_calculator.calculate_total_cost(topology, context)
+            min_cost = self._cost_calculator.calculate_total_cost(topology)
             best_combination = original_locations.copy()
             cost_reduced_this_iter = False
             proposed_moves = {}
@@ -806,7 +800,7 @@ class GlobalRouter:
                         for junction, new_loc in current_combination.items():
                             junction.location = new_loc
 
-                        current_cost = self._cost_calculator.calculate_total_cost(topology, context)
+                        current_cost = self._cost_calculator.calculate_total_cost(topology)
 
                         if current_cost < min_cost:
                             min_cost = current_cost
@@ -834,11 +828,11 @@ class GlobalRouter:
                     # Set all junctions to original locations to get baseline cost for this sub-problem
                     for j, loc in original_locations.items():
                         j.location = loc
-                    min_cost_for_j = self._cost_calculator.calculate_total_cost(topology, context)
+                    min_cost_for_j = self._cost_calculator.calculate_total_cost(topology)
 
                     for new_loc in junction_candidate_locations[j_to_opt]:
                         j_to_opt.location = new_loc
-                        current_cost = self._cost_calculator.calculate_total_cost(topology, context)
+                        current_cost = self._cost_calculator.calculate_total_cost(topology)
 
                         loc_tuple = (int(round(new_loc.x)), int(round(new_loc.y)))
                         if current_cost < min_cost_for_loc[(j_to_opt, loc_tuple)]:
@@ -854,7 +848,7 @@ class GlobalRouter:
                 for j, loc in new_best_combination.items():
                     j.location = loc
 
-                final_cost = self._cost_calculator.calculate_total_cost(topology, context)
+                final_cost = self._cost_calculator.calculate_total_cost(topology)
                 if final_cost < min_cost:
                     min_cost = final_cost
                     best_combination = new_best_combination
@@ -873,7 +867,7 @@ class GlobalRouter:
                     proposed_moves[junction] = best_loc
                     cost_reduced_this_iter = True
 
-            self._log_jump_iteration_results(i, topology, context, module, cost_reduced_this_iter, proposed_moves, parent_map)
+            self._log_jump_iteration_results(i, topology, cost_reduced_this_iter, proposed_moves, parent_map)
 
             if not cost_reduced_this_iter:
                 break
@@ -887,14 +881,11 @@ class GlobalRouter:
                 best_location = Point(best_loc_tuple)
                 min_cost = tried_locations[best_loc_tuple]
                 self._debugger._plot_junction_move_heatmap(
-                    topology.context.module,
                     topology,
                     junction,
                     tried_locations,
                     best_location,
                     min_cost,
-                    topology.context.macros,
-                    topology.context.halos,
                     filename_prefix="jump_summary_",
                 )
 
@@ -1020,17 +1011,16 @@ class GlobalRouter:
         self,
         iteration: int,
         topology: Topology,
-        context: RoutingContext,
-        module: Module,
         cost_reduced: bool,
         proposed_moves: Dict[Junction, Point],
         parent_map: Dict[Junction, Optional[Junction]],
     ):
         """Log and plot results of a jump iteration."""
+        context = topology.context
+        module = context.module
         log.info(f"calculating cost and dumping to prefix jump_iter_{iteration}_ for module:{module.name} net:{topology.net.name}")
         self._cost_calculator.calculate_total_cost(
             topology,
-            context,
             debug_plot=True,
             plot_filename_prefix=f"jump_iter_{iteration}_",
         )

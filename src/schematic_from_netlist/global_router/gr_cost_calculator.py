@@ -119,13 +119,13 @@ class CostCalculator:
     def calculate_total_cost(
         self,
         topology: Topology,
-        context: RoutingContext,
         debug_plot: bool = False,
         plot_filename_prefix: str | None = None,
     ):
         """
         Calculates the total cost of a given topology and can optionally generate a debug plot.
         """
+        context = topology.context
         total_cost = 0.0
         paths_with_metrics = []
         crossing_points = []
@@ -203,7 +203,9 @@ class CostCalculator:
                     i += 1
 
         if debug_plot:
-            self._debugger.plot_cost_calculation(topology, paths_with_metrics, crossing_points, context, plot_filename_prefix)
+            self._debugger.plot_cost_calculation(
+                topology, paths_with_metrics, crossing_points, context, plot_filename_prefix
+            )
 
         return total_cost
 
