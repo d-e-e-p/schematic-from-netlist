@@ -78,6 +78,7 @@ class LayoutOptimizer:
         # Existing global pin positions
         pin_names = list(inst.pins.keys())
         old_pins = [p.draw.geom for p in inst.pins.values()]
+        old_pins = [pt if pt is not None else old_centroid for pt in old_pins]
 
         # New symbol base shape centered at origin
         macro_box_local = box(-width / 2, -height / 2, width / 2, height / 2)

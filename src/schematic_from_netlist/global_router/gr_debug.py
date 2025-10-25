@@ -138,7 +138,7 @@ class RouterDebugger:
             # Plot junctions
             for junction in topo.junctions:
                 jx, jy = junction.location.x, junction.location.y
-                ax.scatter(jx, jy, c=color, s=80, marker="x")
+                ax.scatter(jx, jy, color=color, s=80, marker="x")
                 ax.text(jx + 0.5, jy + 0.5, junction.name, fontsize=7, color=color)
 
                 # Draw connections to children
@@ -374,7 +374,7 @@ class RouterDebugger:
         ax.legend()
 
         fig.tight_layout()
-        filename = f"{module.name}_{topology.net.name}_{filename_prefix}.png"
+        filename = f"{module.name}_{filename_prefix}.png"
         full_path = os.path.join(out_dir, filename)
         plt.savefig(full_path, dpi=200)
         plt.close(fig)

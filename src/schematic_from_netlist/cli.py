@@ -4,6 +4,7 @@ import os
 
 import colorlog
 
+from schematic_from_netlist.astar_router.astar_router import AstarRouter
 from schematic_from_netlist.global_router.global_router import GlobalRouter
 from schematic_from_netlist.graph.gen_sch_data import GenSchematicData
 from schematic_from_netlist.graph.group_maker import SteinerGroupMaker
@@ -36,7 +37,8 @@ def produce_graph(db):
     """Build Graphviz layouts for groups and top-level interconnect."""
 
     gv = Graphviz(db)
-    router = GlobalRouter(db)
+    gr = GlobalRouter(db)
+    dr = AstarRouter(db)
     # router = AstarRouter(db)
 
     # graphviz -> extract macro and port locations -> remove buffers
@@ -45,9 +47,11 @@ def produce_graph(db):
     gv.generate_layout_figures(phase="initial")
     db.remove_multi_fanout_buffers()
     db.fig2geom()
-    junctions = router.insert_routing_junctions()
-    db.insert_route_guide_buffers(junctions)
-    db.dump_to_table("route_guide_insertion")
+    junctions = gr.insert_routing_junctions()
+    # db.insert_route_guide_buffers(junctions)
+    # db.dump_to_table("route_guide_insertion")
+    dr.reroute()
+
     bypass_phase2 = True
     if bypass_phase2:
         db.remove_multi_fanout_buffers()

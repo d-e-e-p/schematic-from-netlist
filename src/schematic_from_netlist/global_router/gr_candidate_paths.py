@@ -22,28 +22,38 @@ def generate_candidate_paths(p1: Point | None, p2: Point | None, context) -> Lis
 
     initial_paths = generate_lz_paths(p1, p2)
     final_paths = []
-    OFFSET_STEP = 2.0
+    OFFSET_STEP = 5
     MAX_OFFSET_ATTEMPTS = 50
 
     seen = set()
+    log.trace(f"{p1=} -> {p2=}")
 
     for path in initial_paths:
+        log.trace(f"Processing initial path: {path.wkt}")
         if not _check_path_overlap(path, context):
             if path.wkt not in seen:
                 final_paths.append(path)
                 seen.add(path.wkt)
         else:
-            # Path has overlap, try to find a detour
             detour = _find_clear_detour(path, p1, p2, context, OFFSET_STEP, MAX_OFFSET_ATTEMPTS)
-            if detour and not is_orthogonal(detour):
-                log.info(f"Detour is not orthogonal: {detour.wkt}")
-                breakpoint()
-            if detour and detour.wkt not in seen:
-                final_paths.append(detour)
-                seen.add(detour.wkt)
+
+            if detour:
+                if not is_orthogonal(detour):
+                    log.warning(f"Detour not orthogonal: {detour.wkt}")
+
+                if detour.wkt not in seen:
+                    final_paths.append(detour)
+                    seen.add(detour.wkt)
+                    continue  #  ACCEPT success & move to next initial path
+
+                #  This only fires if it was truly a duplicate
+                log.trace(f"Detour for {path.wkt} rejected: duplicate {detour.wkt}")
+            else:
+                #  Only fires on actual failure to find detour
+                log.trace(f"No clear detour found for {path.wkt}")
 
     if not final_paths:
-        log.debug(f"No clear path found for {p1=} {p2=} {initial_paths=} {context.v_tracks=} {context.h_tracks=}")
+        log.trace(f"No clear path found for {p1=} {p2=} {initial_paths=} {context.v_tracks=} {context.h_tracks=}")
     return final_paths
 
 
@@ -126,6 +136,60 @@ def get_l_path_corner(path: LineString) -> Point:
     return Point(path.coords[1])
 
 
+def old_check_segment_overlap(p1: Point, p2: Point, context) -> bool:
+    """
+    Check if a segment overlaps existing tracks meaningfully (>= MIN_CLEARANCE).
+    Single-point touching or crossing endpoints is allowed.
+    """
+    MIN_CLEARANCE = -25  # >1 cell overlap required to be considered a conflict
+    segment = LineString([p1, p2])
+    tolerance = 1e-9
+
+    # Check if segment sits on a macro pin
+    if segment_on_occupied_macro_pin(segment, context.pin_macros, context.h_tracks, context.v_tracks):
+        return True
+
+    # Horizontal segment
+    if abs(p1.y - p2.y) < tolerance:
+        y = int(round(p1.y))
+        seg_x1, seg_x2 = sorted((int(round(p1.x)), int(round(p2.x))))
+
+        for track_y, tracks in context.h_tracks.items():
+            if y != track_y:
+                continue
+
+            for track_x1, track_x2 in tracks:
+                overlap_length = min(seg_x2, track_x2) - max(seg_x1, track_x1)
+                if overlap_length <= MIN_CLEARANCE:
+                    log.trace(
+                        f"H Overlap length: {overlap_length} > {MIN_CLEARANCE} for {track_x1=}, {track_x2=}, {seg_x1=}, {seg_x2=}"
+                    )
+                    return True
+
+        return False
+
+    # Vertical segment
+    if abs(p1.x - p2.x) < tolerance:
+        x = int(round(p1.x))
+        seg_y1, seg_y2 = sorted((int(round(p1.y)), int(round(p2.y))))
+
+        for track_x, tracks in context.v_tracks.items():
+            if x != track_x:
+                continue
+
+            for track_y1, track_y2 in tracks:
+                overlap_length = min(seg_y2, track_y2) - max(seg_y1, track_y1)
+                if overlap_length <= MIN_CLEARANCE:
+                    log.trace(
+                        f"V Overlap length: {overlap_length} > {MIN_CLEARANCE} for {track_y1=}, {track_y2=}, {seg_y1=}, {seg_y2=}"
+                    )
+                    return True
+
+        return False
+
+    return False
+
+
 def _check_segment_overlap(p1: Point, p2: Point, context) -> bool:
     """
     Check if a segment overlaps with existing tracks by more than 1 unit.
@@ -150,7 +214,9 @@ def _check_segment_overlap(p1: Point, p2: Point, context) -> bool:
                     # Calculate overlap length and check if it's > 1
                     overlap_length = min(seg_x2, track_x2) - max(seg_x1, track_x1)
                     if overlap_length > 1:
-                        # log.info(f"H-Overlap: {segment.wkt} overlaps {tracks} at y={y}")
+                        log.trace(
+                            f"H-Overlap on segment {segment.wkt} with track at y={y} between x={track_x1}-{track_x2}. Overlap length: {overlap_length}"
+                        )
                         return True
         # No overlap > 1 found
         return False
@@ -169,7 +235,9 @@ def _check_segment_overlap(p1: Point, p2: Point, context) -> bool:
                     # Calculate overlap length and check if it's > 1
                     overlap_length = min(seg_y2, track_y2) - max(seg_y1, track_y1)
                     if overlap_length > 1:
-                        # log.info(f"V-Overlap: {segment.wkt} overlaps {tracks} at x={x}")
+                        log.trace(
+                            f"V-Overlap on segment {segment.wkt} with track at x={x} between y={track_y1}-{track_y2}. Overlap length: {overlap_length}"
+                        )
                         return True
         # No overlap > 1 found
         return False
@@ -178,22 +246,261 @@ def _check_segment_overlap(p1: Point, p2: Point, context) -> bool:
 
 
 def _check_path_overlap(path: LineString, context) -> bool:
+    """
+    Check if a path overlaps with existing tracks in the context.
+    Returns True if there's an overlap, False otherwise.
+    """
+    log.trace(f"  → Checking overlap for: {path.wkt}")
+
+    # Get all segments from the path
+    coords = list(path.coords)
+    log.trace(f"     Path has {len(coords)} coordinates")
+
+    for i in range(len(coords) - 1):
+        p1 = Point(coords[i])
+        p2 = Point(coords[i + 1])
+
+        log.trace(f"     Segment {i}: {p1.wkt} → {p2.wkt}")
+
+        # Check if segment is vertical
+        if abs(p1.x - p2.x) < 1e-9:
+            x = int(round(p1.x))
+            y_min = int(round(min(p1.y, p2.y)))
+            y_max = int(round(max(p1.y, p2.y)))
+
+            log.trace(f"       Vertical segment at x={x}, y_range=[{y_min}, {y_max}]")
+
+            if x in context.v_tracks:
+                log.trace(f"       Found v_tracks at x={x}: {context.v_tracks[x]}")
+                for track_y_min, track_y_max in context.v_tracks[x]:
+                    log.trace(f"         Checking against track y_range=[{track_y_min}, {track_y_max}]")
+
+                    # Check for overlap
+                    if not (y_max < track_y_min or y_min > track_y_max):
+                        log.trace(f"         ✗ OVERLAP DETECTED!")
+                        log.trace(f"         Segment [{y_min}, {y_max}] overlaps with track [{track_y_min}, {track_y_max}]")
+                        log.trace(f"  Path {path.wkt} has overlap.")
+                        return True
+                    else:
+                        log.trace(f"         ✓ No overlap with this track")
+            else:
+                log.trace(f"       No v_tracks at x={x}")
+
+        # Check if segment is horizontal
+        elif abs(p1.y - p2.y) < 1e-9:
+            y = int(round(p1.y))
+            x_min = int(round(min(p1.x, p2.x)))
+            x_max = int(round(max(p1.x, p2.x)))
+
+            log.trace(f"       Horizontal segment at y={y}, x_range=[{x_min}, {x_max}]")
+
+            if y in context.h_tracks:
+                log.trace(f"       Found h_tracks at y={y}: {context.h_tracks[y]}")
+                for track_x_min, track_x_max in context.h_tracks[y]:
+                    log.trace(f"         Checking against track x_range=[{track_x_min}, {track_x_max}]")
+
+                    # Check for overlap
+                    if not (x_max < track_x_min or x_min > track_x_max):
+                        log.trace(f"         ✗ OVERLAP DETECTED!")
+                        log.trace(f"         Segment [{x_min}, {x_max}] overlaps with track [{track_x_min}, {track_x_max}]")
+                        log.trace(f"  Path {path.wkt} has overlap.")
+                        return True
+                    else:
+                        log.trace(f"         ✓ No overlap with this track")
+            else:
+                log.trace(f"       No h_tracks at y={y}")
+        else:
+            log.trace(f"       ⚠ Diagonal segment detected! (should not happen)")
+
+    log.trace(f"  ✓ Path {path.wkt} has NO overlap.")
+    return False
+
+
+def old_check_path_overlap(path: LineString, context) -> bool:
     """Helper function to check ALL segments of a path for overlap."""
     coords = list(path.coords)
     for i in range(len(coords) - 1):
         if _check_segment_overlap(Point(coords[i]), Point(coords[i + 1]), context):
+            log.trace(f"Path {path.wkt} has overlap.")
             return True
-    # log.info(f" {path=} does not overlap {context.v_tracks=} or {context.h_tracks=}")
+    log.trace(f"Path {path.wkt} is clear.")
     return False
 
 
 def _find_clear_detour(
-    path: LineString, p1: Point, p2: Point, context, offset_step: float, max_attempts: int
+    path: LineString, p1: Point, p2: Point, context, offset_step: int, max_attempts: int
 ) -> Optional[LineString]:
     """Tries to find a single clear detour for a given overlapping path."""
 
     num_coords = len(path.coords)
     tolerance = 1e-9
+    log.trace(f"=" * 80)
+    log.trace(f"DETOUR SEARCH START")
+    log.trace(f"Original path: {path.wkt} (num_coords={num_coords})")
+    log.trace(f"p1={p1.wkt}, p2={p2.wkt}")
+    log.trace(f"offset_step={offset_step}, max_attempts={max_attempts}")
+    log.trace(f"context.v_tracks={dict(context.v_tracks)}")
+    log.trace(f"context.h_tracks={dict(context.h_tracks)}")
+
+    # *** NEW LOGIC TO HANDLE STRAIGHT/MALFORMED PATHS ***
+    # A straight line has 2 coords. The bad path from the log has 3 coords
+    # where the first two are identical.
+    is_straight_line = num_coords == 2
+    is_malformed_straight = num_coords == 3 and Point(path.coords[0]).equals(Point(path.coords[1]))
+
+    log.trace(f"Path classification: is_straight_line={is_straight_line}, is_malformed_straight={is_malformed_straight}")
+
+    if is_straight_line or is_malformed_straight:
+        log.trace("Handling straight/malformed path...")
+        # Path is vertically aligned (like the one from the log)
+        if abs(p1.x - p2.x) < tolerance:
+            log.trace(f"Path is VERTICAL (x1={p1.x}, x2={p2.x})")
+            # We MUST detour horizontally
+            for i in range(1, max_attempts + 1):
+                for sign in [1, -1]:
+                    offset = sign * i * offset_step
+                    new_x = int(round(p1.x + offset))
+                    # Create a Π -path with a horizontal middle segment
+                    detour_path = LineString([p1, Point(new_x, p1.y), Point(new_x, p2.y), p2])
+                    log.trace(f"  Attempt {i}, sign={sign}: trying horizontal detour at x={new_x}")
+                    log.trace(f"    detour_path: {detour_path.wkt}")
+
+                    overlap = _check_path_overlap(detour_path, context)
+                    log.trace(f"    overlap check result: {overlap}")
+
+                    if not overlap:
+                        log.trace(f"  ✓ FOUND CLEAR HORIZONTAL DETOUR: {detour_path.wkt}")
+                        return detour_path  # Found a clear path
+                    else:
+                        log.trace(f"  ✗ Path overlaps, continuing search...")
+
+            log.trace("No clear horizontal detour found for vertical path")
+            return None  # No clear horizontal detour found
+
+        # Path is horizontally aligned
+        elif abs(p1.y - p2.y) < tolerance:
+            log.trace(f"Path is HORIZONTAL (y1={p1.y}, y2={p2.y})")
+            # We MUST detour vertically
+            for i in range(1, max_attempts + 1):
+                for sign in [1, -1]:
+                    offset = sign * i * offset_step
+                    new_y = int(round(p1.y + offset))
+                    # Create a Π -path with a vertical middle segment
+                    detour_path = LineString([p1, Point(p1.x, new_y), Point(p2.x, new_y), p2])
+                    log.trace(f"  Attempt {i}, sign={sign}: trying vertical detour at y={new_y}")
+                    log.trace(f"    detour_path: {detour_path.wkt}")
+
+                    overlap = _check_path_overlap(detour_path, context)
+                    log.trace(f"    overlap check result: {overlap}")
+
+                    if not overlap:
+                        log.trace(f"  ✓ FOUND CLEAR VERTICAL DETOUR: {detour_path.wkt}")
+                        return detour_path  # Found a clear path
+                    else:
+                        log.trace(f"  ✗ Path overlaps, continuing search...")
+
+            log.trace("No clear vertical detour found for horizontal path")
+            return None  # No clear vertical detour found
+
+    # logic for L-Paths (now correctly skipped by the malformed path)
+    if num_coords == 3:
+        log.trace("Handling L-PATH (3 coordinates)...")
+        log.trace(f"  Path coords: {list(path.coords)}")
+
+        for i in range(1, max_attempts + 1):
+            for sign in [1, -1]:
+                offset = sign * i * offset_step
+                detour_path = None
+
+                # Check orientation of the first segment
+                if abs(p1.y - path.coords[1][1]) < 1e-9:  # Horizontal first L-path
+                    new_y = int(round(p1.y + offset))
+                    detour_path = LineString([p1, Point(p1.x, new_y), Point(p2.x, new_y), p2])
+                    log.trace(f"  Attempt {i}, sign={sign}: H-first L-path detour with y={new_y}")
+                    log.trace(f"    detour_path: {detour_path.wkt}")
+                else:  # Vertical first L-path
+                    new_x = int(round(p1.x + offset))
+                    detour_path = LineString([p1, Point(new_x, p1.y), Point(new_x, p2.y), p2])
+                    log.trace(f"  Attempt {i}, sign={sign}: V-first L-path detour with x={new_x}")
+                    log.trace(f"    detour_path: {detour_path.wkt}")
+
+                if detour_path:
+                    overlap = _check_path_overlap(detour_path, context)
+                    log.trace(f"    overlap check result: {overlap}")
+
+                    if not overlap:
+                        log.trace(f"  ✓ FOUND CLEAR L-PATH DETOUR: {detour_path.wkt}")
+                        return detour_path
+                    else:
+                        log.trace(f"  ✗ Path overlaps, continuing search...")
+
+        log.trace("No L-path detour found")
+        return None  # No L-path detour found
+
+    # Existing logic for Z-Paths
+    elif num_coords == 4:
+        log.trace("Handling Z-PATH (4 coordinates)...")
+        p1_pt, p_mid1, p_mid2, p2_pt = map(Point, path.coords)
+        log.trace(f"  Path coords: p1={p1_pt.wkt}, mid1={p_mid1.wkt}, mid2={p_mid2.wkt}, p2={p2_pt.wkt}")
+
+        for i in range(1, max_attempts + 1):
+            for sign in [1, -1]:
+                offset = sign * i * offset_step
+
+                # Middle segment direction: horizontal if y1 ≈ y2
+                if abs(p_mid1.y - p_mid2.y) < 1e-9:  # horizontal middle segment
+                    # offset vertically
+                    new_y = int(round(p_mid1.y + offset))
+                    detour_path = LineString([p1, Point(p_mid1.x, new_y), Point(p_mid2.x, new_y), p2])
+                    log.trace(f"  Attempt {i}, sign={sign}: Z-path (H-mid) detour with y={new_y}")
+                    log.trace(f"    detour_path: {detour_path.wkt}")
+
+                elif abs(p_mid1.x - p_mid2.x) < 1e-9:  # vertical middle segment
+                    # offset horizontally
+                    new_x = int(round(p_mid1.x + offset))
+                    detour_path = LineString([p1, Point(new_x, p_mid1.y), Point(new_x, p_mid2.y), p2])
+                    log.trace(f"  Attempt {i}, sign={sign}: Z-path (V-mid) detour with x={new_x}")
+                    log.trace(f"    detour_path: {detour_path.wkt}")
+                else:
+                    # The middle segment is diagonal—this shouldn't happen for orthogonal paths
+                    log.trace(f"  Attempt {i}, sign={sign}: Middle segment is DIAGONAL (skipping)")
+                    continue
+
+                # Validate orthogonality and overlap
+                is_ortho = is_orthogonal(detour_path)
+                log.trace(f"    is_orthogonal: {is_ortho}")
+
+                if is_ortho:
+                    overlap = _check_path_overlap(detour_path, context)
+                    log.trace(f"    overlap check result: {overlap}")
+
+                    if not overlap:
+                        log.trace(f"  ✓ FOUND CLEAR Z-PATH DETOUR: {detour_path.wkt}")
+                        return detour_path
+                    else:
+                        log.trace(f"  ✗ Path overlaps, continuing search...")
+                else:
+                    log.trace(f"  ✗ Path not orthogonal, skipping...")
+
+        log.trace("No Z-path detour found")
+        return None  # No Z-path detour found
+
+    log.warning(f"DETOUR SEARCH FAILED: Unsupported path type with {num_coords} coordinates")
+    log.warning(f"No clear detour found for {p1=} {p2=} {path=}")
+    log.warning(f"context.v_tracks={dict(context.v_tracks)}")
+    log.warning(f"context.h_tracks={dict(context.h_tracks)}")
+    log.trace(f"=" * 80)
+    return None  # No clear detour found
+
+
+def old_find_clear_detour(
+    path: LineString, p1: Point, p2: Point, context, offset_step: int, max_attempts: int
+) -> Optional[LineString]:
+    """Tries to find a single clear detour for a given overlapping path."""
+
+    num_coords = len(path.coords)
+    tolerance = 1e-9
+    log.trace(f"Finding detour for path: {path.wkt}")
 
     # *** NEW LOGIC TO HANDLE STRAIGHT/MALFORMED PATHS ***
     # A straight line has 2 coords. The bad path from the log has 3 coords
@@ -239,9 +546,11 @@ def _find_clear_detour(
                 if abs(p1.y - path.coords[1][1]) < 1e-9:  # Horizontal first L-path
                     new_y = int(round(p1.y + offset))
                     detour_path = LineString([p1, Point(p1.x, new_y), Point(p2.x, new_y), p2])
+                    log.trace(f"Attempting H-first L-path detour with y={new_y}: {detour_path.wkt}")
                 else:  # Vertical first L-path
                     new_x = int(round(p1.x + offset))
                     detour_path = LineString([p1, Point(new_x, p1.y), Point(new_x, p2.y), p2])
+                    log.trace(f"Attempting V-first L-path detour with x={new_x}: {detour_path.wkt}")
 
                 if detour_path and not _check_path_overlap(detour_path, context):
                     return detour_path
@@ -260,10 +569,12 @@ def _find_clear_detour(
                     # offset vertically
                     new_y = int(round(p_mid1.y + offset))
                     detour_path = LineString([p1, Point(p_mid1.x, new_y), Point(p_mid2.x, new_y), p2])
+                    log.trace(f"Attempting Z-path (H-mid) detour with y={new_y}: {detour_path.wkt}")
                 elif abs(p_mid1.x - p_mid2.x) < 1e-9:  # vertical middle segment
                     # offset horizontally
                     new_x = int(round(p_mid1.x + offset))
                     detour_path = LineString([p1, Point(new_x, p_mid1.y), Point(new_x, p_mid2.y), p2])
+                    log.trace(f"Attempting Z-path (V-mid) detour with x={new_x}: {detour_path.wkt}")
                 else:
                     # The middle segment is diagonal—this shouldn't happen for orthogonal paths
                     continue
@@ -439,7 +750,7 @@ class TestCheckSegmentOverlap(unittest.TestCase):
         # 2. Define points and parameters
         p1 = Point(48, 36)
         p2 = Point(33, 18)
-        OFFSET_STEP = 5.0
+        OFFSET_STEP = 5
         MAX_OFFSET_ATTEMPTS = 5
 
         # 3. The initial path is a straight vertical line, which is blocked

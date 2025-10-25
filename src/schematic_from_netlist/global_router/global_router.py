@@ -9,7 +9,7 @@ import os
 import time
 from collections import defaultdict
 from dataclasses import asdict, dataclass, field
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 import numpy as np
 from rtree import index
@@ -154,7 +154,6 @@ class GlobalRouter:
 
             self._debugger.plot_junction_summary(module, stage=stage, title=title)
             # --- STAGE
-            log.info("--- Stage 5: Global Search by jumping junctions over macros ---")
             stage += 1
             num_iterations = 3
             title = f"Jumping location opt in {num_iterations} iterations"
@@ -364,7 +363,7 @@ class GlobalRouter:
                 children.add(best_new_pin)
             if best_connection_point is not None:
                 children.add(best_connection_point)
-            junction = Junction(name=junction_name, location=corner, children=children)
+            junction = Junction(name=junction_name, location=corner, children=children, topo=topo)
             topo.junctions.append(junction)
             tree_connection_points.add(junction)
 
@@ -725,7 +724,7 @@ class GlobalRouter:
                     tried_locations,
                     best_location,
                     min_cost,
-                    filename_prefix=f"slide_summary{i}_{topology.net.name}_",
+                    filename_prefix=f"slide_summary_{junction.name}_",
                 )
                 i += 1
 
@@ -828,151 +827,196 @@ class GlobalRouter:
 
         return candidate_locations
 
+    def _evaluate_single_junction_jumps(
+        self,
+        sorted_nets: List[Net],
+        module: Module,
+        min_module_cost: float,
+        all_tried_locations: Dict[Junction, Dict[Tuple[int, int], float]],
+    ) -> Tuple[Optional[Tuple[Junction, Point, Topology]], float]:
+        """
+        Evaluates all possible single junction jumps and returns the best one found.
+        """
+        best_single_move = None
+
+        for net in sorted_nets:
+            topo = net.draw.topo
+            parent_map = self._build_junction_parent_map(topo)
+            memo_downstream_pins: Dict[Junction, List[Pin]] = {}
+
+            for junction in topo.junctions:
+                original_location = junction.location
+                candidate_locations = self._get_jump_candidates_for_junction(junction, topo, parent_map, memo_downstream_pins)
+
+                for new_loc in candidate_locations:
+                    if new_loc.distance(original_location) < 1e-9:
+                        continue
+
+                    junction.location = new_loc
+                    self._rebuild_net_geometry(topo)
+                    current_module_cost = self._calculate_module_cost(module)
+
+                    loc_tuple = (int(round(new_loc.x)), int(round(new_loc.y)))
+                    all_tried_locations[junction][loc_tuple] = current_module_cost
+
+                    if current_module_cost < min_module_cost:
+                        min_module_cost = current_module_cost
+                        best_single_move = (junction, new_loc, topo)
+
+                    junction.location = original_location
+                    self._rebuild_net_geometry(topo)
+
+        return best_single_move, min_module_cost
+
+    def _evaluate_coordinated_net_jumps(
+        self,
+        sorted_nets: List[Net],
+        module: Module,
+        min_module_cost: float,
+    ) -> Tuple[Optional[Tuple[Topology, Dict[Junction, Point]]], float]:
+        """
+        Evaluates all possible coordinated net jumps and returns the best one found.
+        """
+        best_net_move = None
+
+        for net in sorted_nets:
+            topo = net.draw.topo
+            parent_map = self._build_junction_parent_map(topo)
+            memo_downstream_pins: Dict[Junction, List[Pin]] = {}
+            original_locations = {j: j.location for j in topo.junctions}
+            net_jump_candidate: Dict[Junction, Point] = {}
+
+            for junction in topo.junctions:
+                candidate_locations = self._get_jump_candidates_for_junction(junction, topo, parent_map, memo_downstream_pins)
+                for loc in candidate_locations:
+                    if loc.distance(junction.location) > 1e-9:
+                        net_jump_candidate[junction] = loc
+                        break
+
+            if net_jump_candidate:
+                for junction, new_loc in net_jump_candidate.items():
+                    junction.location = new_loc
+                self._rebuild_net_geometry(topo)
+                current_module_cost = self._calculate_module_cost(module)
+
+                if current_module_cost < min_module_cost:
+                    min_module_cost = current_module_cost
+                    best_net_move = (topo, net_jump_candidate)
+
+                for junction, orig_loc in original_locations.items():
+                    junction.location = orig_loc
+                self._rebuild_net_geometry(topo)
+
+        return best_net_move, min_module_cost
+
+    def _apply_best_jump_move(
+        self,
+        best_move: Union[Tuple[Junction, Point, Topology], Tuple[Topology, Dict[Junction, Point]]],
+        iteration: int,
+        initial_module_cost: float,
+        min_module_cost: float,
+    ):
+        """Applies the best move found in an iteration."""
+        if isinstance(best_move[0], Junction):  # Single junction move
+            junction_to_move, new_location, topo_to_update = best_move
+            log.info(
+                f"Iter {iteration}: Best move is single jump of {junction_to_move.name} to {new_location} "
+                f"(net: {topo_to_update.net.name}) for a cost reduction of "
+                f"{initial_module_cost - min_module_cost:.2f}"
+            )
+            junction_to_move.location = new_location
+            self._rebuild_net_geometry(topo_to_update)
+        else:  # Coordinated net move
+            topo_to_move, locations = best_move
+            log.info(
+                f"Iter {iteration}: Best move is coordinated jump for net {topo_to_move.net.name} "
+                f"({len(locations)} junctions) for a cost reduction of "
+                f"{initial_module_cost - min_module_cost:.2f}"
+            )
+            for junction, new_loc in locations.items():
+                junction.location = new_loc
+            self._rebuild_net_geometry(topo_to_move)
+
+    def _log_jump_heatmap_data(
+        self,
+        all_tried_locations: Dict[Junction, Dict[Tuple[int, int], float]],
+        sorted_nets: List[Net],
+        iteration: int,
+    ):
+        """After a move, plot heatmap data for visualization."""
+        for junction, tried_locations in all_tried_locations.items():
+            j = 0
+            if tried_locations:
+                junction_topo = junction.topo
+                if junction_topo:
+                    best_loc_tuple = min(tried_locations.keys(), key=lambda k: tried_locations[k])
+                    best_location = Point(best_loc_tuple)
+                    min_cost_for_heatmap = tried_locations[best_loc_tuple]
+                    self._debugger._plot_junction_move_heatmap(
+                        junction_topo,
+                        junction,
+                        tried_locations,
+                        best_location,
+                        min_cost_for_heatmap,
+                        filename_prefix=f"jump_iter_{iteration}_{j}_{junction_topo.net.name}_",
+                    )
+                    j += 1
+
     def _jump_junctions_over_macros(self, module: Module):
         """
         Iteratively tries to find better junction locations by jumping them over macros,
-        optimizing for the lowest overall module cost. It uses a greedy approach,
-        evaluating two types of moves at each iteration:
-        1. Single Junction Jump: The best move of a single junction across all nets.
-        2. Coordinated Net Jump: Jumping all junctions of a net simultaneously to candidate locations.
-        The move that yields the greatest cost reduction for the entire module is chosen.
+        optimizing for the lowest overall module cost. This is done by first evaluating
+        coordinated jumps for entire nets, and then evaluating single junction jumps to
+        find the best possible move in each iteration.
         """
         log.info(f"Starting global junction jumping for module: {module.name}")
         max_iterations = 10
         sorted_nets = [n for n in module.nets.values() if hasattr(n.draw, "topo") and n.draw.topo]
 
         for i in range(max_iterations):
-            cost_reduced_this_iter = False
-            best_single_move: Optional[Tuple[Junction, Point, Topology]] = None
-            best_net_move: Optional[Tuple[Topology, Dict[Junction, Point]]] = None
-            all_tried_locations: Dict[Junction, Dict[Tuple[int, int], float]] = defaultdict(dict)
-
+            # Calculate baseline cost for the whole module at the start of the iteration
             initial_module_cost = self._calculate_module_cost(module)
             min_module_cost = initial_module_cost
             log.debug(f"Global jump iter {i}: initial module cost = {initial_module_cost:.2f}")
 
-            # --- Strategy 1: Find the best single junction jump across all nets ---
-            for net in sorted_nets:
-                topo = net.draw.topo
-                parent_map = self._build_junction_parent_map(topo)
-                memo_downstream_pins: Dict[Junction, List[Pin]] = {}
+            # 1. Evaluate coordinated jumps for all nets to find the best one
+            best_net_move, cost_after_coordinated = self._evaluate_coordinated_net_jumps(sorted_nets, module, min_module_cost)
 
-                for junction in topo.junctions:
-                    original_location = junction.location
-                    candidate_locations = self._get_jump_candidates_for_junction(
-                        junction, topo, parent_map, memo_downstream_pins
-                    )
+            # 2. Evaluate single junction jumps for all junctions to find the best one
+            all_tried_locations: Dict[Junction, Dict[Tuple[int, int], float]] = defaultdict(dict)
+            best_single_move, cost_after_single = self._evaluate_single_junction_jumps(
+                sorted_nets, module, min_module_cost, all_tried_locations
+            )
 
-                    for new_loc in candidate_locations:
-                        if new_loc.distance(original_location) < 1e-9:
-                            continue
+            # 3. Determine the best move of this iteration (either coordinated or single)
+            best_move_this_iter = None
+            final_min_cost = initial_module_cost
 
-                        junction.location = new_loc
-                        self._rebuild_net_geometry(topo)
-                        current_module_cost = self._calculate_module_cost(module)
+            if best_net_move and cost_after_coordinated < final_min_cost:
+                final_min_cost = cost_after_coordinated
+                best_move_this_iter = best_net_move
 
-                        loc_tuple = (int(round(new_loc.x)), int(round(new_loc.y)))
-                        all_tried_locations[junction][loc_tuple] = current_module_cost
+            if best_single_move and cost_after_single < final_min_cost:
+                final_min_cost = cost_after_single
+                best_move_this_iter = best_single_move
 
-                        if current_module_cost < min_module_cost:
-                            min_module_cost = current_module_cost
-                            best_single_move = (junction, new_loc, topo)
-                            best_net_move = None  # Invalidate net move
-                            cost_reduced_this_iter = True
-
-                        junction.location = original_location
-                        self._rebuild_net_geometry(topo)
-
-            # --- Strategy 2: Find the best coordinated net jump ---
-            for net in sorted_nets:
-                topo = net.draw.topo
-                parent_map = self._build_junction_parent_map(topo)
-                memo_downstream_pins: Dict[Junction, List[Pin]] = {}
-
-                original_locations = {j: j.location for j in topo.junctions}
-                net_jump_candidate: Dict[Junction, Point] = {}
-
-                for junction in topo.junctions:
-                    candidate_locations = self._get_jump_candidates_for_junction(
-                        junction, topo, parent_map, memo_downstream_pins
-                    )
-                    # Pick the first candidate location that is different from the original
-                    for loc in candidate_locations:
-                        if loc.distance(junction.location) > 1e-9:
-                            net_jump_candidate[junction] = loc
-                            break
-
-                if net_jump_candidate:
-                    # Apply the coordinated jump for this net
-                    for junction, new_loc in net_jump_candidate.items():
-                        junction.location = new_loc
-                    self._rebuild_net_geometry(topo)
-                    current_module_cost = self._calculate_module_cost(module)
-
-                    if current_module_cost < min_module_cost:
-                        min_module_cost = current_module_cost
-                        best_net_move = (topo, net_jump_candidate)
-                        best_single_move = None  # Invalidate single junction move
-                        cost_reduced_this_iter = True
-
-                    # Undo the move to test the next net
-                    for junction, orig_loc in original_locations.items():
-                        junction.location = orig_loc
-                    self._rebuild_net_geometry(topo)
-
-            # --- Apply the best move found in this iteration ---
-            if best_single_move:
-                junction_to_move, new_location, topo_to_update = best_single_move
-                log.info(
-                    f"Iter {i}: Best move is single jump of {junction_to_move.name} to {new_location} "
-                    f"(net: {topo_to_update.net.name}) for a cost reduction of "
-                    f"{initial_module_cost - min_module_cost:.2f}"
-                )
-                junction_to_move.location = new_location
-                self._rebuild_net_geometry(topo_to_update)
-            elif best_net_move:
-                topo_to_move, locations = best_net_move
-                log.info(
-                    f"Iter {i}: Best move is coordinated jump for net {topo_to_move.net.name} "
-                    f"({len(locations)} junctions) for a cost reduction of "
-                    f"{initial_module_cost - min_module_cost:.2f}"
-                )
-                for junction, new_loc in locations.items():
-                    junction.location = new_loc
-                self._rebuild_net_geometry(topo_to_move)
+            # 4. Apply the best move if one was found and log results
+            cost_reduced_this_iter = False
+            if best_move_this_iter and final_min_cost < initial_module_cost:
+                self._apply_best_jump_move(best_move_this_iter, i, initial_module_cost, final_min_cost)
+                cost_reduced_this_iter = True
             else:
                 log.info(f"Iter {i}: No cost improvement found.")
 
-            # After move application, update heatmap data for visualization
-            for junction, tried_locations in all_tried_locations.items():
-                if tried_locations:
-                    # Find the topology for the junction to pass to the plotting function
-                    junction_topo = None
-                    for n in sorted_nets:
-                        if junction in n.draw.topo.junctions:
-                            junction_topo = n.draw.topo
-                            break
-                    if junction_topo:
-                        best_loc_tuple = min(tried_locations.keys(), key=lambda k: tried_locations[k])
-                        best_location = Point(best_loc_tuple)
-                        min_cost_for_heatmap = tried_locations[best_loc_tuple]
-                        self._debugger._plot_junction_move_heatmap(
-                            junction_topo,
-                            junction,
-                            tried_locations,
-                            best_location,
-                            min_cost_for_heatmap,
-                            filename_prefix=f"jump_iter_{i}_{junction_topo.net.name}_",
-                        )
+            # 5. Log heatmap data for any single junction moves that were evaluated
+            self._log_jump_heatmap_data(all_tried_locations, sorted_nets, i)
 
+            # 6. Check for convergence
             if not cost_reduced_this_iter:
                 log.info(f"Global junction jumping for module {module.name} converged after {i} iterations.")
                 break
-        else:
-            log.warning(
-                f"Global junction jumping for module {module.name} did not converge after {max_iterations} iterations."
-            )
-
+        else:  # for loop else
+            log.warning(f"Global junction jumping for module {module.name} did not converge after {max_iterations} iterations.")
 
     def _build_junction_parent_map(self, topology: Topology) -> Dict[Junction, Optional[Junction]]:
         """Build a mapping of junctions to their parent junctions."""

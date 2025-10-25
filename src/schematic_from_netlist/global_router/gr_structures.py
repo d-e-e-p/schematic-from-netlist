@@ -67,11 +67,13 @@ class RoutingContext:
 class Junction:
     name: str
     location: Point
+    topo: Optional[Topology] = None
     children: Set[Junction | Pin] = field(default_factory=set)
     geom: Optional[MultiLineString] = None
 
     def __hash__(self):
         return hash((self.name, self.location))
+
 
 @dataclass
 class Topology:
@@ -80,4 +82,3 @@ class Topology:
     metrics: Metrics = field(default_factory=Metrics)
     context: RoutingContext = field(default_factory=RoutingContext)
     geom: Optional[MultiLineString] = None
-
