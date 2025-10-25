@@ -176,12 +176,14 @@ class AstarRouter:
                 if self.occupancy_map.grid[neighbor] == np.inf:
                     log.debug(f"  Neighbor {neighbor} is blocked (inf occupancy)")
                     continue
-                # Add debug for high occupancy
-                if self.occupancy_map.grid[neighbor] > 0:
-                    log.debug(f"  Neighbor {neighbor} has occupancy {self.occupancy_map.grid[neighbor]}")
 
-                move_cost = self._get_move_cost(current, neighbor, parent)
+                move_cost = self.cost_estimator.get_neighbor_move_cost(current, neighbor, parent)
                 tentative_g_score = g + move_cost
+                # Add debug for high occupancy
+                if self.occupancy_map.grid[neighbor] > -1:
+                    log.debug(
+                        f"  Neighbor {neighbor} has occupancy {self.occupancy_map.grid[neighbor]} {move_cost=} {tentative_g_score=}"
+                    )
 
                 if neighbor not in g_score or tentative_g_score < g_score[neighbor]:
                     g_score[neighbor] = tentative_g_score
@@ -352,10 +354,10 @@ class AstarRouter:
             # Expand the bounds to be twice as large
             new_width = width * 2
             new_height = height * 2
-            minx = center_x - new_width / 2
-            maxx = center_x + new_width / 2
-            miny = center_y - new_height / 2
-            maxy = center_y + new_height / 2
+            minx = int(center_x - new_width / 2)
+            maxx = int(center_x + new_width / 2)
+            miny = int(center_y - new_height / 2)
+            maxy = int(center_y + new_height / 2)
 
             # Add additional padding to be safe
             padding = self.grid_size * 20

@@ -7,7 +7,7 @@ class Cost:
     Calculates routing costs.
     """
 
-    def __init__(self, occupancy_map, wire_length_weight=1.0, crossing_weight=50.0, bend_penalty=4.0, halo_cost=20.0):
+    def __init__(self, occupancy_map, wire_length_weight=1.0, crossing_weight=10.0, bend_penalty=4.0, halo_cost=20.0):
         self.occupancy_map = occupancy_map
         self.wire_length_weight = wire_length_weight
         self.crossing_weight = crossing_weight
@@ -30,3 +30,23 @@ class Cost:
         """
         return self.wire_length_weight * self.occupancy_map.grid_size
 
+    def is_bend(self, current, neighbor, parent):
+        """Detect if three points form a bend (not collinear)."""
+        if parent is None:
+            return False
+
+        # Vectors from parent to current, and current to neighbor
+        v1 = (current[0] - parent[0], current[1] - parent[1])
+        v2 = (neighbor[0] - current[0], neighbor[1] - current[1])
+
+        # Cross product: if zero, points are collinear (no bend)
+        cross = v1[0] * v2[1] - v1[1] * v2[0]
+
+        return cross != 0
+
+    def get_neighbor_move_cost(self, current, neighbor, parent):
+        cost = self.wire_length_weight
+        cost += self.occupancy_map.grid[neighbor] * self.crossing_weight
+        if self.is_bend(current, neighbor, parent):
+            cost += self.bend_penalty
+        return cost

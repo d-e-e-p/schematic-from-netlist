@@ -13,16 +13,16 @@ class TrackOccupancyMonitor:
     Monitors track occupancy for each layer.
     """
 
-    def __init__(self, nx, ny, n_layers=2):
+    def __init__(self, nx, ny, n_layers=1):
         self.occupancy = np.zeros((nx, ny, n_layers))
 
-    def is_occupied(self, x, y, layer):
+    def is_occupied(self, x, y, layer=1):
         return self.occupancy[x, y, layer] > 0
 
-    def add_occupancy(self, x, y, layer):
+    def add_occupancy(self, x, y, layer=1):
         self.occupancy[x, y, layer] += 1
 
-    def remove_occupancy(self, x, y, layer):
+    def remove_occupancy(self, x, y, layer=1):
         self.occupancy[x, y, layer] -= 1
 
 
@@ -64,8 +64,8 @@ class OccupancyMap:
         return ix, iy
 
     def _grid_to_world(self, ix, iy):
-        x = self.minx + (ix + 0.5) * self.grid_size
-        y = self.miny + (iy + 0.5) * self.grid_size
+        x = self.minx + ix * self.grid_size
+        y = self.miny + iy * self.grid_size
         return Point(x, y)
 
     def update_occupancy(self, geometry):

@@ -95,9 +95,14 @@ class LTSpiceWriter:
                 out += self.asc_place_inst(inst_child, x1, y1)
             else:
                 out += self.asc_place_module(inst_child, x1, y1)
+
+        # Process wires
+        for net in inst.module.nets.values():
+            out += self.format_asc_wire(net, x1, y1)
+
         return out
 
-    def format_asc_wire(self, net):
+    def format_asc_wire(self, net, x1=0, y1=0):
         """Formats WIRE and FLAG lines for the .asc file."""
 
         if not net.draw.shape:
@@ -105,11 +110,11 @@ class LTSpiceWriter:
 
         def segments_to_wire(out, segments, netname, comment, add_label):
             for pt_start, pt_end in segments:
-                out += f"WIRE {pt_start[0]} {pt_start[1]} {pt_end[0]} {pt_end[1]}{comment}\n"
+                out += f"WIRE {pt_start[0] + x1} {pt_start[1] + y1} {pt_end[0] + x1} {pt_end[1] + y1}{comment}\n"
                 if add_label:
                     pt_mid = (
-                        (pt_start[0] + pt_end[0]) // 2,
-                        (pt_start[1] + pt_end[1]) // 2,
+                        (pt_start[0] + pt_end[0]) // 2 + x1,
+                        (pt_start[1] + pt_end[1]) // 2 + y1,
                     )
                     out += f"FLAG {pt_mid[0]} {pt_mid[1]} {netname}\n"
             return out
