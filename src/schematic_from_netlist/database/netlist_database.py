@@ -2,13 +2,14 @@ import logging as log
 from typing import Dict, List, Optional, Tuple
 
 from .netlist_operations import NetlistOperationsMixin
-from .netlist_structures import Bus, Design, Instance, Module, Net, NetType, Pin, PinDirection, Port
+from .netlist_structures import (Bus, Design, Instance, Module, Net, NetType,
+                                 Pin, PinDirection, Port)
 
 
 class NetlistDatabase(NetlistOperationsMixin):
     """Main database class for the hierarchical netlist"""
 
-    def __init__(self, fanout_threshold: int = 15, skip_nets: List[str] = []):
+    def __init__(self, fanout_threshold: int = 150, skip_nets: List[str] = []):
         self.fanout_threshold = fanout_threshold
         self.skip_nets = skip_nets
         # design > module > instance

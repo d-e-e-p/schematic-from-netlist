@@ -374,6 +374,7 @@ class GlobalRouter:
         """Rebuilds the net's geometry based on its current topology of junctions and pins."""
         if not topology.junctions:
             if topology.geom:
+                log.info(f"Rebuilding net geometry for net {topology.net.name} {topology.geom=}")
                 union_geom = unary_union(topology.geom)
                 merged_geom = linemerge(union_geom)
                 if isinstance(merged_geom, LineString):
@@ -460,21 +461,37 @@ class GlobalRouter:
             else:
                 junction.geom = None
 
-        if new_geoms:
-            union_geom = unary_union(new_geoms)
-            merged_geom = None
-            if isinstance(union_geom, LineString):
-                merged_geom = linemerge([union_geom])
-            elif isinstance(union_geom, MultiLineString):
-                merged_geom = linemerge(union_geom)
-            if isinstance(merged_geom, LineString):
-                topology.net.draw.geom = MultiLineString([merged_geom])
-            elif isinstance(merged_geom, MultiLineString):
-                topology.net.draw.geom = merged_geom
-            else:
-                topology.net.draw.geom = MultiLineString([g for g in new_geoms if isinstance(g, LineString)])
-        else:
+        if not new_geoms:
             topology.net.draw.geom = None
+            return
+
+        union_geom = unary_union(new_geoms)
+
+        if union_geom.is_empty:
+            topology.net.draw.geom = None
+            return
+
+        # Normalize union result into a list for linemerge
+        if isinstance(union_geom, LineString):
+            log.info(f"Rebuilding net geometry for net {topology.net.name}: {union_geom=}")
+            merge_input = [union_geom]
+        elif isinstance(union_geom, MultiLineString):
+            merge_input = list(union_geom.geoms)
+        else:
+            # Unexpected geometry type → fallback to original new_geoms
+            merge_input = [g for g in new_geoms if isinstance(g, LineString)]
+
+        merged = linemerge(merge_input)
+
+        # Normalize final geometry to MultiLineString
+        if merged.is_empty:
+            topology.net.draw.geom = None
+        elif isinstance(merged, LineString):
+            topology.net.draw.geom = MultiLineString([merged])
+        elif isinstance(merged, MultiLineString):
+            topology.net.draw.geom = merged
+        else:
+            topology.net.draw.geom = MultiLineString([g for g in merge_input if isinstance(g, LineString)])
 
     def _prune_redundant_junctions(self, topology: Topology):
         """Remove junctions with degree <= 2, as they are redundant."""
@@ -703,7 +720,7 @@ class GlobalRouter:
             log.info(f"calculating cost and dumping to prefix slide_iter_{i}_ for module:{module.name} net:{topology.net.name}")
             self._cost_calculator.calculate_total_cost(
                 topology,
-                debug_plot=True,
+                debug_plot=False,
                 plot_filename_prefix=f"slide_iter_{i}_",
                 update_geom_cache=True,
             )
@@ -724,6 +741,7 @@ class GlobalRouter:
                     tried_locations,
                     best_location,
                     min_cost,
+                    debug_plot=False,
                     filename_prefix=f"slide_summary_{junction.name}_",
                 )
                 i += 1
@@ -958,6 +976,7 @@ class GlobalRouter:
                         tried_locations,
                         best_location,
                         min_cost_for_heatmap,
+                        debug_plot=False,
                         filename_prefix=f"jump_iter_{iteration}_{j}_{junction_topo.net.name}_",
                     )
                     j += 1
@@ -1158,7 +1177,7 @@ class GlobalRouter:
         )
         self._cost_calculator.calculate_total_cost(
             topology,
-            debug_plot=True,
+            debug_plot=False,
             plot_filename_prefix=f"jump_iter_{iteration}_",
             update_geom_cache=True,
         )

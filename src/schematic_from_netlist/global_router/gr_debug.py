@@ -66,7 +66,7 @@ class RouterDebugger:
 
         topos = [net.draw.topo for net in module.nets.values() if hasattr(net.draw, "topo") and net.draw.topo]
         if not topos:
-            log.info(f"No topologies to plot for module {module.name} at stage {stage}")
+            log.debug(f"No topologies to plot for module {module.name} at stage {stage}")
             return
 
         fig, ax = plt.subplots(figsize=(10, 10))
@@ -294,8 +294,11 @@ class RouterDebugger:
         best_location: Point,
         min_cost: float,
         filename_prefix: str,
+        debug_plot: bool = True,
     ):
         """Generate a heatmap of junction move costs."""
+        if not debug_plot:
+            return
         module = topology.context.module
         macros = topology.context.macros
         halos = topology.context.halos

@@ -268,8 +268,6 @@ class LTSpiceWriter:
 
         # Process wires
         for net in self.db.design.top_module.nets.values():
-            if not net.name:
-                breakpoint()
             asc_content.append(self.format_asc_wire(net))
 
         with open(asc_path, "w") as f:
