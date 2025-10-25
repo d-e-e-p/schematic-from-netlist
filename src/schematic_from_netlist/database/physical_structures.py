@@ -165,17 +165,25 @@ class NetPhysical:
             self.shape.clear()
             return None
 
+        # Normalize geometry into a list of LineStrings
+        if isinstance(self.geom, LineString):
+            lines = [self.geom]
+        elif isinstance(self.geom, MultiLineString):
+            lines = list(self.geom.geoms)
+        elif isinstance(self.geom, list):  # Already list of geometries
+            lines = self.geom
+        else:
+            log.error(f"Unsupported geometry type: {type(self.geom)}")
+            return None
+
+        # Convert consecutive coordinate pairs → segment list
         segments = []
-
-        # Iterate over all LineStrings in MultiLineString
-        for line in self.geom.geoms:
-            coords = line.coords
-            # Convert all consecutive pairs to int segments
+        for line in lines:
+            coords = list(line.coords)
             for i in range(len(coords) - 1):
-                x1, y1 = int(coords[i][0]), int(coords[i][1])
-                x2, y2 = int(coords[i + 1][0]), int(coords[i + 1][1])
+                x1, y1 = map(int, coords[i])
+                x2, y2 = map(int, coords[i + 1])
                 segments.append(((x1, y1), (x2, y2)))
-
         self.shape = segments
         return self.shape
 

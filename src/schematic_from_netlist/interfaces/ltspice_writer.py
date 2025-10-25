@@ -71,7 +71,7 @@ class LTSpiceWriter:
         x1, y1, x2, y2 = self.upscale_rect(inst.draw.shape)
         x = (x1 + x2) // 2 + xoffset
         y = (y1 + y2) // 2 + yoffset
-        out += f"SYMBOL {module_ref} {x} {y} R0\n"
+        out += f"SYMBOL {module_ref} {x} {y} {inst.draw.orient}\n"
         out += f"SYMATTR InstName {name}\n"
         out += f"SYMATTR Value {module_ref}\n"
         return out
