@@ -25,8 +25,7 @@ def plot_routing_debug_image(
     grid = np.full((occupancy_map.nx, occupancy_map.ny), 0.0)
     for i in range(occupancy_map.nx):
         for j in range(occupancy_map.ny):
-            p_world = occupancy_map._grid_to_world(i, j)
-            grid[i, j] = cost_estimator.get_base_cost(p_world)
+            grid[i, j] = cost_estimator.occupancy_map.grid[i, j]
 
     # Transpose grid for correct orientation with imshow
     grid = grid.T
@@ -252,9 +251,10 @@ def plot_occupancy_summary(module: Module, occupancy_map: OccupancyMap, output_p
     over_occupied_indices = np.where(over_occupied_mask)
     for ix, iy in zip(over_occupied_indices[0], over_occupied_indices[1]):
         # Get world coordinates
-        world_x = occupancy_map.minx + (ix + 0.5) * occupancy_map.grid_size
-        world_y = occupancy_map.miny + (iy + 0.5) * occupancy_map.grid_size
+        world_x = occupancy_map.minx + ix * occupancy_map.grid_size
+        world_y = occupancy_map.miny + iy * occupancy_map.grid_size
         ax.plot(world_x, world_y, "rx", markersize=4)
+    breakpoint()
 
     # Set plot limits
     ax.set_xlim(occupancy_map.minx, occupancy_map.maxx)

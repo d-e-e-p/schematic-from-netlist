@@ -38,6 +38,7 @@ class OccupancyMap:
         self.nx = max(1, int((self.maxx - self.minx) / grid_size) + 1)
         self.ny = max(1, int((self.maxy - self.miny) / grid_size) + 1)
         self.grid = np.zeros((self.nx, self.ny))
+        self.grid_via = np.zeros((self.nx, self.ny))
         self.track_occupancy_monitor = TrackOccupancyMonitor(self.nx, self.ny)
         log.debug(f"Initialized occupancy map with grid size {self.nx} x {self.ny}")
 
@@ -141,11 +142,18 @@ class OccupancyMap:
 
     def add_blockage(self, polygon):
         """
-        Adds a polygonal blockage to the occupancy map.
+        Adds a routing blockage to the occupancy map.
         """
-        self._rasterize_polygon(polygon)
+        self._rasterize_polygon(polygon, self.grid, np.inf)
 
-    def _rasterize_polygon(self, polygon):
+    def add_halo(self, polygon):
+        """
+        Adds a via blockage to the occupancy map.
+        """
+        self._rasterize_polygon(polygon, self.grid_via, np.inf)
+        self._rasterize_polygon(polygon, self.grid, 1)
+
+    def _rasterize_polygon(self, polygon, grid_ptr, value):
         minx, miny, maxx, maxy = polygon.bounds
         min_ix, min_iy = self._world_to_grid(minx, miny)
         max_ix, max_iy = self._world_to_grid(maxx, maxy)
@@ -157,7 +165,7 @@ class OccupancyMap:
                 world_y = self.miny + (iy + 0.5) * self.grid_size
                 if polygon.contains(Point(world_x, world_y)):
                     if 0 <= ix < self.nx and 0 <= iy < self.ny:
-                        self.grid[ix, iy] = np.inf
+                        grid_ptr[ix, iy] = value
 
     def get_congestion_for_segment(self, p1: Point, p2: Point) -> float:
         """

@@ -128,10 +128,8 @@ class AstarRouter:
                         best_end = end_pin
         return best_start, best_end
 
-    def astar_search(self, start_pin: Pin, end_pin: Pin) -> Optional[LineString]:
-        """
-        A* search on a grid.
-        """
+    def _initialize_search(self, start_pin: Pin, end_pin: Pin) -> tuple:
+        """Initialize search parameters and clear occupancy at start/end nodes."""
         start_point = start_pin.draw.geom
         end_point = end_pin.draw.geom
 
@@ -140,7 +138,7 @@ class AstarRouter:
         start_node = self.occupancy_map._world_to_grid(start_point.x, start_point.y)
         end_node = self.occupancy_map._world_to_grid(end_point.x, end_point.y)
 
-        # Temporarily clear occupancy at start and end nodes to allow path finding
+        # Temporarily clear occupancy at start and end nodes
         start_node_occupancy = self.occupancy_map.grid[start_node]
         end_node_occupancy = self.occupancy_map.grid[end_node]
         self.occupancy_map.grid[start_node] = 0
@@ -150,21 +148,87 @@ class AstarRouter:
         log.info(f"Start node occupancy: {self.occupancy_map.grid[start_node]}")
         log.info(f"End node occupancy: {self.occupancy_map.grid[end_node]}")
 
+        return start_point, end_point, start_node, end_node, start_node_occupancy, end_node_occupancy
+
+    def _handle_trivial_case(self, start_point, end_point, start_node, end_node) -> Optional[LineString]:
+        """Handle trivial cases where start and end nodes are the same."""
         if start_node == end_node:
             px, py = start_point.x, start_point.y
             ex, ey = end_point.x, end_point.y
             return LineString([(px, py), (px, ey), (ex, ey)])
+        return None
 
+    def _process_neighbor(self, current, neighbor, parent, macro_center, end_node, open_set, came_from, g_score):
+        """Process a neighbor node during A* search."""
+        if self.occupancy_map.grid[neighbor] == np.inf:
+            log.debug(f"  Neighbor {neighbor} is blocked (inf occupancy)")
+            return
+
+        move_cost = self.cost_estimator.get_neighbor_move_cost(current, neighbor, parent, macro_center)
+        tentative_g_score = g_score[current] + move_cost
+
+        if self.occupancy_map.grid[neighbor] > -1:
+            log.debug(f"  Neighbor {neighbor} has occupancy {self.occupancy_map.grid[neighbor]} {move_cost=} {tentative_g_score=}")
+
+        if neighbor not in g_score or tentative_g_score < g_score[neighbor]:
+            g_score[neighbor] = tentative_g_score
+            h = self._heuristic(neighbor, end_node)
+            f = tentative_g_score + h
+            heapq.heappush(open_set, (f, tentative_g_score, neighbor, current))
+            came_from[neighbor] = current
+            log.debug(f"    Adding neighbor {neighbor} to open set with f={f} occupancy {self.occupancy_map.grid[neighbor]}")
+
+    def _create_final_path(self, path, start_point, end_point) -> LineString:
+        """Create the final path with proper bends at start and end points."""
+        path_points = list(path.coords)
+        if len(path_points) < 2:
+            # Handle short paths with an L-bend
+            px, py = start_point.x, start_point.y
+            ex, ey = end_point.x, end_point.y
+            return LineString([(px, py), (ex, py), (ex, ey)])
+
+        p1 = path_points[1]
+        pn_2 = path_points[-2]
+
+        # Determine bend points
+        bend_start = (p1[0], start_point.y) if path_points[0][0] == p1[0] else (start_point.x, p1[1])
+        bend_end = (pn_2[0], end_point.y) if path_points[-1][0] == pn_2[0] else (end_point.x, pn_2[1])
+
+        # Construct and clean up path
+        new_path_points = [start_point, bend_start] + path_points[1:-1] + [bend_end, end_point]
+        final_path = [new_path_points[0]]
+        for point in new_path_points[1:]:
+            if point != final_path[-1]:
+                final_path.append(point)
+
+        return LineString(final_path)
+
+    def astar_search(self, start_pin: Pin, end_pin: Pin) -> Optional[LineString]:
+        """
+        A* search on a grid to find a path between two pins.
+        """
+        # Initialize search
+        start_point, end_point, start_node, end_node, start_occ, end_occ = self._initialize_search(start_pin, end_pin)
+
+        # Check for trivial case
+        if trivial_path := self._handle_trivial_case(start_point, end_point, start_node, end_node):
+            return trivial_path
+
+        # Initialize search structures
         open_set = []
-        heapq.heappush(open_set, (0.0, 0.0, start_node, None))  # (f, g, pos, parent)
-
+        start_h = self._heuristic(start_node, end_node)
+        heapq.heappush(open_set, (start_h, 0.0, start_node, None))
         came_from = {}
         g_score = {start_node: 0}
         path = None
 
+        # Main search loop
         while open_set:
             f, g, current, _ = heapq.heappop(open_set)
             parent = came_from.get(current)
+            if not parent:
+                # assume center of macro is start point of route for bend calc purposes
+                macro_center = self.get_center_of_pin_macro(start_point, start_pin, end_pin)
 
             if current == end_node:
                 path = self._reconstruct_path(came_from, current)
@@ -172,78 +236,13 @@ class AstarRouter:
                 break
 
             for neighbor in self._get_neighbors(current):
-                # Check if neighbor is blocked
-                if self.occupancy_map.grid[neighbor] == np.inf:
-                    log.debug(f"  Neighbor {neighbor} is blocked (inf occupancy)")
-                    continue
-
-                move_cost = self.cost_estimator.get_neighbor_move_cost(current, neighbor, parent)
-                tentative_g_score = g + move_cost
-                # Add debug for high occupancy
-                if self.occupancy_map.grid[neighbor] > -1:
-                    log.debug(
-                        f"  Neighbor {neighbor} has occupancy {self.occupancy_map.grid[neighbor]} {move_cost=} {tentative_g_score=}"
-                    )
-
-                if neighbor not in g_score or tentative_g_score < g_score[neighbor]:
-                    g_score[neighbor] = tentative_g_score
-                    h = self._heuristic(neighbor, end_node)
-                    f = tentative_g_score + h
-                    heapq.heappush(open_set, (f, tentative_g_score, neighbor, current))
-                    came_from[neighbor] = current
-                    log.debug(
-                        f"    Adding neighbor {neighbor} to open set with f={f} occupancy {self.occupancy_map.grid[neighbor]}"
-                    )
-
-        # Restore occupancy
-        self.occupancy_map.grid[start_node] = start_node_occupancy
-        self.occupancy_map.grid[end_node] = end_node_occupancy
+                self._process_neighbor(current, neighbor, parent, macro_center, end_node, open_set, came_from, g_score)
 
         if path is None:
             log.warning(f"  No path found from {start_node} to {end_node}")
             return None
 
-        path_points = list(path.coords)
-        if len(path_points) < 2:
-            # Handle short paths, e.g. with an L-bend
-            px, py = start_point.x, start_point.y
-            ex, ey = end_point.x, end_point.y
-            # Create a horizontal-then-vertical L-shaped route
-            return LineString([(px, py), (ex, py), (ex, ey)])
-
-        # The first and last points from reconstruct_path are centers of cells.
-        # The actual start and end points are the pin locations.
-        # We create two bend points to connect the pins to the main path orthogonally.
-
-        p1 = path_points[1]
-        pn_2 = path_points[-2]
-
-        # Determine bend point for the start
-        is_first_segment_vertical = path_points[0][0] == p1[0]
-        if is_first_segment_vertical:
-            # Vertical segment, bend maintains y of start_point and takes x of path
-            bend_start = (p1[0], start_point.y)
-        else:
-            # Horizontal segment
-            bend_start = (start_point.x, p1[1])
-
-        # Determine bend point for the end
-        is_last_segment_vertical = path_points[-1][0] == pn_2[0]
-        if is_last_segment_vertical:
-            bend_end = (pn_2[0], end_point.y)
-        else:
-            bend_end = (end_point.x, pn_2[1])
-
-        # Construct the new path
-        new_path_points = [start_point, bend_start] + path_points[1:-1] + [bend_end, end_point]
-
-        # Clean up duplicate points
-        final_path = [new_path_points[0]]
-        for point in new_path_points[1:]:
-            if point != final_path[-1]:
-                final_path.append(point)
-
-        return LineString(final_path)
+        return self._create_final_path(path, start_point, end_point)
 
     def _get_neighbors(self, pos):
         x, y = pos
@@ -256,29 +255,6 @@ class AstarRouter:
     def _heuristic(self, p1, p2):
         # Manhattan distance on the grid for orthogonal routing
         return (abs(p1[0] - p2[0]) + abs(p1[1] - p2[1])) * self.grid_size
-
-    def _get_move_cost(self, p1, p2, parent):
-        cost = self.cost_estimator.get_cost(Point(p1), Point(p2))
-
-        # Add bend penalty
-        if parent:
-            p0 = parent
-            dx1 = p1[0] - p0[0]
-            dy1 = p1[1] - p0[1]
-            dx2 = p2[0] - p1[0]
-            dy2 = p2[1] - p1[1]
-            is_bend = dx1 != dx2 or dy1 != dy2
-            if is_bend:
-                cost += self.cost_estimator.bend_penalty
-
-        # Check if the move is inside a halo
-        """
-        is_in_halo = any(halo.contains(p1_world) for halo in self.halo_geometries)
-        if is_in_halo:
-            cost += self.cost_estimator.halo_cost
-        """
-
-        return cost
 
     def _reconstruct_path(self, came_from, end_node) -> LineString:
         # Reconstruct the path from end to start
@@ -314,6 +290,15 @@ class AstarRouter:
             pass
 
         return LineString(path_points)
+
+    def get_center_of_pin_macro(self, start_point, start_pin, end_pin):
+        if start_point == start_pin.draw.geom:
+            pw = start_pin.instance.draw.geom.centroid
+            parent = self.occupancy_map._world_to_grid(pw.x, pw.y)
+        elif start_point == end_pin.draw.geom:
+            pw = end_pin.instance.draw.geom.centroid
+            parent = self.occupancy_map._world_to_grid(pw.x, pw.y)
+        return parent
 
     def reroute(self):
         log.info("Starting A* router...")
@@ -376,7 +361,7 @@ class AstarRouter:
                 if inst.draw.geom:
                     self.occupancy_map.add_blockage(inst.draw.geom)
                     halo = inst.draw.geom.buffer(5.0)
-                    self.halo_geometries.append(halo)
+                    self.occupancy_map.add_halo(halo)
 
             # Don't add blockages for pins, as we want to be able to route to them
             # Instead, we'll handle pin access during the A* search by temporarily clearing their occupancy

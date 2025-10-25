@@ -1,4 +1,6 @@
 # src/schematic_from_netlist/router/cost.py
+import logging as log
+
 from shapely.geometry import Point
 
 
@@ -24,12 +26,6 @@ class Cost:
         cost = self.wire_length_weight * wire_length + self.crossing_weight * congestion
         return cost
 
-    def get_base_cost(self, p1: Point) -> float:
-        """
-        Calculates the base cost of a path segment, without congestion.
-        """
-        return self.wire_length_weight * self.occupancy_map.grid_size
-
     def is_bend(self, current, neighbor, parent):
         """Detect if three points form a bend (not collinear)."""
         if parent is None:
@@ -44,9 +40,16 @@ class Cost:
 
         return cross != 0
 
-    def get_neighbor_move_cost(self, current, neighbor, parent):
+    def get_neighbor_move_cost(self, current, neighbor, parent, macro_center):
         cost = self.wire_length_weight
         cost += self.occupancy_map.grid[neighbor] * self.crossing_weight
-        if self.is_bend(current, neighbor, parent):
+        if not parent:
+            parent = macro_center
+        is_bend = self.is_bend(current, neighbor, parent)
+        if is_bend:
             cost += self.bend_penalty
+            cost += self.occupancy_map.grid_via[neighbor] * self.bend_penalty
+        log.debug(
+            f"  Neighbor {neighbor}: route_occupancy={self.occupancy_map.grid[neighbor]} via_occupancy={self.occupancy_map.grid_via[neighbor]} bend:{is_bend} {cost=}"
+        )
         return cost
