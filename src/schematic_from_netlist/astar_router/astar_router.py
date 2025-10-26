@@ -73,8 +73,8 @@ class AstarRouter:
                 log.warning(f"Could not find next connection for net {net.name}")
                 break
 
-            # path = self.astar_search(start_pin, end_pin)
-            path = self.dijkstra_search(start_pin, end_pin)
+            path = self.astar_search(start_pin, end_pin)
+            # path = self.dijkstra_search(start_pin, end_pin)
 
             if path:
                 log.debug(f"Adding path to route tree: {path}")
@@ -94,31 +94,77 @@ class AstarRouter:
             plot_routing_debug_image(module, net, route_tree, self.occupancy_map, self.cost_estimator, output_path)
 
     def _find_next_connection(self, routed_pins, unrouted_pins, route_tree):
-        # Find the cheapest connection from an unrouted pin to the routed tree.
-        # This is a simplification. A proper approach would use something like Prim's algorithm.
+        """
+        Find the lowest cost connection from an unrouted pin to either:
+        - Another pin (for first connection)
+        - Any point on the existing route tree (for subsequent connections)
+        Uses actual routing cost rather than just distance.
+        """
         best_start = None
         best_end = None
-        min_dist = float("inf")
+        min_cost = float("inf")
 
         for end_pin in unrouted_pins:
-            if not route_tree:  # First connection
+            if not route_tree:  # First connection - pin to pin
                 # Find closest routed pin (there's only one)
                 start_pin = next(iter(routed_pins))
-                dist = start_pin.draw.geom.distance(end_pin.draw.geom)
-                if dist < min_dist:
-                    min_dist = dist
-                    best_start = start_pin
-                    best_end = end_pin
-            else:
-                # Find closest point on the existing route tree
-                # This is computationally expensive. A simplification is to check against all routed pins.
-                for start_pin in routed_pins:
-                    dist = start_pin.draw.geom.distance(end_pin.draw.geom)
-                    if dist < min_dist:
-                        min_dist = dist
+                # Use A* to find actual path cost
+                path = self.astar_search(start_pin, end_pin)
+                if path:
+                    cost = path.length
+                    if cost < min_cost:
+                        min_cost = cost
                         best_start = start_pin
                         best_end = end_pin
+            else:  # Subsequent connections - route tree to pin
+                # Create a single geometry representing all existing routes
+                existing_routes = unary_union([r for r in route_tree if r is not None])
+
+                # Sample points along existing routes to find best connection
+                sample_points = []
+                if isinstance(existing_routes, LineString):
+                    sample_points = self._sample_line(existing_routes)
+                elif isinstance(existing_routes, MultiLineString):
+                    for line in existing_routes.geoms:
+                        sample_points.extend(self._sample_line(line))
+
+                # Find lowest cost connection from any sample point
+                for point in sample_points:
+                    # Temporarily move an existing pin's geometry to the sample point
+                    # Use the first routed pin since it's already connected to the route tree
+                    existing_pin = next(iter(routed_pins))
+                    original_geom = existing_pin.draw.geom
+                    try:
+                        existing_pin.draw.geom = Point(point)
+                        # Find path cost from sample point to end pin
+                        path = self.astar_search(existing_pin, end_pin)
+                    finally:
+                        # Restore original geometry
+                        existing_pin.draw.geom = original_geom
+                    if path:
+                        cost = path.length
+                        if cost < min_cost:
+                            min_cost = cost
+                            best_start = existing_pin
+                            best_end = end_pin
+
         return best_start, best_end
+
+    def _sample_line(self, line: LineString, sample_dist: float = 1.0) -> List[Tuple[float, float]]:
+        """
+        Sample points along a LineString at regular intervals.
+        """
+        points = []
+        length = line.length
+        dist = 0.0
+        while dist <= length:
+            point = line.interpolate(dist)
+            points.append((point.x, point.y))
+            dist += sample_dist
+        # Always include the end point
+        if length > 0:
+            points.append((line.coords[-1][0], line.coords[-1][1]))
+        return points
 
     def _initialize_search(self, start_pin: Pin, end_pin: Pin) -> tuple:
         """Initialize search parameters and clear occupancy at start/end nodes."""
