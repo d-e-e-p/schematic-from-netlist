@@ -73,7 +73,8 @@ class AstarRouter:
                 log.warning(f"Could not find next connection for net {net.name}")
                 break
 
-            path = self.astar_search(start_pin, end_pin)
+            # path = self.astar_search(start_pin, end_pin)
+            path = self.dijkstra_search(start_pin, end_pin)
 
             if path:
                 log.debug(f"Adding path to route tree: {path}")
@@ -152,7 +153,7 @@ class AstarRouter:
     def _process_neighbor(self, current, neighbor, parent, macro_center, start_node, end_node, open_set, came_from, g_score):
         """Process a neighbor node during A* search with detailed diagnostics."""
         # Get occupancy and cost details
-        cost = self.cost_estimator.get_neighbor_move_cost(current, neighbor, parent, macro_center, start_node)
+        cost = self.cost_estimator.get_neighbor_move_cost(current, neighbor, parent, macro_center, start_node, end_node)
         move_cost = cost.total
         tentative_g_score = g_score[current] + move_cost
 
@@ -294,6 +295,65 @@ class AstarRouter:
     def _heuristic(self, p1, p2):
         # Manhattan distance on the grid for orthogonal routing
         return (abs(p1[0] - p2[0]) + abs(p1[1] - p2[1])) * self.grid_size
+
+    def dijkstra_search(self, start_pin: Pin, end_pin: Pin) -> Optional[LineString]:
+        """
+        Dijkstra's search on a grid to find a path between two pins.
+        Similar to A* but without heuristic function.
+        """
+        # Initialize search with detailed logging
+        log.info(f"\nStarting Dijkstra search from {start_pin.full_name} to {end_pin.full_name}")
+        start_point, end_point, start_node, end_node, start_occ, end_occ = self._initialize_search(start_pin, end_pin)
+
+        # Check for trivial case
+        if trivial_path := self._handle_trivial_case(start_point, end_point, start_node, end_node):
+            log.debug("Trivial path found (start and end nodes are the same)")
+            return trivial_path
+
+        # Initialize search structures
+        open_set = []
+        heapq.heappush(open_set, (0.0, 0.0, start_node, None))  # (f_score, g_score, node, parent)
+        came_from = {}
+        g_score = {start_node: 0}
+        path = None
+        iteration = 0
+        ncost = {}
+
+        # Main search loop with iteration tracking
+        while open_set:
+            iteration += 1
+            f, g, current, parent = heapq.heappop(open_set)
+
+            log.debug(f"Iteration {iteration}:  Processing node {current}  Current g_score: {g}  Parent node: {parent}")
+
+            if not parent:
+                macro_center = self.get_center_of_pin_macro(start_point, start_pin, end_pin)
+                log.info(f"  Macro center: {macro_center}")
+
+            if current == end_node:
+                path = self._reconstruct_path(came_from, current)
+                log.info(f"Path found after {iteration} iterations: {path}")
+                break
+
+            # Process all neighbors with detailed diagnostics
+            neighbors = list(self._get_neighbors(current))
+            log.debug(f"  Processing {len(neighbors)} neighbors")
+            for neighbor in neighbors:
+                ncost[neighbor] = self._process_neighbor(
+                    current, neighbor, parent, macro_center, start_node, end_node, open_set, came_from, g_score
+                )
+
+            # Log open set status
+            log.debug(f"  Open set size: {len(open_set)}")
+            if open_set:
+                next_g, next_node, _, _ = open_set[0]
+                log.debug(f"  Next node to process: {next_node} with g={next_g}")
+
+        if path is None:
+            log.warning(f"  No path found from {start_node} to {end_node}")
+            return None
+
+        return self._create_final_path(path, start_point, end_point)
 
     def _reconstruct_path(self, came_from, end_node) -> LineString:
         # Reconstruct the path from end to start

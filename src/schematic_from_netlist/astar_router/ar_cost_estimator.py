@@ -40,7 +40,7 @@ class CostEstimator:
         self.cf = CostFactors()
         self.cf.base_length = 1.0
         self.cf.base_via = 2.0
-        self.cf.halo_length = 10.0
+        self.cf.halo_length = 2.0
         self.cf.halo_via = 100.0
         self.cf.crossings = 5
 
@@ -54,8 +54,11 @@ class CostEstimator:
         # TODO
         return cost
 
-    def is_bend(self, current, neighbor, parent):
+    def is_bend(self, nodes):
         """Detect if three points form a bend (not collinear)."""
+
+        parent, current, neighbor = nodes
+
         if parent is None:
             return False
 
@@ -68,10 +71,18 @@ class CostEstimator:
 
         return cross != 0
 
-    def get_neighbor_move_cost(self, current, neighbor, parent, macro_center, start_node):
+    def get_neighbor_move_cost(self, current, neighbor, parent, macro_center, start_node, end_node):
         """Calculate the cost of moving to a neighbor node."""
 
-        is_bend = self.is_bend(current, neighbor, parent)
+        # deterine bending into macro
+        if current == start_node:
+            nodes = [macro_center, current, neighbor]
+        elif neighbor == end_node:
+            nodes = [current, neighbor, macro_center]
+        else:
+            nodes = [parent, current, neighbor]
+        is_bend = self.is_bend(nodes)
+
         via_in_halo = self.occupancy_map.grid_via[neighbor]
 
         metric = Metric()
