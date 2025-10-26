@@ -150,7 +150,7 @@ class OccupancyMap:
         """
         Adds a via blockage to the occupancy map.
         """
-        self._rasterize_polygon(polygon, self.grid_via, np.inf)
+        self._rasterize_polygon(polygon, self.grid_via, 1)
         self._rasterize_polygon(polygon, self.grid, 1)
 
     def _rasterize_polygon(self, polygon, grid_ptr, value):

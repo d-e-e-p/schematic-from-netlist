@@ -11,7 +11,7 @@ import numpy as np
 from shapely.geometry import GeometryCollection, LineString, MultiLineString, Point
 from shapely.ops import linemerge, snap, unary_union
 
-from schematic_from_netlist.astar_router.ar_cost import Cost
+from schematic_from_netlist.astar_router.ar_cost_estimator import CostEstimator
 from schematic_from_netlist.astar_router.ar_debug import plot_occupancy_summary, plot_routing_debug_image, plot_routing_summary
 from schematic_from_netlist.astar_router.ar_occupancy import OccupancyMap
 from schematic_from_netlist.database.netlist_structures import Module, Net, Pin
@@ -30,7 +30,9 @@ class AstarRouter:
         self.occupancy_map: Optional[OccupancyMap] = None
         self.cost_estimator: Optional[Cost] = None
         self.grid_size = 1
+        self.halo_size = 2
         self.halo_geometries: List = []
+        self.cost_estimator = CostEstimator(self.occupancy_map)
 
     def adjust_pin_locations(self, module: Module):
         """
@@ -158,25 +160,43 @@ class AstarRouter:
             return LineString([(px, py), (px, ey), (ex, ey)])
         return None
 
-    def _process_neighbor(self, current, neighbor, parent, macro_center, end_node, open_set, came_from, g_score):
-        """Process a neighbor node during A* search."""
-        if self.occupancy_map.grid[neighbor] == np.inf:
-            log.debug(f"  Neighbor {neighbor} is blocked (inf occupancy)")
-            return
-
-        move_cost = self.cost_estimator.get_neighbor_move_cost(current, neighbor, parent, macro_center)
+    def _process_neighbor(self, current, neighbor, parent, macro_center, start_node, end_node, open_set, came_from, g_score):
+        """Process a neighbor node during A* search with detailed diagnostics."""
+        # Get occupancy and cost details
+        move_cost = self.cost_estimator.get_neighbor_move_cost(current, neighbor, parent, macro_center, start_node)
         tentative_g_score = g_score[current] + move_cost
 
-        if self.occupancy_map.grid[neighbor] > -1:
-            log.debug(f"  Neighbor {neighbor} has occupancy {self.occupancy_map.grid[neighbor]} {move_cost=} {tentative_g_score=}")
+        # Detailed debug logging
+        log.debug(
+            f"Processing neighbor {neighbor}:"
+            f"  Current node: {current}"
+            f"  Parent node: {parent}"
+            f"  Move cost: {move_cost}"
+            f"  Tentative g_score: {tentative_g_score}"
+        )
 
+        # Check if we should update this neighbor's path
         if neighbor not in g_score or tentative_g_score < g_score[neighbor]:
-            g_score[neighbor] = tentative_g_score
             h = self._heuristic(neighbor, end_node)
             f = tentative_g_score + h
+
+            # Log heuristic and total cost
+            log.debug(f"  Heuristic (h): {h}")
+            log.debug(f"  Total cost (f): {f}")
+
+            # Update scores and add to open set
+            g_score[neighbor] = tentative_g_score
             heapq.heappush(open_set, (f, tentative_g_score, neighbor, current))
             came_from[neighbor] = current
-            log.debug(f"    Adding neighbor {neighbor} to open set with f={f} occupancy {self.occupancy_map.grid[neighbor]}")
+
+            log.debug(f"  Updated path through {neighbor} with f={f}")
+
+            # Log comparison with previous best if it exists
+            if neighbor in g_score:
+                log.debug(f"  Previous g_score: {g_score[neighbor]}")
+                log.debug(f"  Improvement: {g_score[neighbor] - tentative_g_score}")
+        else:
+            log.debug(f"  Keeping existing path (current g_score: {g_score[neighbor]})")
 
     def _create_final_path(self, path, start_point, end_point) -> LineString:
         """Create the final path with proper bends at start and end points."""
@@ -205,13 +225,15 @@ class AstarRouter:
 
     def astar_search(self, start_pin: Pin, end_pin: Pin) -> Optional[LineString]:
         """
-        A* search on a grid to find a path between two pins.
+        A* search on a grid to find a path between two pins with detailed diagnostics.
         """
-        # Initialize search
+        # Initialize search with detailed logging
+        log.info(f"\nStarting A* search from {start_pin.full_name} to {end_pin.full_name}")
         start_point, end_point, start_node, end_node, start_occ, end_occ = self._initialize_search(start_pin, end_pin)
 
         # Check for trivial case
         if trivial_path := self._handle_trivial_case(start_point, end_point, start_node, end_node):
+            log.debug("Trivial path found (start and end nodes are the same)")
             return trivial_path
 
         # Initialize search structures
@@ -221,22 +243,44 @@ class AstarRouter:
         came_from = {}
         g_score = {start_node: 0}
         path = None
+        iteration = 0
 
-        # Main search loop
+        # Main search loop with iteration tracking
         while open_set:
+            iteration += 1
             f, g, current, _ = heapq.heappop(open_set)
             parent = came_from.get(current)
+
+            log.debug(
+                f"Iteration {iteration}:"
+                f"  Processing node {current}"
+                f"  Current f_score: {f}"
+                f"  Current g_score: {g}"
+                f"  Parent node: {parent}"
+            )
+
             if not parent:
-                # assume center of macro is start point of route for bend calc purposes
                 macro_center = self.get_center_of_pin_macro(start_point, start_pin, end_pin)
+                log.info(f"  Macro center: {macro_center}")
 
             if current == end_node:
                 path = self._reconstruct_path(came_from, current)
-                log.debug(f"  Path found: {path}")
+                log.info(f"Path found after {iteration} iterations: {path}")
                 break
 
-            for neighbor in self._get_neighbors(current):
-                self._process_neighbor(current, neighbor, parent, macro_center, end_node, open_set, came_from, g_score)
+            # Process all neighbors with detailed diagnostics
+            neighbors = list(self._get_neighbors(current))
+            log.debug(f"  Processing {len(neighbors)} neighbors")
+            for neighbor in neighbors:
+                self._process_neighbor(
+                    current, neighbor, parent, macro_center, start_node, end_node, open_set, came_from, g_score
+                )
+
+            # Log open set status
+            log.debug(f"  Open set size: {len(open_set)}")
+            if open_set:
+                next_f, next_g, next_node, _ = open_set[0]
+                log.debug(f"  Next node to process: {next_node} with f={next_f}")
 
         if path is None:
             log.warning(f"  No path found from {start_node} to {end_node}")
@@ -352,7 +396,7 @@ class AstarRouter:
             maxy += padding
 
             self.occupancy_map = OccupancyMap((minx, miny, maxx, maxy), self.grid_size)
-            self.cost_estimator = Cost(self.occupancy_map)
+            self.cost_estimator = CostEstimator(self.occupancy_map)
             log.info(f"Occupancy map grid size: {self.occupancy_map.nx} x {self.occupancy_map.ny}")
             log.info(f"Occupancy map bounds: ({minx}, {miny}) to ({maxx}, {maxy})")
 
@@ -360,7 +404,7 @@ class AstarRouter:
             for inst in module.instances.values():
                 if inst.draw.geom:
                     self.occupancy_map.add_blockage(inst.draw.geom)
-                    halo = inst.draw.geom.buffer(5.0)
+                    halo = inst.draw.geom.buffer(self.halo_size)
                     self.occupancy_map.add_halo(halo)
 
             # Don't add blockages for pins, as we want to be able to route to them

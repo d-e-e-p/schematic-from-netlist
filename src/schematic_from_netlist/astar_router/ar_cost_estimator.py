@@ -1,0 +1,111 @@
+# src/schematic_from_netlist/router/cost.py
+import logging as log
+from dataclasses import dataclass, field
+
+from shapely.geometry import Point
+
+
+@dataclass
+class Base:
+    base_length: float = 0
+    base_via: float = 0
+    halo_length: float = 0
+    halo_via: float = 0
+    crossings: float = 0
+
+
+@dataclass
+class Metric(Base):
+    pass
+
+
+@dataclass
+class Cost(Base):
+    total: float = 0
+
+
+@dataclass
+class CostFactors(Base):
+    pass
+
+
+class CostEstimator:
+    """
+    Calculates routing costs.
+    """
+
+    def __init__(self, occupancy_map):
+        self.occupancy_map = occupancy_map
+
+        self.cf = CostFactors()
+        self.cf.base_length = 1.0
+        self.cf.base_via = 2.0
+        self.cf.halo_length = 1.0
+        self.cf.halo_via = 20.0
+        self.cf.crossings = 5
+
+    def get_cost(self, p1: Point, p2: Point) -> float:
+        """
+        Calculates the cost of a path segment between two points.
+        """
+        wire_length = p1.distance(p2)
+        congestion = self.occupancy_map.get_congestion_for_segment(p1, p2)
+
+        # TODO
+        return cost
+
+    def is_bend(self, current, neighbor, parent):
+        """Detect if three points form a bend (not collinear)."""
+        if parent is None:
+            return False
+
+        # Vectors from parent to current, and current to neighbor
+        v1 = (current[0] - parent[0], current[1] - parent[1])
+        v2 = (neighbor[0] - current[0], neighbor[1] - current[1])
+
+        # Cross product: if zero, points are collinear (no bend)
+        cross = v1[0] * v2[1] - v1[1] * v2[0]
+
+        return cross != 0
+
+    def get_neighbor_move_cost(self, current, neighbor, parent, macro_center, start_node):
+        """Calculate the cost of moving to a neighbor node."""
+
+        is_bend = self.is_bend(current, neighbor, parent)
+        via_in_halo = self.occupancy_map.grid_via[neighbor]
+
+        # --- Start of new logic ---
+        # Penalize continuing in a straight line from the macro center at the very first step.
+        # This forces the path to turn immediately, creating a "jut out".
+        initial_straight_penalty = 0.0
+        if parent is None and macro_center is not None:
+            # Vector from macro center to the current node (the start pin)
+            v1 = (current[0] - macro_center[0], current[1] - macro_center[1])
+            # Vector for the proposed move
+            v2 = (neighbor[0] - current[0], neighbor[1] - current[1])
+
+            # Check for collinearity using the cross-product.
+            cross_product = v1[0] * v2[1] - v1[1] * v2[0]
+            if cross_product == 0:
+                initial_straight_penalty = self.cf.halo_via * 10  # High penalty for moving straight
+        # --- End of new logic ---
+
+        metric = Metric()
+        metric.base_length = 1.0
+        metric.base_via = int(is_bend)
+        metric.halo_length = via_in_halo
+        metric.halo_via = int(is_bend) * via_in_halo
+        metric.crossings = self.occupancy_map.grid[neighbor]
+
+        cost = Cost()
+        cost.base_length = metric.base_length * self.cf.base_length
+        cost.base_via = metric.base_via * self.cf.base_via
+        cost.halo_length = metric.halo_length * self.cf.halo_length
+        cost.halo_via = metric.halo_via * self.cf.halo_via
+        cost.crossings = metric.crossings * self.cf.crossings
+        cost.total = (
+            cost.base_length + cost.base_via + cost.halo_length + cost.halo_via + cost.crossings + initial_straight_penalty
+        )
+
+        log.debug(f"  Neighbor {neighbor}: {metric=}, {cost=}")
+        return cost.total

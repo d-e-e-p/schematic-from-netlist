@@ -6,13 +6,13 @@ import numpy as np
 from shapely.geometry import LineString, MultiLineString, Polygon, box
 from shapely.ops import unary_union
 
-from schematic_from_netlist.astar_router.ar_cost import Cost
+from schematic_from_netlist.astar_router.ar_cost_estimator import CostEstimator
 from schematic_from_netlist.astar_router.ar_occupancy import OccupancyMap
 from schematic_from_netlist.database.netlist_structures import Module, Net
 
 
 def plot_routing_debug_image(
-    module: Module, net: Net, route_tree: list, occupancy_map: OccupancyMap, cost_estimator: Cost, output_path: str
+    module: Module, net: Net, route_tree: list, occupancy_map: OccupancyMap, cost_estimator: CostEstimator, output_path: str
 ):
     """
     Generates and saves a debug image for the routing of a single net.
@@ -254,7 +254,6 @@ def plot_occupancy_summary(module: Module, occupancy_map: OccupancyMap, output_p
         world_x = occupancy_map.minx + ix * occupancy_map.grid_size
         world_y = occupancy_map.miny + iy * occupancy_map.grid_size
         ax.plot(world_x, world_y, "rx", markersize=4)
-    breakpoint()
 
     # Set plot limits
     ax.set_xlim(occupancy_map.minx, occupancy_map.maxx)
