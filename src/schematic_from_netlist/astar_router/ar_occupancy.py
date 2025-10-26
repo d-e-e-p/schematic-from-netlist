@@ -58,10 +58,10 @@ class OccupancyMap:
         iy = int((y - self.miny) / self.grid_size)
         ix = max(0, min(ix, self.nx - 1))
         iy = max(0, min(iy, self.ny - 1))
-        log.debug(
+        log.trace(
             f"Converting world ({x:.2f}, {y:.2f}) to grid ({ix}, {iy}) with bounds ({self.minx:.2f}, {self.miny:.2f}) to ({self.maxx:.2f}, {self.maxy:.2f})"
         )
-        log.debug(f"Grid size: {self.grid_size}, nx: {self.nx}, ny: {self.ny}")
+        log.trace(f"Grid size: {self.grid_size}, nx: {self.nx}, ny: {self.ny}")
         return ix, iy
 
     def _grid_to_world(self, ix, iy):

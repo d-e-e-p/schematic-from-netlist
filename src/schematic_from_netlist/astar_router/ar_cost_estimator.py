@@ -89,5 +89,5 @@ class CostEstimator:
         cost.crossings = metric.crossings * self.cf.crossings
         cost.total = cost.base_length + cost.base_via + cost.halo_length + cost.halo_via + cost.crossings
 
-        log.debug(f"  Neighbor {neighbor}: {metric=}, {cost=}")
+        log.trace(f"  Neighbor {neighbor}: {metric=}, {cost=}")
         return cost

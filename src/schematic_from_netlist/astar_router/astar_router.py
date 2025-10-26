@@ -157,7 +157,7 @@ class AstarRouter:
         tentative_g_score = g_score[current] + move_cost
 
         # Detailed debug logging
-        log.debug(
+        log.trace(
             f"Processing neighbor {neighbor}:"
             f"  Current node: {current}"
             f"  Parent node: {parent}"
@@ -171,20 +171,22 @@ class AstarRouter:
             f = tentative_g_score + h
 
             # Log heuristic and total cost
-            log.debug(f"  Heuristic (h): {h}")
-            log.debug(f"  Total cost (f): {f}")
 
             # Update scores and add to open set
             g_score[neighbor] = tentative_g_score
             heapq.heappush(open_set, (f, tentative_g_score, neighbor, current))
             came_from[neighbor] = current
 
-            log.debug(f"  Updated path through {neighbor} with f={f}")
-
             # Log comparison with previous best if it exists
             if neighbor in g_score:
-                log.debug(f"  Previous g_score: {g_score[neighbor]}")
-                log.debug(f"  Improvement: {g_score[neighbor] - tentative_g_score}")
+                log.debug(
+                    "Improvement: "
+                    f"  Heuristic (h): {h}"
+                    f"  Total cost (f): {f}"
+                    f"  Updated path through {neighbor} with f={f}"
+                    f"  Previous g_score: {g_score[neighbor]}"
+                    f"  Improvement: {g_score[neighbor] - tentative_g_score}"
+                )
         else:
             log.debug(f"  Keeping existing path (current g_score: {g_score[neighbor]})")
 
