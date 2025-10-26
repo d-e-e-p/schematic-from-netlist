@@ -30,7 +30,7 @@ class AstarRouter:
         self.occupancy_map: Optional[OccupancyMap] = None
         self.cost_estimator: Optional[Cost] = None
         self.grid_size = 1
-        self.halo_size = 2
+        self.halo_size = 4
         self.halo_geometries: List = []
         self.cost_estimator = CostEstimator(self.occupancy_map)
 
@@ -78,17 +78,6 @@ class AstarRouter:
             if path:
                 log.debug(f"Adding path to route tree: {path}")
                 route_tree.append(path)
-                # Debug: print occupancy before update
-                log.debug(f"Updating occupancy for path: {path}")
-                self.occupancy_map.update_occupancy(path)
-                # Debug: print some occupancy values to verify
-                # Sample a few points along the path to check their occupancy
-                log.info(f"testing path for occupancy: {path}")
-                for i in range(5):
-                    sample_point = path.interpolate(i / 4, normalized=True)
-                    ix, iy = self.occupancy_map._world_to_grid(sample_point.x, sample_point.y)
-                    occupancy = self.occupancy_map.grid[ix, iy]
-                    log.info(f"Occupancy at grid ({ix}, {iy}) after update: {occupancy}")
             else:
                 log.warning(
                     f"A* search failed for net {net.name} between {start_pin.full_name} at {start_pin.draw.geom} and {end_pin.full_name} at {end_pin.draw.geom}."
@@ -99,8 +88,8 @@ class AstarRouter:
 
         if route_tree:
             net.draw.geom = self.merge_routes(route_tree)
-            # self.occupancy_map.update_occupancy(net.draw.geom) # This was moved inside the loop
-            output_path = f"data/images/route/{module.name}_{net.name}.png"
+            self.occupancy_map.update_occupancy(route_tree)
+            output_path = f"data/images/astar/{module.name}_{net.name}.png"
             plot_routing_debug_image(module, net, route_tree, self.occupancy_map, self.cost_estimator, output_path)
 
     def _find_next_connection(self, routed_pins, unrouted_pins, route_tree):
@@ -163,7 +152,8 @@ class AstarRouter:
     def _process_neighbor(self, current, neighbor, parent, macro_center, start_node, end_node, open_set, came_from, g_score):
         """Process a neighbor node during A* search with detailed diagnostics."""
         # Get occupancy and cost details
-        move_cost = self.cost_estimator.get_neighbor_move_cost(current, neighbor, parent, macro_center, start_node)
+        cost = self.cost_estimator.get_neighbor_move_cost(current, neighbor, parent, macro_center, start_node)
+        move_cost = cost.total
         tentative_g_score = g_score[current] + move_cost
 
         # Detailed debug logging
@@ -197,6 +187,8 @@ class AstarRouter:
                 log.debug(f"  Improvement: {g_score[neighbor] - tentative_g_score}")
         else:
             log.debug(f"  Keeping existing path (current g_score: {g_score[neighbor]})")
+
+        return cost
 
     def _create_final_path(self, path, start_point, end_point) -> LineString:
         """Create the final path with proper bends at start and end points."""
@@ -244,6 +236,7 @@ class AstarRouter:
         g_score = {start_node: 0}
         path = None
         iteration = 0
+        ncost = {}
 
         # Main search loop with iteration tracking
         while open_set:
@@ -272,7 +265,7 @@ class AstarRouter:
             neighbors = list(self._get_neighbors(current))
             log.debug(f"  Processing {len(neighbors)} neighbors")
             for neighbor in neighbors:
-                self._process_neighbor(
+                ncost[neighbor] = self._process_neighbor(
                     current, neighbor, parent, macro_center, start_node, end_node, open_set, came_from, g_score
                 )
 
@@ -417,14 +410,14 @@ class AstarRouter:
                 key=lambda net: net.num_conn,
             )
 
-            os.makedirs("data/images/route", exist_ok=True)
+            os.makedirs("data/images/astar", exist_ok=True)
             for i, net in enumerate(sorted_nets):
                 log.info(f"Routing net {i + 1}/{len(sorted_nets)}: {net.name}")
                 self.route_net(module, net)
 
             # Generate summary plots after routing all nets in the module
-            summary_path = f"data/images/route/{module.name}_summary.png"
-            occupancy_summary_path = f"data/images/route/{module.name}_occupancy.png"
+            summary_path = f"data/images/astar/{module.name}_summary.png"
+            occupancy_summary_path = f"data/images/astar/{module.name}_occupancy.png"
 
             plot_routing_summary(module, sorted_nets, self.occupancy_map, summary_path)
             plot_occupancy_summary(module, self.occupancy_map, occupancy_summary_path)
@@ -464,7 +457,7 @@ class AstarRouter:
 
         #  Final fallback: pick only the line parts
         lines = [g for g in merged.geoms if isinstance(g, (LineString, MultiLineString))]
-        # log.debug(f"G {route_tree=} -> {snapped=} {merged=}")
+        log.warning(f"G {route_tree=} -> {snapped=} {merged=}")
         return MultiLineString(lines)
 
     def _remove_collinear_points(self, line: LineString) -> LineString:

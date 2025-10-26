@@ -40,8 +40,8 @@ class CostEstimator:
         self.cf = CostFactors()
         self.cf.base_length = 1.0
         self.cf.base_via = 2.0
-        self.cf.halo_length = 1.0
-        self.cf.halo_via = 20.0
+        self.cf.halo_length = 10.0
+        self.cf.halo_via = 100.0
         self.cf.crossings = 5
 
     def get_cost(self, p1: Point, p2: Point) -> float:
@@ -74,22 +74,6 @@ class CostEstimator:
         is_bend = self.is_bend(current, neighbor, parent)
         via_in_halo = self.occupancy_map.grid_via[neighbor]
 
-        # --- Start of new logic ---
-        # Penalize continuing in a straight line from the macro center at the very first step.
-        # This forces the path to turn immediately, creating a "jut out".
-        initial_straight_penalty = 0.0
-        if parent is None and macro_center is not None:
-            # Vector from macro center to the current node (the start pin)
-            v1 = (current[0] - macro_center[0], current[1] - macro_center[1])
-            # Vector for the proposed move
-            v2 = (neighbor[0] - current[0], neighbor[1] - current[1])
-
-            # Check for collinearity using the cross-product.
-            cross_product = v1[0] * v2[1] - v1[1] * v2[0]
-            if cross_product == 0:
-                initial_straight_penalty = self.cf.halo_via * 10  # High penalty for moving straight
-        # --- End of new logic ---
-
         metric = Metric()
         metric.base_length = 1.0
         metric.base_via = int(is_bend)
@@ -103,9 +87,7 @@ class CostEstimator:
         cost.halo_length = metric.halo_length * self.cf.halo_length
         cost.halo_via = metric.halo_via * self.cf.halo_via
         cost.crossings = metric.crossings * self.cf.crossings
-        cost.total = (
-            cost.base_length + cost.base_via + cost.halo_length + cost.halo_via + cost.crossings + initial_straight_penalty
-        )
+        cost.total = cost.base_length + cost.base_via + cost.halo_length + cost.halo_via + cost.crossings
 
         log.debug(f"  Neighbor {neighbor}: {metric=}, {cost=}")
-        return cost.total
+        return cost

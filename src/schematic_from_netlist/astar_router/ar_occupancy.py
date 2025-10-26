@@ -3,7 +3,7 @@
 import logging as log
 
 import numpy as np
-from shapely.geometry import LineString, Point
+from shapely.geometry import LineString, MultiLineString, Point
 
 log.basicConfig(level=log.DEBUG)
 
@@ -69,14 +69,24 @@ class OccupancyMap:
         y = self.miny + iy * self.grid_size
         return Point(x, y)
 
-    def update_occupancy(self, geometry):
+    def update_occupancy(self, geom):
         """
-        Updates the occupancy grid for a given geometry (e.g., LineString).
+        Updates the occupancy grid for a given tree
         """
-        log.debug(f"update_occupancy called with geometry: {geometry}")
-        if isinstance(geometry, LineString):
-            self._rasterize_line(geometry)
-        # Can be extended for other geometry types
+        log.debug(f"update_occupancy called with {geom}")
+        if isinstance(geom, list):
+            geom = MultiLineString(geom)
+
+        # Handle simple LineString
+        if isinstance(geom, LineString):
+            for x, y in geom.coords:
+                self.grid[int(x), int(y)] += 1
+
+            # Handle MultiLineString
+        if isinstance(geom, MultiLineString):
+            for i, seg in enumerate(geom.geoms):
+                for x, y in seg.coords:
+                    self.grid[int(x), int(y)] += 1
 
     def _rasterize_line(self, line):
         """Rasterize a line onto an integer grid."""

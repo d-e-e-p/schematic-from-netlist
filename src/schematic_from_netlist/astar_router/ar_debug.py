@@ -15,7 +15,7 @@ def plot_routing_debug_image(
     module: Module, net: Net, route_tree: list, occupancy_map: OccupancyMap, cost_estimator: CostEstimator, output_path: str
 ):
     """
-    Generates and saves a debug image for the routing of a single net.
+    Generates and saves a debug image for the routing of a single net in grid units.
     """
     log.debug(f"Plotting debug image for net {net.name} to {output_path}")
 
@@ -30,39 +30,52 @@ def plot_routing_debug_image(
     # Transpose grid for correct orientation with imshow
     grid = grid.T
 
-    im = ax.imshow(grid, origin="lower", extent=occupancy_map.bounds, cmap="viridis_r", interpolation="nearest", alpha=0.5)
+    # Use grid indices for extent
+    extent = [0, occupancy_map.nx, 0, occupancy_map.ny]
+    im = ax.imshow(grid, origin="lower", extent=extent, cmap="viridis_r", interpolation="nearest", alpha=0.5)
     fig.colorbar(im, ax=ax, label="Base Routing Cost")
 
-    # Plot module instances (macros)
+    # Plot module instances (macros) in grid units
     for inst in module.instances.values():
         if inst.draw.geom:
             if isinstance(inst.draw.geom, Polygon):
                 minx, miny, maxx, maxy = inst.draw.geom.bounds
-                rect = plt.Rectangle((minx, miny), maxx - minx, maxy - miny, fill=True, color="gray", alpha=0.6)
+                gminx, gminy = occupancy_map._world_to_grid(minx, miny)
+                gmaxx, gmaxy = occupancy_map._world_to_grid(maxx, maxy)
+                rect = plt.Rectangle((gminx, gminy), gmaxx - gminx, gmaxy - gminy, fill=True, color="gray", alpha=0.6)
                 ax.add_patch(rect)
             else:
                 x, y = inst.draw.geom.exterior.xy
-                ax.fill(x, y, alpha=0.6, fc="gray", ec="none")
+                gx, gy = occupancy_map._world_to_grid(x, y)
+                ax.fill(gx, gy, alpha=0.6, fc="gray", ec="none")
 
-    # Plot net pins
+    # Plot net pins in grid units
     for pin in net.pins.values():
         if pin.draw.geom:
-            ax.plot(pin.draw.geom.x, pin.draw.geom.y, "ro", markersize=5)
-            ax.text(pin.draw.geom.x, pin.draw.geom.y, pin.name, fontsize=8)
+            gx, gy = occupancy_map._world_to_grid(pin.draw.geom.x, pin.draw.geom.y)
+            ax.plot(gx, gy, "ro", markersize=5)
+            ax.text(gx, gy, pin.name, fontsize=8)
 
-    # Plot route tree
+    # Plot route tree in grid units
     for path in route_tree:
-        x, y = path.xy
-        log.info(f"  Route path: {path.xy}")
-        ax.plot(x, y, "b-", linewidth=1.5)
+        gx = []
+        gy = []
+        for x, y in path.coords:
+            gx_, gy_ = occupancy_map._world_to_grid(x, y)
+            gx.append(gx_)
+            gy.append(gy_)
+        log.info(f"  Route path: {list(zip(gx, gy))}")
+        ax.plot(gx, gy, "b-", linewidth=1.5)
 
-    # Set plot limits and labels
+    # Set plot limits and labels in grid units
     combined = unary_union(route_tree)
     minx, miny, maxx, maxy = combined.bounds
-    width = maxx - minx
-    height = maxy - miny
-    ax.set_xlim(minx - width * 0.5, maxx + width * 0.5)
-    ax.set_ylim(miny - height * 0.5, maxy + height * 0.5)
+    gminx, gminy = occupancy_map._world_to_grid(minx, miny)
+    gmaxx, gmaxy = occupancy_map._world_to_grid(maxx, maxy)
+    width = gmaxx - gminx
+    height = gmaxy - gminy
+    ax.set_xlim(gminx - width * 0.5, gmaxx + width * 0.5)
+    ax.set_ylim(gminy - height * 0.5, gmaxy + height * 0.5)
     ax.set_aspect("equal", adjustable="box")
     ax.set_title(f"Routing for Net: {net.name} in Module: {module.name}")
     ax.set_xlabel("X coordinate")
@@ -82,7 +95,7 @@ def plot_routing_debug_image(
 
 def plot_routing_summary(module: Module, nets: list, occupancy_map: OccupancyMap, output_path: str):
     """
-    Generates and saves a summary plot showing all routed nets in different colors.
+    Generates and saves a summary plot showing all routed nets in different colors in grid units.
     """
     log.info(f"Plotting routing summary for module {module.name} to {output_path}")
 
@@ -91,10 +104,11 @@ def plot_routing_summary(module: Module, nets: list, occupancy_map: OccupancyMap
     # Plot occupancy grid as background
     # Create a grid showing occupancy levels
     occupancy_grid = occupancy_map.grid.T  # Transpose for correct orientation
+    extent = [0, occupancy_map.nx, 0, occupancy_map.ny]
     im = ax.imshow(
         occupancy_grid,
         origin="lower",
-        extent=occupancy_map.bounds,
+        extent=extent,
         cmap="Reds",
         alpha=0.3,
         vmin=0,
@@ -102,38 +116,44 @@ def plot_routing_summary(module: Module, nets: list, occupancy_map: OccupancyMap
     )
     fig.colorbar(im, ax=ax, label="Occupancy Level")
 
-    # Plot module instances (macros) as blockages
+    # Plot module instances (macros) as blockages in grid units
     for inst in module.instances.values():
         if inst.draw.geom:
             if isinstance(inst.draw.geom, Polygon):
                 minx, miny, maxx, maxy = inst.draw.geom.bounds
-                rect = plt.Rectangle((minx, miny), maxx - minx, maxy - miny, fill=True, color="black", alpha=0.8, label="Blockage")
+                gminx, gminy = occupancy_map._world_to_grid(minx, miny)
+                gmaxx, gmaxy = occupancy_map._world_to_grid(maxx, maxy)
+                rect = plt.Rectangle(
+                    (gminx, gminy), gmaxx - gminx, gmaxy - gminy, fill=True, color="black", alpha=0.8, label="Blockage"
+                )
                 ax.add_patch(rect)
             else:
                 x, y = inst.draw.geom.exterior.xy
-                ax.fill(x, y, alpha=0.8, fc="black", ec="none", label="Blockage")
+                gx, gy = occupancy_map._world_to_grid(x, y)
+                ax.fill(gx, gy, alpha=0.8, fc="black", ec="none", label="Blockage")
 
     # Generate a color map for nets
     import matplotlib.cm as cm
 
     colors = cm.rainbow(np.linspace(0, 1, len(nets)))
 
-    # Plot all nets with their pins and routes
-    for i, net in enumerate(nets):
+    # Plot all nets with their pins and routes in grid units
+    for i, net in enumerate(module.nets.values()):
         color = colors[i]
 
         # Plot net pins
         for pin in net.pins.values():
             if pin.draw.geom:
-                ax.plot(pin.draw.geom.x, pin.draw.geom.y, "o", color=color, markersize=8, markeredgecolor="black")
-                ax.text(pin.draw.geom.x, pin.draw.geom.y, f"{net.name}:{pin.name}", fontsize=8, alpha=0.9)
+                gx, gy = occupancy_map._world_to_grid(pin.draw.geom.x, pin.draw.geom.y)
+                ax.plot(gx, gy, "o", color=color, markersize=8, markeredgecolor="black")
+                ax.text(gx, gy, f"{net.name}:{pin.name}", fontsize=8, alpha=0.9)
 
         # Plot net route if it exists
-        draw_route(ax, net, color)
+        draw_route(ax, net, color, occupancy_map)
 
-    # Set plot limits based on occupancy map bounds
-    ax.set_xlim(occupancy_map.minx, occupancy_map.maxx)
-    ax.set_ylim(occupancy_map.miny, occupancy_map.maxy)
+    # Set plot limits based on grid size
+    ax.set_xlim(0, occupancy_map.nx)
+    ax.set_ylim(0, occupancy_map.ny)
     ax.set_aspect("equal", adjustable="box")
     ax.set_title(f"Routing Summary with Occupancy for Module: {module.name}")
     ax.set_xlabel("X coordinate")
@@ -155,21 +175,29 @@ def plot_routing_summary(module: Module, nets: list, occupancy_map: OccupancyMap
         plt.close(fig)
 
 
-def draw_route(ax, net, color):
+def draw_route(ax, net, color, occupancy_map):
     geom = net.draw.geom
+
+    if isinstance(geom, list):
+        geom = MultiLineString(geom)
 
     # Handle simple LineString
     if isinstance(geom, LineString):
-        xs, ys = geom.xy
-        ax.plot(xs, ys, "-", color=color, linewidth=3, label=net.name)
+        gx = []
+        gy = []
+        for x, y in geom.coords:
+            gx_, gy_ = occupancy_map._world_to_grid(x, y)
+            gx.append(gx_)
+            gy.append(gy_)
+        ax.plot(gx, gy, "-", color=color, linewidth=3, label=net.name)
 
         # Add arrow at midpoint
-        if len(xs) > 1:
-            mid = len(xs) // 2
+        if len(gx) > 1:
+            mid = len(gx) // 2
             ax.annotate(
                 "",
-                xy=(xs[mid], ys[mid]),
-                xytext=(xs[mid - 1], ys[mid - 1]),
+                xy=(gx[mid], gy[mid]),
+                xytext=(gx[mid - 1], gy[mid - 1]),
                 arrowprops=dict(arrowstyle="->", color=color, lw=2),
             )
         return
@@ -177,18 +205,23 @@ def draw_route(ax, net, color):
     # Handle MultiLineString
     if isinstance(geom, MultiLineString):
         for i, seg in enumerate(geom.geoms):
-            xs, ys = seg.xy
+            gx = []
+            gy = []
+            for x, y in seg.coords:
+                gx_, gy_ = occupancy_map._world_to_grid(x, y)
+                gx.append(gx_)
+                gy.append(gy_)
             # Only label first segment (avoid legend spam)
             label = net.name if i == 0 else None
-            ax.plot(xs, ys, "-", color=color, linewidth=3, label=label)
+            ax.plot(gx, gy, "-", color=color, linewidth=3, label=label)
 
             # Add arrow to each segment
-            if len(xs) > 1:
-                mid = len(xs) // 2
+            if len(gx) > 1:
+                mid = len(gx) // 2
                 ax.annotate(
                     "",
-                    xy=(xs[mid], ys[mid]),
-                    xytext=(xs[mid - 1], ys[mid - 1]),
+                    xy=(gx[mid], gy[mid]),
+                    xytext=(gx[mid - 1], gy[mid - 1]),
                     arrowprops=dict(arrowstyle="->", color=color, lw=2),
                 )
         return
@@ -196,7 +229,7 @@ def draw_route(ax, net, color):
 
 def plot_occupancy_summary(module: Module, occupancy_map: OccupancyMap, output_path: str):
     """
-    Generates and saves a detailed occupancy map plot showing blockages and congestion.
+    Generates and saves a detailed occupancy map plot showing blockages and congestion in grid units.
     """
     log.info(f"Plotting occupancy summary for module {module.name} to {output_path}")
 
@@ -224,40 +257,41 @@ def plot_occupancy_summary(module: Module, occupancy_map: OccupancyMap, output_p
     plot_grid[blockage_mask] = 0  # Set blockages to 0 for now, we'll handle them differently
     plot_grid = np.clip(plot_grid, vmin, vmax)
 
-    # Plot occupancy grid
-    im = ax.imshow(plot_grid, origin="lower", extent=occupancy_map.bounds, cmap=cmap, vmin=vmin, vmax=vmax, interpolation="nearest")
+    # Plot occupancy grid using grid indices
+    extent = [0, occupancy_map.nx, 0, occupancy_map.ny]
+    im = ax.imshow(plot_grid, origin="lower", extent=extent, cmap=cmap, vmin=vmin, vmax=vmax, interpolation="nearest")
     fig.colorbar(im, ax=ax, label="Occupancy Level")
 
-    # Plot module instances (macros) as blockages
+    # Plot module instances (macros) as blockages in grid units
     for inst in module.instances.values():
         if inst.draw.geom:
             if isinstance(inst.draw.geom, Polygon):
                 minx, miny, maxx, maxy = inst.draw.geom.bounds
+                gminx, gminy = occupancy_map._world_to_grid(minx, miny)
+                gmaxx, gmaxy = occupancy_map._world_to_grid(maxx, maxy)
                 rect = plt.Rectangle(
-                    (minx, miny), maxx - minx, maxy - miny, fill=False, edgecolor="blue", linewidth=2, label="Blockage"
+                    (gminx, gminy), gmaxx - gminx, gmaxy - gminy, fill=False, edgecolor="blue", linewidth=2, label="Blockage"
                 )
                 ax.add_patch(rect)
             else:
                 x, y = inst.draw.geom.exterior.xy
-                ax.plot(x, y, "b-", linewidth=2, label="Blockage")
+                gx, gy = occupancy_map._world_to_grid(x, y)
+                ax.plot(gx, gy, "b-", linewidth=2, label="Blockage")
 
     # Add grid lines to show individual grid cells
     ax.grid(True, alpha=0.3)
-    ax.set_xticks(np.arange(occupancy_map.minx, occupancy_map.maxx, occupancy_map.grid_size))
-    ax.set_yticks(np.arange(occupancy_map.miny, occupancy_map.maxy, occupancy_map.grid_size))
+    ax.set_xticks(np.arange(0, occupancy_map.nx, 1))
+    ax.set_yticks(np.arange(0, occupancy_map.ny, 1))
 
     # Highlight over-occupied cells (occupancy >= 2)
     over_occupied_mask = (occupancy_grid >= 2) & (~blockage_mask)
     over_occupied_indices = np.where(over_occupied_mask)
     for ix, iy in zip(over_occupied_indices[0], over_occupied_indices[1]):
-        # Get world coordinates
-        world_x = occupancy_map.minx + ix * occupancy_map.grid_size
-        world_y = occupancy_map.miny + iy * occupancy_map.grid_size
-        ax.plot(world_x, world_y, "rx", markersize=4)
+        ax.plot(ix, iy, "rx", markersize=4)
 
     # Set plot limits
-    ax.set_xlim(occupancy_map.minx, occupancy_map.maxx)
-    ax.set_ylim(occupancy_map.miny, occupancy_map.maxy)
+    ax.set_xlim(0, occupancy_map.nx)
+    ax.set_ylim(0, occupancy_map.ny)
     ax.set_aspect("equal", adjustable="box")
     ax.set_title(f"Occupancy Map for Module: {module.name}\n(Blockages in Blue, Over-occupied marked with red X)")
     ax.set_xlabel("X coordinate")
