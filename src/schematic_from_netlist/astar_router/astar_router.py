@@ -28,7 +28,7 @@ class AstarRouter:
     def __init__(self, db):
         self.db = db
         self.occupancy_map: Optional[OccupancyMap] = None
-        self.cost_estimator: Optional[Cost] = None
+        self.cost_estimator: Optional[CostEstimator] = None
         self.grid_size = 1
         self.halo_size = 4
         self.halo_geometries: List = []
@@ -37,25 +37,15 @@ class AstarRouter:
     def adjust_pin_locations(self, module: Module):
         """
         Adjusts pin locations for non-fixed pins on macros to improve routability.
-        This is a complex optimization problem. A simple heuristic could be to
-        move the pin towards the centroid of the other pins in its net.
+        placeholder...
         """
-        log.info("Adjusting pin locations...")
-        for net in module.nets.values():
-            # Calculate centroid of all pins in the net
-            # ...
-            for pin in net.pins:
-                if hasattr(pin, "draw") and hasattr(pin.draw, "geom") and not pin.draw.geom.fixed:
-                    # This pin can be moved.
-                    # The pin belongs to an instance, we need to find which one.
-                    # The pin's movement is constrained by the macro's boundary.
-                    # Placeholder for pin adjustment logic.
-                    pass
+        pass
 
     def route_net(self, module: Module, net: Net):
         """
-        Routes a single net. For multi-pin nets, it builds a minimum spanning tree
-        like structure by connecting each pin to the nearest point on the existing route tree.
+        Routes a single net using tree-aware A* search.
+        Builds a minimum spanning tree by connecting each pin to the nearest point
+        on the existing route tree.
         """
         pins = list(net.pins.values())
         if len(pins) < 2:
@@ -67,25 +57,27 @@ class AstarRouter:
         route_tree = []
 
         while unrouted_pins:
-            start_pin, end_pin = self._find_next_connection(routed_pins, unrouted_pins, route_tree)
-
-            if start_pin is None or end_pin is None:
+            # Pick the best sink to connect next
+            best_sink = self._pick_next_sink(route_tree, unrouted_pins)
+            if best_sink is None:
                 log.warning(f"Could not find next connection for net {net.name}")
                 break
 
-            path = self.astar_search(start_pin, end_pin)
-            # path = self.dijkstra_search(start_pin, end_pin)
+            if not route_tree:
+                # First connection - connect directly between pins
+                start_pin = next(iter(routed_pins))
+                path = self.astar_search(start_pin, best_sink)
+            else:
+                # Subsequent connections - connect to existing route tree
+                path = self.astar_search_tree(best_sink, route_tree)
 
             if path:
                 log.debug(f"Adding path to route tree: {path}")
                 route_tree.append(path)
+                routed_pins.add(best_sink)
+                unrouted_pins.remove(best_sink)
             else:
-                log.warning(
-                    f"A* search failed for net {net.name} between {start_pin.full_name} at {start_pin.draw.geom} and {end_pin.full_name} at {end_pin.draw.geom}."
-                )
-
-            routed_pins.add(end_pin)
-            unrouted_pins.remove(end_pin)
+                log.warning(f"A* search failed for net {net.name} from {best_sink.full_name} at {best_sink.draw.geom}")
 
         if route_tree:
             net.draw.geom = self.merge_routes(route_tree)
@@ -93,16 +85,175 @@ class AstarRouter:
             output_path = f"data/images/astar/{module.name}_{net.name}.png"
             plot_routing_debug_image(module, net, route_tree, self.occupancy_map, self.cost_estimator, output_path)
 
+    def _pick_next_sink(self, route_tree: List[LineString], unrouted_pins: Set[Pin]) -> Optional[Pin]:
+        """
+        Pick the next best sink to connect to the route tree.
+        Uses distance to existing route tree as the metric.
+        """
+        if not route_tree:
+            return next(iter(unrouted_pins), None)
+
+        existing_routes = unary_union([r for r in route_tree if r is not None])
+        best_sink = None
+        min_dist = float("inf")
+
+        for pin in unrouted_pins:
+            dist = pin.draw.geom.distance(existing_routes)
+            if dist < min_dist:
+                min_dist = dist
+                best_sink = pin
+
+        return best_sink
+
+    def astar_search_tree(self, sink_pin: Pin, route_tree: List[LineString]) -> Optional[LineString]:
+        """
+        A* search that finds a path from sink pin to any point on the existing route tree.
+        """
+        if not route_tree:
+            log.warning(f"No route tree provided for search {route_tree=}")
+            return None
+
+        # Create a single geometry representing all existing routes
+        existing_routes = unary_union([r for r in route_tree if r is not None])
+        if existing_routes.is_empty:
+            log.warning("Existing route tree is empty")
+            return None
+
+        # Initialize search from sink pin
+        start_point = sink_pin.draw.geom
+        start_node = self.occupancy_map._world_to_grid(start_point.x, start_point.y)
+
+        # Precompute the nearest point on the route tree to the start point
+        nearest_tree_point = existing_routes.interpolate(existing_routes.project(start_point))
+
+        # Log initial state
+        log.info(f"Start point: {start_point}")
+        log.info(f"Start node: {start_node}")
+        log.info(f"Route tree bounds: {existing_routes.bounds}")
+        log.info(f"Nearest tree point: {nearest_tree_point}")
+
+        # Ensure start node is unblocked
+        if self.occupancy_map.grid[start_node] > 0:
+            log.info(f"Clearing blocked start node {start_node} (occupancy={self.occupancy_map.grid[start_node]})")
+            self.occupancy_map.grid[start_node] = 0
+
+        # Initialize search structures
+        open_set = []
+        heapq.heappush(open_set, (0.0, 0.0, start_node, None))  # (f_score, g_score, node, parent)
+        came_from = {}
+        g_score = {start_node: 0}
+        path = None
+        iteration = 0
+        max_iterations = 1000  # Safety limit to prevent infinite loops
+
+        # Temporarily clear occupancy at start node
+        start_node_occupancy = self.occupancy_map.grid[start_node]
+        self.occupancy_map.grid[start_node] = 0
+        log.info(f"Start node occupancy cleared (was {start_node_occupancy})")
+
+        log.info(f"Starting search from {start_point} to nearest tree point at {nearest_tree_point}")
+
+        while open_set and iteration < max_iterations:
+            iteration += 1
+            f, g, current, parent = heapq.heappop(open_set)
+
+            # Check if current node is on the route tree
+            current_point = Point(
+                self.occupancy_map.minx + current[0] * self.grid_size, self.occupancy_map.miny + current[1] * self.grid_size
+            )
+            tree_distance = existing_routes.distance(current_point)
+
+            if tree_distance < self.grid_size * 0.5:
+                path = self._reconstruct_path(came_from, current)
+                log.info(f"Found path to route tree after {iteration} iterations")
+                break
+
+            # Process neighbors
+            neighbors = list(self._get_neighbors(current))
+            log.debug(f"Iteration {iteration}: Processing {len(neighbors)} neighbors at {current}")
+
+            for neighbor in neighbors:
+                # Skip if neighbor is blocked
+                if self.occupancy_map.grid[neighbor] > 0:
+                    log.debug(f"  Neighbor {neighbor} is blocked")
+                    continue
+
+                # Calculate move cost
+                cost = self.cost_estimator.get_neighbor_move_cost(current, neighbor, parent, None, start_node, None)
+                tentative_g_score = g_score[current] + cost.total
+
+                # Calculate heuristic (distance to nearest route tree point)
+                neighbor_point = Point(
+                    self.occupancy_map.minx + neighbor[0] * self.grid_size,
+                    self.occupancy_map.miny + neighbor[1] * self.grid_size,
+                )
+                h = existing_routes.distance(neighbor_point) * self.grid_size
+                f = tentative_g_score + h
+
+                # Always add neighbor to open set if we haven't visited it yet
+                if neighbor not in g_score:
+                    log.debug(f"  First visit to neighbor {neighbor} with f={f:.2f}, g={tentative_g_score:.2f}, h={h:.2f}")
+                    g_score[neighbor] = tentative_g_score
+                    heapq.heappush(open_set, (f, tentative_g_score, neighbor, current))
+                    came_from[neighbor] = current
+                # If we have visited it, only update if we found a better path
+                elif tentative_g_score < g_score[neighbor]:
+                    log.debug(f"  Better path to neighbor {neighbor} with f={f:.2f}, g={tentative_g_score:.2f}, h={h:.2f}")
+                    g_score[neighbor] = tentative_g_score
+                    # Remove old version of this node from open set
+                    open_set = [n for n in open_set if n[2] != neighbor]
+                    heapq.heapify(open_set)
+                    # Add updated version
+                    heapq.heappush(open_set, (f, tentative_g_score, neighbor, current))
+                    came_from[neighbor] = current
+                else:
+                    log.debug(f"  Keeping existing path to {neighbor} (current g={g_score[neighbor]:.2f})")
+
+            # Log progress every 100 iterations
+            if iteration % 100 == 0:
+                log.info(f"Iteration {iteration}: Current node {current}, Tree distance {tree_distance:.2f}")
+                # Log the current search frontier
+                if open_set:
+                    next_f, next_g, next_node, _ = open_set[0]
+                    next_point = Point(
+                        self.occupancy_map.minx + next_node[0] * self.grid_size,
+                        self.occupancy_map.miny + next_node[1] * self.grid_size,
+                    )
+                    log.info(f"Next node to process: {next_node} at {next_point}, f={next_f:.2f}")
+
+        # Restore original occupancy
+        self.occupancy_map.grid[start_node] = start_node_occupancy
+
+        if iteration >= max_iterations:
+            log.warning(f"Search terminated after reaching max iterations ({max_iterations})")
+            # Log the final search state
+            log.warning(f"Final node: {current} at {current_point}")
+            log.warning(f"Final tree distance: {tree_distance:.2f}")
+            log.warning(f"Open set size: {len(open_set)}")
+            if open_set:
+                next_f, next_g, next_node, _ = open_set[0]
+                log.warning(f"Next node in queue: {next_node}, f={next_f:.2f}")
+            return None
+
+        if path:
+            return self._create_final_path(path, start_point, current_point)
+
+        log.warning(f"No path found after {iteration} iterations")
+        log.warning(f"Final node: {current} at {current_point}")
+        log.warning(f"Final tree distance: {tree_distance:.2f}")
+        return None
+
     def _find_next_connection(self, routed_pins, unrouted_pins, route_tree):
         """
-        Find the lowest cost connection from an unrouted pin to either:
-        - Another pin (for first connection)
-        - Any point on the existing route tree (for subsequent connections)
-        Uses actual routing cost rather than just distance.
+        Find the lowest cost connection from an unrouted pin to the existing route tree.
+        Temporarily moves the sink pin to the best connection point.
         """
         best_start = None
         best_end = None
         min_cost = float("inf")
+
+        # Create a single geometry representing all existing routes
+        existing_routes = unary_union([r for r in route_tree if r is not None]) if route_tree else None
 
         for end_pin in unrouted_pins:
             if not route_tree:  # First connection - pin to pin
@@ -117,36 +268,38 @@ class AstarRouter:
                         best_start = start_pin
                         best_end = end_pin
             else:  # Subsequent connections - route tree to pin
-                # Create a single geometry representing all existing routes
-                existing_routes = unary_union([r for r in route_tree if r is not None])
+                # Temporarily move end pin to find best connection point
+                original_geom = end_pin.draw.geom
+                try:
+                    # Sample points along existing routes
+                    sample_points = []
+                    if isinstance(existing_routes, LineString):
+                        sample_points = self._sample_line(existing_routes)
+                    elif isinstance(existing_routes, MultiLineString):
+                        for line in existing_routes.geoms:
+                            sample_points.extend(self._sample_line(line))
 
-                # Sample points along existing routes to find best connection
-                sample_points = []
-                if isinstance(existing_routes, LineString):
-                    sample_points = self._sample_line(existing_routes)
-                elif isinstance(existing_routes, MultiLineString):
-                    for line in existing_routes.geoms:
-                        sample_points.extend(self._sample_line(line))
-
-                # Find lowest cost connection from any sample point
-                for point in sample_points:
-                    # Temporarily move an existing pin's geometry to the sample point
-                    # Use the first routed pin since it's already connected to the route tree
-                    existing_pin = next(iter(routed_pins))
-                    original_geom = existing_pin.draw.geom
-                    try:
-                        existing_pin.draw.geom = Point(point)
-                        # Find path cost from sample point to end pin
-                        path = self.astar_search(existing_pin, end_pin)
-                    finally:
-                        # Restore original geometry
-                        existing_pin.draw.geom = original_geom
-                    if path:
-                        cost = path.length
-                        if cost < min_cost:
-                            min_cost = cost
-                            best_start = existing_pin
-                            best_end = end_pin
+                    # Find lowest cost connection from end pin to any route point
+                    for point in sample_points:
+                        end_pin.draw.geom = Point(point)
+                        path = self.astar_search(end_pin, end_pin)
+                        if path:
+                            cost = path.length
+                            if cost < min_cost:
+                                min_cost = cost
+                                # Temporarily move an existing pin to the connection point
+                                existing_pin = next(iter(routed_pins))
+                                original_geom = existing_pin.draw.geom
+                                try:
+                                    existing_pin.draw.geom = Point(point)
+                                    best_start = existing_pin
+                                    best_end = end_pin
+                                finally:
+                                    # Restore original geometry
+                                    existing_pin.draw.geom = original_geom
+                finally:
+                    # Restore original geometry
+                    end_pin.draw.geom = original_geom
 
         return best_start, best_end
 
@@ -401,7 +554,7 @@ class AstarRouter:
 
         return self._create_final_path(path, start_point, end_point)
 
-    def _reconstruct_path(self, came_from, end_node) -> LineString:
+    def _reconstruct_path(self, came_from, end_node) -> Optional[LineString]:
         # Reconstruct the path from end to start
         path_points = []
         current = end_node
@@ -423,16 +576,10 @@ class AstarRouter:
 
         path_points.reverse()
 
-        # Ensure the path starts and ends at the actual pin locations
-        # Get the start and end pin locations from the search context
-        # We need to modify this to use the actual pin points
-        # For now, we'll use the first and last points
-        if path_points:
-            # Replace first point with actual start pin location
-            # Replace last point with actual end pin location
-            # This requires access to the pin locations, which we don't have here
-            # We'll need to pass them in or find another way
-            pass
+        # A LineString must have at least 2 points
+        if len(path_points) < 2:
+            log.warning(f"Cannot create LineString with only {len(path_points)} points")
+            return None
 
         return LineString(path_points)
 
