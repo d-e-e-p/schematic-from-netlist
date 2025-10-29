@@ -48,15 +48,15 @@ def produce_graph(db):
     db.remove_multi_fanout_buffers()
     db.fig2geom()
     junctions = gr.insert_routing_junctions()
-    # db.insert_route_guide_buffers(junctions)
     # db.dump_to_table("route_guide_insertion")
-    dr.reroute()
+    # dr.reroute()
 
-    bypass_phase2 = True
+    bypass_phase2 = False
     if bypass_phase2:
-        db.remove_multi_fanout_buffers()
+        # db.remove_multi_fanout_buffers()
         db.geom2shape()
     else:
+        db.insert_route_guide_buffers(junctions)
         db.geom2fig()
         gv.generate_layout_figures(phase="placed")
 
@@ -64,7 +64,7 @@ def produce_graph(db):
 def generate_schematic(db, output_dir: str):
     """Generate schematic info and produce LTSpice output."""
     db.schematic_db = GenSchematicData(db)
-    bypass_phase2 = True
+    bypass_phase2 = False
     if not bypass_phase2:
         db.schematic_db.generate_schematic()
 
@@ -81,10 +81,12 @@ def generate_steiner_buffers(db):
     db.dump_to_table("after_route_guide_insertion")
 
 
+"""
 def optimize_layout(db):
     db.shape2geom()
     optimizer = LayoutOptimizer(db)
     optimizer.optimize_layout()
+"""
 
 
 # ---------------- CLI Entrypoint ---------------- #
@@ -93,8 +95,7 @@ def optimize_layout(db):
 def parse_args():
     parser = argparse.ArgumentParser(description="Generate a schematic from a Verilog netlist.")
     parser.add_argument("netlist_file", help="Path to the Verilog netlist file.")
-    parser.add_argument("-k", type=int, default=2, help="Number of partitions for the hypergraph.")
-    parser.add_argument("--config", default="data/config/hyper.ini", help="Path to the KaHyPar configuration file.")
+    parser.add_argument("--max_fanout", type=int, default=20, help="fanout threshold for connecting nodes in a module")
     parser.add_argument("--output_dir", default="data/ltspice", help="Directory to save the generated LTSpice files.")
     # Logging flags
     parser.add_argument("--verbose", action="store_true", help="Enable verbose logging.")
