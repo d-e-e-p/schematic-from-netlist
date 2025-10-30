@@ -10,13 +10,14 @@ from shapely.geometry import LineString, MultiLineString
 def plot_result(net, obstacles, existing_nets):
     """
     Plot the routing result including terminals, obstacles, and paths
-    Save to data/images/astar/ instead of showing on screen
+    Save to data/images/sastar/ instead of showing on screen
     """
-    terminals = net.pins
-    path = net.routed_paths
+    current_net = net
     net_name = net.name
+    terminals = [(pin.draw.geom.x, pin.draw.geom.y) for pin in net.pins.values()]
+    path = net.draw.geom
     # Create directory if it doesn't exist
-    os.makedirs("data/images/astar", exist_ok=True)
+    os.makedirs("data/images/sastar", exist_ok=True)
 
     fig, ax = plt.subplots(figsize=(12, 10))
 
@@ -44,13 +45,13 @@ def plot_result(net, obstacles, existing_nets):
 
     # Plot all existing nets with unique colors
     if existing_nets:
-        for i, net in enumerate(existing_nets):
-            if hasattr(net, "routed_paths") and net.routed_paths:
+        for i, net in enumerate(existing_nets.values()):
+            if path:
                 color = plt.cm.tab20(i % 20)  # Use a colormap with more distinct colors
                 if isinstance(path, LineString):
                     x, y = path.xy
                     # Only add label once per net
-                    label = f"{net.name} (cost: {sum(net.step_costs.values()):.1f})" if net.name not in plotted_nets else ""
+                    label = f"{net.name} (cost: {sum(net.draw.step_costs.values()):.1f})" if net.name not in plotted_nets else ""
                     ax.plot(x, y, color=color, linewidth=2, label=label)
                     if label:
                         plotted_nets.add(net.name)
@@ -60,7 +61,9 @@ def plot_result(net, obstacles, existing_nets):
                     for segment in path.geoms:
                         x, y = segment.xy
                         # Only add label once per net
-                        label = f"{net.name} (cost: {sum(net.step_costs.values()):.1f})" if net.name not in plotted_nets else ""
+                        label = (
+                            f"{net.name} (cost: {sum(net.draw.step_costs.values()):.1f})" if net.name not in plotted_nets else ""
+                        )
                         ax.plot(x, y, color=color, linewidth=2, label=label)
                         if label:
                             plotted_nets.add(net.name)
@@ -69,11 +72,11 @@ def plot_result(net, obstacles, existing_nets):
 
     # Find the current net object to get its cost
     current_net_cost = ""
-    if net_name and existing_nets:
-        for net in existing_nets:
-            if hasattr(net, "name") and net.name == net_name:
-                if hasattr(net, "step_costs") and net.step_costs:
-                    current_net_cost = f" (cost: {sum(net.step_costs.values()):.1f})"
+    if net.name and existing_nets:
+        for net in existing_nets.values():
+            if net.name == net_name:
+                if hasattr(net, "step_costs") and net.draw.step_costs:
+                    current_net_cost = f" (cost: {sum(net.draw.step_costs.values()):.1f})"
                 elif hasattr(net, "total_cost"):
                     current_net_cost = f" (cost: {net.total_cost:.1f})"
                 break
@@ -89,23 +92,18 @@ def plot_result(net, obstacles, existing_nets):
             ax.plot(x, y, "b-", linewidth=2, label=f"Current: {net_name}{current_net_cost}" if i == 0 and j == 0 else "")
 
     # Plot current paths with step costs
-    if net_name and existing_nets:
-        current_net = next((n for n in existing_nets if n.name == net_name), None)
-        if current_net and hasattr(current_net, "step_costs"):
-            # Plot all stored step costs at their recorded locations
-            # log.info(f"Plotting step costs for net: {net_name} {current_net.step_costs}")
-            if current_net.step_costs:
-                # Plot all stored step costs directly
-                for midpoint, cost in current_net.step_costs.items():
-                    ax.text(
-                        midpoint[0],
-                        midpoint[1],
-                        f"{cost:.0f}",
-                        fontsize=6,
-                        color="red",
-                        ha="center",
-                        va="center",
-                    )
+    if current_net.draw.step_costs:
+        # Plot all stored step costs directly
+        for midpoint, cost in current_net.draw.step_costs.items():
+            ax.text(
+                midpoint[0],
+                midpoint[1],
+                f"{cost:.0f}",
+                fontsize=6,
+                color="red",
+                ha="center",
+                va="center",
+            )
 
     # Plot terminals
     for i, terminal in enumerate(terminals):
@@ -144,9 +142,9 @@ def plot_result(net, obstacles, existing_nets):
     # Generate filename with timestamp and net name
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     if net_name:
-        filename = f"data/images/astar/route_{net_name}.png"
+        filename = f"data/images/sastar/route_{net_name}.png"
     else:
-        filename = f"data/images/astar/routing_{timestamp}.png"
+        filename = f"data/images/sastar/routing_{timestamp}.png"
 
     plt.savefig(filename, dpi=150, bbox_inches="tight")
     plt.close()  # Close the figure to free memory

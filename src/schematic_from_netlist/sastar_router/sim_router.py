@@ -10,14 +10,15 @@ from itertools import cycle
 
 import numpy as np
 import pygame
-from models import CostBuckets, CostEstimator, RoutingContext
 from shapely.geometry import GeometryCollection, LineString, MultiLineString, Point, box
 from shapely.ops import linemerge, unary_union
 from shapely.strtree import STRtree
-from visualization import plot_result
+
+from schematic_from_netlist.sastar_router.models import CostBuckets, CostEstimator, RoutingContext
+from schematic_from_netlist.sastar_router.visualization import plot_result
 
 # Set to True to enable Pygame visualization
-ENABLE_PYGAME = True
+ENABLE_PYGAME = False
 COLORS = cycle(
     [
         (255, 0, 0),
@@ -226,14 +227,13 @@ class SimultaneousRouter:
 
     def route_net(self, net, existing_paths=None):
         """
-        More efficient approach: track which terminals are connected to each node
+        connect one net
         """
-        terminals = net.pins
+        terminals = [(pin.draw.geom.x, pin.draw.geom.y) for pin in net.pins.values()]
         if len(terminals) < 2:
             return [], 0
 
         # Snap terminals to grid
-        terminals = [self._snap_to_grid(t) for t in terminals]
         terminal_set = set(terminals)
 
         # Create routing context
@@ -338,10 +338,8 @@ class SimultaneousRouter:
                 new_mask = current_mask_updated  # Use updated mask, not original!
                 if neighbor in terminal_set:
                     new_mask |= terminal_to_bit[neighbor]
-                    log.info(f"Terminal {neighbor=} added to mask: {new_mask}")
 
                 new_state = (neighbor, new_mask)
-                log.info(f"Explored {new_state=} {move_cost=} {new_cost=}")
 
                 if new_state not in best_costs or new_cost < best_costs[new_state]:
                     best_costs[new_state] = new_cost

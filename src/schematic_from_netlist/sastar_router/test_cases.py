@@ -1,5 +1,6 @@
-from models import Net
 from shapely.geometry import MultiLineString, box
+
+from schematic_from_netlist.sastar_router.models import PNet
 
 
 def create_hard_test_case(difficulty="hard"):
@@ -10,8 +11,8 @@ def create_hard_test_case(difficulty="hard"):
     """
     if difficulty == "easy":
         nets = [
-            Net("net1", [(-10, -2), (15, 10)]),
-            Net("net2", [(0, 0), (20, 5), (25, 25)]),
+            PNet("net1", [(-10, -2), (15, 10)]),
+            PNet("net2", [(0, 0), (20, 5), (25, 25)]),
         ]
         obstacles = [
             box(5, 2, 15, 5),
@@ -20,10 +21,10 @@ def create_hard_test_case(difficulty="hard"):
 
     elif difficulty == "hard":
         nets = [
-            Net("net1", [(5, 2), (15, 5)]),
-            Net("net2", [(10, 5), (20, 10), (20, 15)]),
-            Net("net3", [(15, 2), (10, 10)]),
-            Net("net4", [(5, 5), (10, 10), (25, 15)]),
+            PNet("net1", [(5, 2), (15, 5)]),
+            PNet("net2", [(10, 5), (20, 10), (20, 15)]),
+            PNet("net3", [(15, 2), (10, 10)]),
+            PNet("net4", [(5, 5), (10, 10), (25, 15)]),
         ]
         obstacles = [
             box(5, 2, 15, 5),
@@ -34,12 +35,12 @@ def create_hard_test_case(difficulty="hard"):
 
     elif difficulty == "extreme":
         nets = [
-            Net("net1", [(5, 2), (15, 5)]),
-            Net("net2", [(15, 2), (10, 10), (25, 15)]),
-            Net("net3", [(15, 5), (18, 8)]),
-            Net("net4", [(5, 5), (20, 8), (12, 18)]),
-            Net("net5", [(10, 5), (10, 10)]),
-            Net("net6", [(5, 2), (25, 8), (18, 18), (5, 12)]),
+            PNet("net1", [(5, 2), (15, 5)]),
+            PNet("net2", [(15, 2), (10, 10), (25, 15)]),
+            PNet("net3", [(15, 5), (18, 8)]),
+            PNet("net4", [(5, 5), (20, 8), (12, 18)]),
+            PNet("net5", [(10, 5), (10, 10)]),
+            PNet("net6", [(5, 2), (25, 8), (18, 18), (5, 12)]),
         ]
         obstacles = [
             box(5, 2, 15, 5),
@@ -52,9 +53,9 @@ def create_hard_test_case(difficulty="hard"):
 
     elif difficulty == "maze":
         nets = [
-            Net("net1", [(2, 2), (28, 18)]),
-            Net("net2", [(2, 8), (15, 2), (28, 12)]),
-            Net("net3", [(10, 5), (20, 5)]),
+            PNet("net1", [(2, 2), (28, 18)]),
+            PNet("net2", [(2, 8), (15, 2), (28, 12)]),
+            PNet("net3", [(10, 5), (20, 5)]),
         ]
         obstacles = [
             box(5, 0, 7, 10),
@@ -76,13 +77,13 @@ def create_hard_test_case(difficulty="hard"):
         ]
 
         nets = [
-            Net("net1", [(5, 2), (15, 5)]),
-            Net(
+            PNet("net1", [(5, 2), (15, 5)]),
+            PNet(
                 "net2",
                 [(10, 5), (20, 10)],
                 MultiLineString([[(10, 5), (9, 5)], [(9, 5), (9, 14)], [(9, 14), (20, 14)], [(20, 14), (20, 10)]]),
             ),
-            Net(
+            PNet(
                 "net3",
                 [(15, 5), (20, 10)],
                 MultiLineString(
@@ -101,7 +102,7 @@ def create_hard_test_case(difficulty="hard"):
         """
         Regular grid of macros (5x5um blocks) in 1000x1000 space
         Each macro has 2 pins on opposite faces (middle of edges)
-        Nets connect adjacent macros in a mesh pattern
+        PNets connect adjacent macros in a mesh pattern
         """
         macro_size = 5
         macro_spacing = 8  # Total space per macro (5 + 3 gap)
@@ -143,7 +144,7 @@ def create_hard_test_case(difficulty="hard"):
             for col in range(num_macros_per_side - 1):
                 pin1 = macro_pins[(row, col)]["right"]
                 pin2 = macro_pins[(row, col + 1)]["left"]
-                nets.append(Net(f"net_h_{row}_{col}", [pin1, pin2]))
+                nets.append(PNet(f"net_h_{row}_{col}", [pin1, pin2]))
 
         # Vertical connections (bottom-top pins)
         for row in range(num_macros_per_side - 1):
@@ -151,7 +152,7 @@ def create_hard_test_case(difficulty="hard"):
                 pin1 = macro_pins[(row, col)]["top"]
                 pin2 = macro_pins[(row + 1, col)]["bottom"]
                 nets.append(
-                    Net(
+                    PNet(
                         f"net_v_{row}_{col}",
                         [pin1, pin2],
                     )
@@ -164,7 +165,7 @@ def create_hard_test_case(difficulty="hard"):
                     pin1 = macro_pins[(i, j)]["right"]
                     pin2 = macro_pins[(i + 2, j + 2)]["left"]
                     nets.append(
-                        Net(
+                        PNet(
                             f"net_diag_{i}_{j}",
                             [pin1, pin2],
                         )

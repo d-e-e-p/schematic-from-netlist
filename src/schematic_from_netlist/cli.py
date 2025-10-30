@@ -4,13 +4,13 @@ import os
 
 import colorlog
 
-from schematic_from_netlist.astar_router.astar_router import AstarRouter
 from schematic_from_netlist.global_router.global_router import GlobalRouter
 from schematic_from_netlist.graph.gen_sch_data import GenSchematicData
 from schematic_from_netlist.graph.group_maker import SteinerGroupMaker
 from schematic_from_netlist.interfaces.graphviz import Graphviz
 from schematic_from_netlist.interfaces.ltspice_writer import LTSpiceWriter
 from schematic_from_netlist.interfaces.verilog_parser import VerilogParser
+from schematic_from_netlist.sastar_router.sastar_router import AstarRouter
 from schematic_from_netlist.utils.config import setup_logging
 
 # ---------------- Pipeline Stages ---------------- #
@@ -38,7 +38,7 @@ def produce_graph(db):
 
     gv = Graphviz(db)
     gr = GlobalRouter(db)
-    dr = AstarRouter(db)
+    ar = AstarRouter(db)
     # router = AstarRouter(db)
 
     # graphviz -> extract macro and port locations -> remove buffers
@@ -51,8 +51,9 @@ def produce_graph(db):
     # db.dump_to_table("route_guide_insertion")
     # dr.reroute()
 
-    bypass_phase2 = False
+    bypass_phase2 = True
     if bypass_phase2:
+        ar.route_design()
         # db.remove_multi_fanout_buffers()
         db.geom2shape()
     else:
@@ -64,7 +65,7 @@ def produce_graph(db):
 def generate_schematic(db, output_dir: str):
     """Generate schematic info and produce LTSpice output."""
     db.schematic_db = GenSchematicData(db)
-    bypass_phase2 = False
+    bypass_phase2 = True
     if not bypass_phase2:
         db.schematic_db.generate_schematic()
 

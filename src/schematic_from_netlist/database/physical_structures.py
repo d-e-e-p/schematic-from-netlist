@@ -124,6 +124,8 @@ class NetPhysical:
     geom: Optional[MultiLineString] = None
     buffer_patch_points: List[Tuple[Tuple[int, int], Tuple[int, int]]] = field(default_factory=list)
     topo: Optional["Topology"] = None
+    total_cost: Optional[float] = float("inf")
+    step_costs: Optional[Dict[[int, int], int]] = field(default_factory=dict)
 
     def fig2shape(self):
         if not self.fig:

@@ -7,13 +7,15 @@ from dataclasses import dataclass
 from heapq import heappop, heappush
 
 import numpy as np
-from models import CostBuckets, CostEstimator, RoutingContext
-from shapely.geometry import GeometryCollection, LineString, MultiLineString, Point, box
+from shapely.geometry import GeometryCollection, LineString, MultiLineString, Point, Polygon, box
 from shapely.ops import linemerge, unary_union
 from shapely.strtree import STRtree
-from sim_router import SimultaneousRouter
-from test_cases import create_hard_test_case
-from visualization import plot_result
+
+from schematic_from_netlist.database.netlist_structures import Module, Net
+from schematic_from_netlist.sastar_router.models import CostBuckets, CostEstimator, PNet, RoutingContext
+from schematic_from_netlist.sastar_router.sim_router import SimultaneousRouter
+from schematic_from_netlist.sastar_router.test_cases import create_hard_test_case
+from schematic_from_netlist.sastar_router.visualization import plot_result
 
 log.basicConfig(level=log.INFO)
 
@@ -22,22 +24,28 @@ class AstarRouter:
     def __init__(self, db):
         self.db = db
 
+    def route_design(self):
+        log.info("Routing design using SAstar Router")
+        for module in self.db.design.modules.values():
+            obstacles = self.get_macro_geometries(module)
+            routed_nets = self.route_nets(module.nets, obstacles)
+
     def route_nets(self, nets, obstacles):
         """
         Route multiple nets in order of span
         """
         # Sort nets by bbox diagonal (larger first)
-        nets.sort(key=lambda net: self.get_bbox_diagonal(net), reverse=True)
+        sorted_nets = sorted(nets.values(), key=lambda net: self.get_orthogonal_span(net), reverse=True)
 
         routed_nets = []
-        for i, net in enumerate(nets):
+        for i, net in enumerate(sorted_nets):
             log.info(f"{i} : Routing net {net.name} with {len(net.pins)} pins")
 
             # Temporarily remove this net's existing paths for routing
-            old_routed_paths = net.routed_paths
+            old_routed_paths = net.draw.geom
             # flatten list
 
-            other_paths = [n.routed_paths for j, n in enumerate(nets) if j != i]
+            other_paths = [n.draw.geom for j, n in enumerate(sorted_nets) if j != i]
             old_total_cost, old_step_costs = self.calculate_existing_cost(net, old_routed_paths, obstacles, other_paths)
 
             # Calculate bounds from existing route
@@ -59,17 +67,16 @@ class AstarRouter:
             log.info(f"Net {net.name} old paths {old_routed_paths} new paths {new_routed_paths}")
             if new_total_cost < old_total_cost:
                 print(f"  New route cost {new_total_cost} < orig {old_total_cost} : keeping new route")
-                net.routed_paths = new_routed_paths
+                net.draw.geom = new_routed_paths
                 net.total_cost = new_total_cost
                 net.step_costs = new_step_costs
             else:
                 print(f"  New route cost {new_total_cost} > orig {old_total_cost} : reverting to old")
-                net.routed_paths = old_routed_paths
+                net.draw.geom = old_routed_paths
                 net.total_cost = old_total_cost
                 net.step_costs = old_step_costs
 
             plot_result(net, obstacles, nets)
-            breakpoint()
 
         # After all nets are routed, check for overlaps between nets
         self.check_for_overlaps(nets)
@@ -77,16 +84,16 @@ class AstarRouter:
         """
         # Post-processing: Ensure all nets are connected
         for net in nets:
-            if net.routed_paths:
+            if net.draw.geom:
                 # Check if the net is connected
-                merged = linemerge(net.routed_paths)
+                merged = linemerge(net.draw.geom)
                 if isinstance(merged, MultiLineString):
                     # The net is disconnected, try to connect the pieces
                     log.warning(f"Net {net.name} is disconnected?")
 
             # Clean up zero-length segments
             cleaned_paths = []
-            for path in net.routed_paths:
+            for path in net.draw.geom:
                 if isinstance(path, LineString):
                     # Check if it's a zero-length segment
                     if path.length > 1e-6:  # Use a small epsilon to account for floating point errors
@@ -101,7 +108,7 @@ class AstarRouter:
                         cleaned_paths.append(MultiLineString(valid_segments))
 
             # Replace with cleaned paths
-            net.routed_paths = cleaned_paths
+            net.draw.geom = cleaned_paths
         """
 
         return nets
@@ -134,11 +141,9 @@ class AstarRouter:
         if not path:
             return np.inf, MultiLineString()
 
-        pins = net.pins
         router = SimultaneousRouter(grid_spacing=1.0, obstacle_geoms=obstacles, halo_size=4)
         cost_estimator = CostEstimator(grid_spacing=1.0)
-        snapped_pins = [router._snap_to_grid(p) for p in pins]
-        terminal_set = set(snapped_pins)
+        terminal_set = set([p.draw.geom for p in net.pins.values()])
 
         other_paths = unary_union(existing_paths)
         other_paths_index = STRtree(list(other_paths.geoms)) if other_paths else None
@@ -264,15 +269,15 @@ class AstarRouter:
         halo = halo.buffer(padding, cap_style=2, join_style=2)
         return halo
 
-    def get_bbox_diagonal(self, net):
-        """Get the diagonal length of the bounding box to estimate net length"""
+    def get_orthogonal_span(self, net):
+        """Get the ortho length of the bounding box to estimate net length"""
         if not net.pins:
             return 0
-        xs = [p[0] for p in net.pins]
-        ys = [p[1] for p in net.pins]
+        xs = [p.draw.geom.x for p in net.pins.values()]
+        ys = [p.draw.geom.y for p in net.pins.values()]
         min_x, max_x = min(xs), max(xs)
         min_y, max_y = min(ys), max(ys)
-        return ((max_x - min_x) ** 2 + (max_y - min_y) ** 2) ** 0.5
+        return (max_x - min_x) + (max_y - min_y)
 
     def intersection_overlap_length(self, intersection):
         """Return total length of geometry overlap from a Shapely intersection."""
@@ -296,12 +301,12 @@ class AstarRouter:
     def check_for_overlaps(self, nets):
         print("\nChecking for overlaps between nets:")
         total_overlap = 0
-        for i, net1 in enumerate(nets):
-            for j, net2 in enumerate(nets):
+        for i, net1 in enumerate(nets.values()):
+            for j, net2 in enumerate(nets.values()):
                 if i < j:  # Only check each pair once
                     # Check for overlaps between net1 and net2
-                    path1 = net1.routed_paths
-                    path2 = net2.routed_paths
+                    path1 = net1.draw.geom
+                    path2 = net2.draw.geom
                     intersection = path1.intersection(path2)
                     overlap_length = self.intersection_overlap_length(intersection)
                     if overlap_length > 0:
@@ -313,6 +318,24 @@ class AstarRouter:
 
         if total_overlap > 0:
             log.warning(f"\nTotal overlap length: {total_overlap}")
+
+    def get_macro_geometries(self, module: Module):
+        """Get all macro geometries in a module."""
+        geoms = []
+        for i in module.get_all_instances().values():
+            if hasattr(i.draw, "geom") and i.draw.geom:
+                if isinstance(i.draw.geom, Polygon):
+                    geoms.append(i.draw.geom)
+                elif isinstance(i.draw.geom, MultiPolygon):
+                    geoms.extend(list(i.draw.geom.geoms))
+        # return unary_union(geoms) if geoms else Polygon()
+        return geoms if geoms else Polygon()
+
+    def get_halo_geometries(self, macros, buffer_dist: int = 10) -> Polygon:
+        """Get halo geometries around macros."""
+        if macros.is_empty:
+            return Polygon()
+        return macros.buffer(buffer_dist)
 
 
 if __name__ == "__main__":
@@ -328,10 +351,10 @@ if __name__ == "__main__":
 
     # Print results
     for net in routed_nets:
-        if net.routed_paths:
+        if net.draw.geom:
             # Convert to MultiLineString to ensure consistent output format
             # Create a MultiLineString from all paths
-            multi_line = MultiLineString(net.routed_paths)
+            multi_line = MultiLineString(net.draw.geom)
             print(f"Net {net.name} geometry: {multi_line.wkt}")
         else:
             print(f"Net {net.name} failed to route")

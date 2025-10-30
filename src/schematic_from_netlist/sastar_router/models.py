@@ -10,11 +10,13 @@ from shapely.geometry import LineString, MultiLineString, Point, box
 from shapely.ops import linemerge, unary_union
 from shapely.strtree import STRtree
 
+from schematic_from_netlist.database.netlist_structures import Net
 
-class Net:
-    def __init__(self, name, pins, routed_paths=None):
+
+class PNet(Net):
+    def __init__(self, name, terms, routed_paths=None):
         self.name = name
-        self.pins = pins
+        self.terms = terms
         self.routed_paths = routed_paths
         self.total_cost = 0  # Add this line to track the total routing cost
         self.step_costs = {}  # Change from list to dict {(x,y): cost}
