@@ -17,7 +17,7 @@ from shapely.strtree import STRtree
 from visualization import plot_result
 
 # Set to True to enable Pygame visualization
-ENABLE_PYGAME = False
+ENABLE_PYGAME = True
 COLORS = cycle(
     [
         (255, 0, 0),
@@ -241,7 +241,17 @@ class SimultaneousRouter:
                             # Add direct connection
                             nearest_point = tree_geom.interpolate(tree_geom.project(Point(terminal)))
                             tree.append(LineString([terminal, (nearest_point.x, nearest_point.y)]))
-                mls = MultiLineString(tree_geom)
+
+                # Normalize geometry to MultiLineString
+                if isinstance(tree_geom, LineString):
+                    mls = MultiLineString([tree_geom])
+                elif isinstance(tree_geom, MultiLineString):
+                    mls = tree_geom
+                elif tree_geom is None:
+                    mls = MultiLineString()
+                else:
+                    # In rare cases, unary_union returns a GeometryCollection
+                    mls = MultiLineString([g for g in getattr(tree_geom, "geoms", []) if isinstance(g, LineString)])
                 return mls, final_cost
 
             # Explore neighbors
@@ -305,7 +315,7 @@ class SimultaneousRouter:
 
                         # Draw current node
                         current_pos = self.to_screen_coords(current_node)
-                        pygame.draw.circle(screen, (10, 10, 10), current_pos, 4)
+                        pygame.draw.circle(screen, (10, 10, 10), current_pos, 1)
 
                         # Draw reached terminals info
                         reached_count = bin(current_mask).count("1")
@@ -578,7 +588,8 @@ class SimultaneousRouter:
                     has_significant_overlap = False
                     for net_path in existing_paths:
                         intersection = segment.intersection(net_path)
-                        if not intersection.is_empty:
+                        # if not intersection.is_empty:
+                        if intersection:
                             overlap_length = 0
                             if isinstance(intersection, LineString):
                                 overlap_length = round(intersection.length)
@@ -587,7 +598,9 @@ class SimultaneousRouter:
 
                             if overlap_length >= 1:
                                 # This segment has a significant overlap
-                                log.warning(f"Merged segment has overlap with existing net: {overlap_length=}")
+                                log.warning(
+                                    f"Merged segment {segment.wkt} has {overlap_length} overlap with existing path {net_path}"
+                                )
                                 has_significant_overlap = True
                                 break
 

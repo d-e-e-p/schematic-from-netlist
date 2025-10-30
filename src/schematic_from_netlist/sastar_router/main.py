@@ -292,7 +292,7 @@ if __name__ == "__main__":
     # Define nets
     # nets, obstacles = create_hard_test_case("macro_grid")
     log.basicConfig(level=log.INFO)
-    nets, obstacles = create_hard_test_case("precision")
+    nets, obstacles = create_hard_test_case("macro_grid")
 
     # Route all nets
     db = []
