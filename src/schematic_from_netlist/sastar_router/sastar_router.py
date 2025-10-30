@@ -8,10 +8,10 @@ from heapq import heappop, heappush
 
 import numpy as np
 from models import CostBuckets, CostEstimator, RoutingContext
-from router import SimultaneousRouter
 from shapely.geometry import GeometryCollection, LineString, MultiLineString, Point, box
 from shapely.ops import linemerge, unary_union
 from shapely.strtree import STRtree
+from sim_router import SimultaneousRouter
 from test_cases import create_hard_test_case
 from visualization import plot_result
 
