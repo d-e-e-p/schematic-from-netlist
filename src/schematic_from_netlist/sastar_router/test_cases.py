@@ -76,7 +76,7 @@ def create_hard_test_case(difficulty="hard"):
         ]
 
         nets = [
-            Net("net1", [(5, 2), (15, 5)], MultiLineString([[(5, 2), (5, -2)], [(5, -2), (15, -2)], [(15, -2), (15, 5)]])),
+            Net("net1", [(5, 2), (15, 5)]),
             Net(
                 "net2",
                 [(10, 5), (20, 10)],
@@ -169,5 +169,15 @@ def create_hard_test_case(difficulty="hard"):
                             [pin1, pin2],
                         )
                     )
-
+        for net in nets:
+            if net.name == "net_diag_0_0":
+                net.routed_paths = MultiLineString(
+                    [
+                        [(100, 75), (104, 75)],
+                        [(104, 75), (104, 104)],
+                        [(104, 104), (204, 104)],
+                        [(204, 104), (204, 275)],
+                        [(204, 275), (250, 275)],
+                    ]
+                )
     return nets, obstacles

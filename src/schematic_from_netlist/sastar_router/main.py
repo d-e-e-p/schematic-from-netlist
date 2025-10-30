@@ -9,7 +9,7 @@ from heapq import heappop, heappush
 import numpy as np
 from models import CostBuckets, CostEstimator, RoutingContext
 from router import SimultaneousRouter
-from shapely.geometry import GeometryCollection, LineString, MultiLineString, Point
+from shapely.geometry import GeometryCollection, LineString, MultiLineString, Point, box
 from shapely.ops import linemerge, unary_union
 from shapely.strtree import STRtree
 from test_cases import create_hard_test_case
@@ -41,10 +41,11 @@ class AstarRouter:
             old_total_cost, old_step_costs = self.calculate_existing_cost(net, old_routed_paths, obstacles, other_paths)
 
             # Calculate bounds from existing route
-            router_bounds = self.get_preexisting_route_bounds(old_routed_paths)
+            router_halo = self.get_route_halo(old_routed_paths, net.pins, padding=1)
+            # router_halo = self.get_preexisting_route_bounds(old_routed_paths)
 
             # Create router with bounds
-            router = SimultaneousRouter(grid_spacing=1.0, obstacle_geoms=obstacles, halo_size=4, bounds=router_bounds)
+            router = SimultaneousRouter(grid_spacing=1.0, obstacle_geoms=obstacles, halo_size=4, bounds=router_halo)
             new_routed_paths, new_total_cost = router.route_net(net, other_paths)
 
             # Calculate existing cost with other nets' paths
@@ -68,6 +69,7 @@ class AstarRouter:
                 net.step_costs = old_step_costs
 
             plot_result(net, obstacles, nets)
+            breakpoint()
 
         # After all nets are routed, check for overlaps between nets
         self.check_for_overlaps(nets)
@@ -138,7 +140,6 @@ class AstarRouter:
         snapped_pins = [router._snap_to_grid(p) for p in pins]
         terminal_set = set(snapped_pins)
 
-        log.info(f"existing path net {net.name}  {existing_paths=}")
         other_paths = unary_union(existing_paths)
         other_paths_index = STRtree(list(other_paths.geoms)) if other_paths else None
 
@@ -157,7 +158,7 @@ class AstarRouter:
         parent_node = None
 
         # Extract and interpolate all coordinates from all path segments
-        log.info(f"existing path net {net.name}  {path=}")
+        log.info(f"calculate_existing_cost existing path net {net.name}  {path=}")
         all_coords = []
         for line in self.iter_lines(path):
             coords = list(line.coords)
@@ -210,9 +211,8 @@ class AstarRouter:
 
             # Calculate move cost using the same logic as during routing
             move_cost = cost_estimator.get_move_cost(current_node, neighbor_node, parent_node, context)
-            log.info(f"{net.name}: Cost from {current_node} to {neighbor_node}: {move_cost}")
 
-            # Store cost at segment midpoint
+            # Store cost at the neighbor node
             step_costs[neighbor_node] = move_cost
 
             total_cost += move_cost
@@ -224,6 +224,7 @@ class AstarRouter:
 
     def get_preexisting_route_bounds(self, path):
         router_bounds = None
+        padding = 5
         if path:
             all_coords = []
             if isinstance(path, LineString):
@@ -234,8 +235,34 @@ class AstarRouter:
             if all_coords:
                 xs = [c[0] for c in all_coords]
                 ys = [c[1] for c in all_coords]
-                router_bounds = (min(xs), min(ys), max(xs), max(ys))
-        return router_bounds
+                router_bounds = box(min(xs), min(ys), max(xs), max(ys))
+        if not router_bounds:
+            return None
+        halo = router_bounds.buffer(padding, cap_style=2, join_style=2)
+        return halo
+
+    def get_route_halo(self, path, pins, padding=5):
+        """
+        Create a route-following halo (buffer) around an existing path geometry.
+        """
+        if not path:
+            return None
+
+        # Normalize input to a MultiLineString
+        if isinstance(path, LineString):
+            geom = path
+        elif isinstance(path, MultiLineString):
+            geom = unary_union(path)
+        elif isinstance(path, (list, tuple)):
+            geom = unary_union([p for p in path if isinstance(p, LineString)])
+        else:
+            raise TypeError(f"Unsupported geometry type: {type(path)}")
+
+        # The route-following “band” (Shapely buffer)
+        halo = geom.buffer(padding, cap_style=2, join_style=2)
+        padding = 1  # need to pad the pad to prevent terminals from being omitted
+        halo = halo.buffer(padding, cap_style=2, join_style=2)
+        return halo
 
     def get_bbox_diagonal(self, net):
         """Get the diagonal length of the bounding box to estimate net length"""
@@ -290,9 +317,9 @@ class AstarRouter:
 
 if __name__ == "__main__":
     # Define nets
-    # nets, obstacles = create_hard_test_case("macro_grid")
     log.basicConfig(level=log.INFO)
-    nets, obstacles = create_hard_test_case("macro_grid")
+    # nets, obstacles = create_hard_test_case("macro_grid")
+    nets, obstacles = create_hard_test_case("precision")
 
     # Route all nets
     db = []

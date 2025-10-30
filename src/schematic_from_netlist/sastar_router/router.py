@@ -11,7 +11,7 @@ from itertools import cycle
 import numpy as np
 import pygame
 from models import CostBuckets, CostEstimator, RoutingContext
-from shapely.geometry import GeometryCollection, LineString, MultiLineString, Point
+from shapely.geometry import GeometryCollection, LineString, MultiLineString, Point, box
 from shapely.ops import linemerge, unary_union
 from shapely.strtree import STRtree
 from visualization import plot_result
@@ -58,34 +58,33 @@ class SimultaneousRouter:
         self.cost_estimator = CostEstimator(grid_spacing)
 
         # Calculate bounds if not provided
+        # Ensure bounds include all terminals by expanding if necessary
         if not self.bounds:
             self._calculate_default_bounds()
-
-        # Ensure bounds include all terminals by expanding if necessary
-        # We'll update this when routing with actual terminals
 
     def _calculate_default_bounds(self):
         """Calculate default bounds based on obstacles"""
         # Compute bounds with padding
-        self.min_x = float("inf")
-        self.max_x = float("-inf")
-        self.min_y = float("inf")
-        self.max_y = float("-inf")
+        padding = 10  # Add padding to bounds
+        min_x = float("inf")
+        max_x = float("-inf")
+        min_y = float("inf")
+        max_y = float("-inf")
 
         # Add all obstacle bounds
         for obs in self.obstacles:
             bounds = obs.bounds
-            self.min_x = min(self.min_x, bounds[0])
-            self.min_y = min(self.min_y, bounds[1])
-            self.max_x = max(self.max_x, bounds[2])
-            self.max_y = max(self.max_y, bounds[3])
+            min_x = min(min_x, bounds[0])
+            min_y = min(min_y, bounds[1])
+            max_x = max(max_x, bounds[2])
+            max_y = max(max_y, bounds[3])
 
-        # Pad by 20 grid points
-        padding = 20 * self.grid_spacing
-        self.min_x -= padding
-        self.max_x += padding
-        self.min_y -= padding
-        self.max_y += padding
+        # Pad by 10 grid points
+        min_x -= padding
+        max_x += padding
+        min_y -= padding
+        max_y += padding
+        self.bounds = box(min_x, min_y, max_x, max_y)
 
     def to_screen_coords(self, point):
         x, y = point
@@ -94,22 +93,144 @@ class SimultaneousRouter:
         screen_y = self.height - ((y - self.min_y) * scale + (self.height - (self.max_y - self.min_y) * scale) / 2)
         return (int(screen_x), int(screen_y))
 
+    def _initialize_visualization(self, terminals, existing_paths):
+        """Initialize Pygame and draw the initial state."""
+        pygame.init()
+        screen = pygame.display.set_mode((self.width, self.height))
+        pygame.display.set_caption("A* Routing Visualization")
+        font = pygame.font.Font(None, 24)
+
+        # Scale factors
+        self.min_x, self.min_y, self.max_x, self.max_y = self.bounds.bounds
+        scale_x = self.width / (self.max_x - self.min_x)
+        scale_y = self.height / (self.max_y - self.min_y)
+        self.scale = min(scale_x, scale_y) * 0.9
+
+        screen.fill((255, 255, 255))
+
+        # Draw obstacles
+        for obs in self.obstacles:
+            points = [self.to_screen_coords((x, y)) for x, y in obs.exterior.coords]
+            pygame.draw.polygon(screen, (200, 200, 200), points)
+            pygame.draw.polygon(screen, (0, 0, 0), points, 1)
+
+        # Draw halo regions
+        for halo in self.halo_geoms:
+            points = [self.to_screen_coords((x, y)) for x, y in halo.exterior.coords]
+            pygame.draw.polygon(screen, (255, 200, 200), points, 1)
+
+        # bounds
+        if self.bounds:
+            bounds_points = [self.to_screen_coords((x, y)) for x, y in self.bounds.exterior.coords]
+            # Draw outline in red to show it's a boundary
+            pygame.draw.polygon(screen, (255, 0, 0), bounds_points, 3)
+
+        # Draw existing nets in different colors
+        if existing_paths:
+            for route_geom in existing_paths:
+                self.draw_route(screen, route_geom)
+
+        # Draw terminals
+        for i, term in enumerate(terminals):
+            pos = self.to_screen_coords(term)
+            pygame.draw.circle(screen, (255, 0, 0), pos, 5)
+            text = font.render(f"T{i}", True, (0, 0, 0))
+            screen.blit(text, (pos[0] + 5, pos[1] - 5))
+        return screen, font
+
+    def _handle_pygame_events(self):
+        """Handle Pygame events."""
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                pygame.quit()
+                sys.exit()
+
+    def _visualize_search_progress(
+        self, screen, font, step_costs, parents, current_node, current_mask, terminals, cost, best_costs
+    ):
+        """Visualize the progress of the A* search."""
+        # Avoid zero or negative costs by shifting
+        shift = 1e-6
+        if not step_costs:
+            return
+        log_costs = [math.log(c + shift) for c in step_costs.values()]
+
+        log_min = min(log_costs)
+        log_max = max(log_costs)
+
+        for (mx, my), cost_val in step_costs.items():
+            log_cost = math.log(cost_val + shift)
+            norm_cost = (log_cost - log_min) / (log_max - log_min + 1e-12)
+
+            color_value = int(255 * norm_cost)
+            color = (color_value, 255 - color_value, 128)  # same gradient
+
+            rect_size = int(1 * self.scale)
+            screen_rect = pygame.Rect(0, 0, rect_size, rect_size)
+            screen_rect.center = self.to_screen_coords((mx, my))
+
+            surf = pygame.Surface((rect_size, rect_size), pygame.SRCALPHA)
+            surf.fill((*color, 100))
+            screen.blit(surf, screen_rect.topleft)
+
+        """
+        # Draw current path tree by reconstructing from best_costs
+        for state, parent_info in parents.items():
+            node, mask = state
+            parent_node, parent_mask = parent_info
+            if parent_node is not None:
+                start_pos = self.to_screen_coords(parent_node)
+                end_pos = self.to_screen_coords(node)
+                pygame.draw.line(screen, (0, 0, 255), start_pos, end_pos, 2)
+        """
+
+        # Draw current node
+        current_pos = self.to_screen_coords(current_node)
+        pygame.draw.circle(screen, (10, 10, 10), current_pos, 1)
+
+        # Draw reached terminals info
+        reached_count = bin(current_mask).count("1")
+        info_text = f"Reached: {reached_count}/{len(terminals)}"
+        text_surface = font.render(info_text, True, (0, 0, 0))
+        screen.blit(text_surface, (10, 10))
+
+        # Display cost information
+        cost_text = f"Current cost: {cost:.0f}"
+        cost_surface = font.render(cost_text, True, (0, 0, 0))
+        screen.blit(cost_surface, (10, 40))
+
+        # Display g_score
+        g_score_text = f"g_score: {best_costs.get((current_node, current_mask), 0):.0f}"
+        g_score_surface = font.render(g_score_text, True, (0, 0, 0))
+        screen.blit(g_score_surface, (10, 70))
+
+        pygame.display.flip()
+
+    def _visualize_final_path(self, screen, font, net, cost, current_node, current_mask, terminal_set):
+        """Visualize the final path and save the image."""
+        # Calculate and display additional cost information before quitting
+        h_value = self._heuristic_mst(current_node, current_mask, terminal_set)
+        f_score = cost + h_value
+        # Display cost information
+        cost_text = f"Final cost: {cost:.2f}, h: {h_value:.2f}, f: {f_score:.2f}"
+        cost_surface = font.render(cost_text, True, (0, 0, 0))
+        screen.blit(cost_surface, (10, 100))
+        f_score_text = f"f_score: {f_score:.2f}"
+        f_score_surface = font.render(f_score_text, True, (0, 0, 0))
+        screen.blit(f_score_surface, (10, 130))
+        pygame.display.flip()
+        # pygame.image.save(pygame.display.get_surface(), "data/images/saroute/screenshot.png")
+        pygame.image.save(screen, f"data/images/sastar/{net.name}_cost_explored.png")
+        # Wait a moment to see the final state
+        pygame.quit()
+
     def route_net(self, net, existing_paths=None):
         """
         More efficient approach: track which terminals are connected to each node
         """
         terminals = net.pins
         if len(terminals) < 2:
-            return [], 0, {}  # Return empty paths, zero cost, and empty step costs
-
-        # If bounds were provided, use them
-        if self.bounds:
-            self.min_x, self.min_y, self.max_x, self.max_y = self.bounds
-            padding = 5 * self.grid_spacing
-            self.min_x -= padding
-            self.max_x += padding
-            self.min_y -= padding
-            self.max_y += padding
+            return [], 0
 
         # Snap terminals to grid
         terminals = [self._snap_to_grid(t) for t in terminals]
@@ -126,70 +247,23 @@ class SimultaneousRouter:
             terminal_set=terminal_set,
         )
 
-        # Initialize pygame if enabled
+        # Initialize pygame
+        screen, font = None, None
         if ENABLE_PYGAME:
-            pygame.init()
-            screen = pygame.display.set_mode((self.width, self.height))
-            pygame.display.set_caption("A* Routing Visualization")
-            font = pygame.font.Font(None, 24)
-
-            # Scale factors
-            scale_x = self.width / (self.max_x - self.min_x)
-            scale_y = self.height / (self.max_y - self.min_y)
-            self.scale = min(scale_x, scale_y) * 0.9
-
-        if ENABLE_PYGAME:
-            screen.fill((255, 255, 255))
-
-            # Draw obstacles
-            for obs in self.obstacles:
-                points = [self.to_screen_coords((x, y)) for x, y in obs.exterior.coords]
-                pygame.draw.polygon(screen, (200, 200, 200), points)
-                pygame.draw.polygon(screen, (0, 0, 0), points, 1)
-
-            # Draw halo regions
-            for halo in self.halo_geoms:
-                points = [self.to_screen_coords((x, y)) for x, y in halo.exterior.coords]
-                pygame.draw.polygon(screen, (255, 200, 200), points, 1)
-
-            # Draw existing nets in different colors
-            for route_geom in existing_paths:
-                self.draw_route(screen, route_geom)
-
-            # Draw terminals
-            for i, term in enumerate(terminals):
-                pos = self.to_screen_coords(term)
-                pygame.draw.circle(screen, (255, 0, 0), pos, 5)
-                text = font.render(f"T{i}", True, (0, 0, 0))
-                screen.blit(text, (pos[0] + 5, pos[1] - 5))
-        # Update bounds
-        min_x_term = min(t[0] for t in terminals)
-        max_x_term = max(t[0] for t in terminals)
-        min_y_term = min(t[1] for t in terminals)
-        max_y_term = max(t[1] for t in terminals)
-        self.min_x = min(self.min_x, min_x_term)
-        self.max_x = max(self.max_x, max_x_term)
-        self.min_y = min(self.min_y, min_y_term)
-        self.max_y = max(self.max_y, max_y_term)
+            screen, font = self._initialize_visualization(terminals, context.existing_paths)
 
         # Initialize from all terminals
-        # Priority queue: (cost, node, parent, direction, connected_terminals)
+        # Priority queue: (cost, node, mask, parent_node, incoming_direction)
         # Use a bitmask for connected terminals to save space
-
         # Map each terminal to a bit
         terminal_to_bit = {term: 1 << i for i, term in enumerate(terminals)}
         all_terminals_mask = (1 << len(terminals)) - 1
 
-        # Start from each terminal
-        open_set = []
-        # Track best cost for (node, mask)
-        best_costs = {}
-        # Track parent information
-        parents = {}
-
-        # Initialize step costs for the net being routed
-        step_costs = {}
-        final_step_costs = {}  # Track only the final path's costs
+        open_set = []  # Start from each terminal
+        best_costs = {}  # Track best cost for (node, mask)
+        parents = {}  # Track parent information
+        step_costs = {}  # Initialize step costs for the net being routed
+        visited = set()  # Track visited (node, mask) states
 
         # Initialize all terminals
         for i, term in enumerate(terminals):
@@ -204,34 +278,25 @@ class SimultaneousRouter:
         while open_set:
             # Handle pygame events if visualization is enabled
             if ENABLE_PYGAME:
-                for event in pygame.event.get():
-                    if event.type == pygame.QUIT:
-                        pygame.quit()
-                        sys.exit()
+                self._handle_pygame_events()
 
             cost, current_node, current_mask, parent_node, incoming_direction = heappop(open_set)
 
-            # Check if all terminals are connected
-            if current_mask == all_terminals_mask:
+            # Update mask for current node if it's a terminal
+            current_mask_updated = current_mask
+            if current_node in terminal_set:
+                current_mask_updated |= terminal_to_bit[current_node]
+                log.info(f"Terminal {current_node=} added to mask: {current_mask_updated}")
+
+            # Check if we've connected all terminals
+            if current_mask_updated == all_terminals_mask:
                 final_cost = cost  # Store the final cost
                 if ENABLE_PYGAME:
-                    # Calculate and display additional cost information before quitting
-                    h_value = self._heuristic_mst(current_node, current_mask, terminal_set)
-                    f_score = cost + h_value
-                    # Display cost information
-                    cost_text = f"Final cost: {cost:.2f}, h: {h_value:.2f}, f: {f_score:.2f}"
-                    cost_surface = font.render(cost_text, True, (0, 0, 0))
-                    screen.blit(cost_surface, (10, 100))
-                    f_score_text = f"f_score: {f_score:.2f}"
-                    f_score_surface = font.render(f_score_text, True, (0, 0, 0))
-                    screen.blit(f_score_surface, (10, 130))
-                    pygame.display.flip()
-                    # pygame.image.save(pygame.display.get_surface(), "data/images/saroute/screenshot.png")
-                    pygame.image.save(screen, f"data/images/sastar/{net.name}_cost_explored.png")
-                    # Wait a moment to see the final state
-                    pygame.quit()
-                # Verify that all terminals are actually reachable in the parent structure
-                tree = self._build_steiner_tree(parents, (current_node, current_mask), terminals, existing_paths)
+                    self._visualize_final_path(screen, font, net, cost, current_node, current_mask_updated, terminal_set)
+
+                # Build the Steiner tree using the updated mask
+                tree = self._build_steiner_tree(parents, (current_node, current_mask_updated), terminals, existing_paths)
+
                 # Additional check: ensure all terminals are in the tree
                 tree_geom = unary_union(tree) if tree else None
                 if tree_geom:
@@ -252,92 +317,49 @@ class SimultaneousRouter:
                 else:
                     # In rare cases, unary_union returns a GeometryCollection
                     mls = MultiLineString([g for g in getattr(tree_geom, "geoms", []) if isinstance(g, LineString)])
+
+                if ENABLE_PYGAME:
+                    pygame.quit()
+
                 return mls, final_cost
 
-            # Explore neighbors
+            current_state = (current_node, current_mask_updated)
+            if current_state in visited:
+                continue
+            visited.add(current_state)
+
+            # Explore neighbors - use the updated mask
             for neighbor in self._get_neighbors(current_node):
-                # Calculate move cost using the cost estimator
                 move_cost = self.cost_estimator.get_move_cost(current_node, neighbor, parent_node, context)
-
-                # Store cost at segment midpoint
-                midpoint = ((current_node[0] + neighbor[0]) / 2, (current_node[1] + neighbor[1]) / 2)
-                step_costs[midpoint] = move_cost
-
+                step_costs[neighbor] = move_cost
                 new_cost = cost + move_cost
 
-                # Update mask if neighbor is a terminal
-                new_mask = current_mask
+                # Start with the updated current mask, then add neighbor's terminal bit if applicable
+                new_mask = current_mask_updated  # Use updated mask, not original!
                 if neighbor in terminal_set:
                     new_mask |= terminal_to_bit[neighbor]
+                    log.info(f"Terminal {neighbor=} added to mask: {new_mask}")
 
                 new_state = (neighbor, new_mask)
+                log.info(f"Explored {new_state=} {move_cost=} {new_cost=}")
 
                 if new_state not in best_costs or new_cost < best_costs[new_state]:
                     best_costs[new_state] = new_cost
-                    parents[new_state] = (current_node, current_mask)
+                    parents[new_state] = (current_node, current_mask_updated)  # Store updated mask
                     heappush(open_set, (new_cost, neighbor, new_mask, current_node, None))
 
                     # Visualization if enabled
-
                     if ENABLE_PYGAME:
-                        # Avoid zero or negative costs by shifting
-                        shift = 1e-6
-                        log_costs = [math.log(c + shift) for c in step_costs.values()]
-
-                        log_min = min(log_costs)
-                        log_max = max(log_costs)
-
-                        for (mx, my), cost in step_costs.items():
-                            log_cost = math.log(cost + shift)
-                            norm_cost = (log_cost - log_min) / (log_max - log_min + 1e-12)
-
-                            color_value = int(255 * norm_cost)
-                            color = (color_value, 255 - color_value, 128)  # same gradient
-
-                            rect_size = int(1 * self.scale)
-                            screen_rect = pygame.Rect(0, 0, rect_size, rect_size)
-                            screen_rect.center = self.to_screen_coords((mx, my))
-
-                            surf = pygame.Surface((rect_size, rect_size), pygame.SRCALPHA)
-                            surf.fill((*color, 100))
-                            screen.blit(surf, screen_rect.topleft)
-
-                        """
-                        # Draw current path tree by reconstructing from best_costs
-                        for state, parent_info in parents.items():
-                            node, mask = state
-                            parent_node, parent_mask = parent_info
-                            if parent_node is not None:
-                                start_pos = self.to_screen_coords(parent_node)
-                                end_pos = self.to_screen_coords(node)
-                                pygame.draw.line(screen, (0, 0, 255), start_pos, end_pos, 2)
-                        """
-
-                        # Draw current node
-                        current_pos = self.to_screen_coords(current_node)
-                        pygame.draw.circle(screen, (10, 10, 10), current_pos, 1)
-
-                        # Draw reached terminals info
-                        reached_count = bin(current_mask).count("1")
-                        info_text = f"Reached: {reached_count}/{len(terminals)}"
-                        text_surface = font.render(info_text, True, (0, 0, 0))
-                        screen.blit(text_surface, (10, 10))
-
-                        # Display cost information
-                        cost_text = f"Current cost: {cost:.0f}"
-                        cost_surface = font.render(cost_text, True, (0, 0, 0))
-                        screen.blit(cost_surface, (10, 40))
-
-                        # Display g_score
-                        g_score_text = f"g_score: {best_costs.get((current_node, current_mask), 0):.0f}"
-                        g_score_surface = font.render(g_score_text, True, (0, 0, 0))
-                        screen.blit(g_score_surface, (10, 70))
-
-                        pygame.display.flip()
+                        self._visualize_search_progress(
+                            screen, font, step_costs, parents, current_node, current_mask_updated, terminals, cost, best_costs
+                        )
 
         if ENABLE_PYGAME:
             pygame.quit()
-        return [], 0, {}  # Failed to route, return empty list, zero cost, and empty step costs
+
+        # Failed to route, return empty list
+        log.warning(f"Failed to route net {net.name} - could not connect all terminals")
+        return [], float("inf")
 
     def _extract_final_path_costs(self, tree, context, terminals):
         """Extract step costs only for the final chosen path"""
@@ -379,9 +401,8 @@ class SimultaneousRouter:
             # Calculate move cost
             move_cost = self.cost_estimator.get_move_cost(current_node, neighbor_node, parent_node, context)
 
-            # Store cost at segment midpoint
-            midpoint = ((current_node[0] + neighbor_node[0]) / 2, (current_node[1] + neighbor_node[1]) / 2)
-            final_step_costs[midpoint] = move_cost
+            # Store cost at neighbor_node
+            final_step_costs[neighbor_node] = move_cost
 
             # Update parent for next iteration
             parent_node = current_node
@@ -706,8 +727,8 @@ class SimultaneousRouter:
     # Reuse helper methods from SequentialRouter
     def _snap_to_grid(self, point):
         x, y = point
-        gx = round(x / self.grid_spacing) * self.grid_spacing
-        gy = round(y / self.grid_spacing) * self.grid_spacing
+        gx = int(round(x / self.grid_spacing) * self.grid_spacing)
+        gy = int(round(y / self.grid_spacing) * self.grid_spacing)
         return (gx, gy)
 
     def _get_neighbors(self, node):
@@ -718,8 +739,8 @@ class SimultaneousRouter:
         potential_neighbors = [(x + g, y), (x - g, y), (x, y + g), (x, y - g)]
         # Filter neighbors to be within padded bounds
         for nx, ny in potential_neighbors:
-            if self.min_x <= nx <= self.max_x and self.min_y <= ny <= self.max_y:
-                neighbors.append((nx, ny))
+            if self.bounds.contains(Point(nx, ny)):
+                neighbors.append((int(nx), int(ny)))
         return neighbors
 
     @staticmethod
