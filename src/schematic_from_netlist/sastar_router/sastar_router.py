@@ -24,9 +24,10 @@ class AstarRouter:
     def __init__(self, db):
         self.db = db
 
-    def route_design(self):
+    def route_design(self, flat=False):
         log.info("Routing design using SAstar Router")
-        for module in self.db.design.modules.values():
+        modules = [self.db.design.flat_module] if flat else self.db.design.modules.values()
+        for module in modules:
             obstacles = self.get_macro_geometries(module)
             routed_nets = self.route_nets(module.nets, obstacles)
 

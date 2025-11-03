@@ -101,9 +101,10 @@ class GlobalRouter:
                 log.warning(f"Pin {p.name} instance {p.instance.name} has no geom .")
         topo.context.pin_macros = pin_macros
 
-    def insert_routing_junctions(self):
+    def insert_routing_junctions(self, flat=False):
         # Process groups
-        for module in self.db.design.modules.values():
+        modules = [self.db.design.flat_module] if flat else self.db.design.modules.values()
+        for module in modules:
             stage = 0
             if module.is_leaf:
                 continue

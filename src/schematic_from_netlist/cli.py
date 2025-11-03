@@ -50,15 +50,14 @@ def produce_graph(db):
     db.remove_multi_fanout_buffers()
     db.fig2geom()
     gp.place_design()
-    exit()
 
-    junctions = gr.insert_routing_junctions()
+    junctions = gr.insert_routing_junctions(flat=True)
     # db.dump_to_table("route_guide_insertion")
     # dr.reroute()
 
     bypass_phase2 = True
     if bypass_phase2:
-        ar.route_design()
+        ar.route_design(flat=True)
         # db.remove_multi_fanout_buffers()
         db.geom2shape()
     else:
