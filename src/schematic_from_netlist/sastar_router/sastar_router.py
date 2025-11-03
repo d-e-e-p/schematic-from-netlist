@@ -64,7 +64,7 @@ class AstarRouter:
                 return
 
             # Only update if new route is better
-            log.info(f"Net {net.name} old paths {old_routed_paths} new paths {new_routed_paths}")
+            # log.info(f"Net {net.name} old paths {old_routed_paths} new paths {new_routed_paths}")
             if new_total_cost < old_total_cost:
                 print(f"  New route cost {new_total_cost} < orig {old_total_cost} : keeping new route")
                 net.draw.geom = new_routed_paths
@@ -146,7 +146,13 @@ class AstarRouter:
         terminal_set = set([p.draw.geom for p in net.pins.values()])
 
         other_paths = unary_union(existing_paths)
-        other_paths_index = STRtree(list(other_paths.geoms)) if other_paths else None
+
+        if other_paths.is_empty:
+            other_paths_index = None
+        elif isinstance(other_paths, LineString):
+            other_paths_index = STRtree([other_paths])
+        else:
+            other_paths_index = STRtree(list(other_paths.geoms))
 
         # Create routing context WITH existing nets
         context = RoutingContext(
@@ -163,7 +169,7 @@ class AstarRouter:
         parent_node = None
 
         # Extract and interpolate all coordinates from all path segments
-        log.info(f"calculate_existing_cost existing path net {net.name}  {path=}")
+        # log.info(f"calculate_existing_cost existing path net {net.name}  {path=}")
         all_coords = []
         for line in self.iter_lines(path):
             coords = list(line.coords)
@@ -187,7 +193,7 @@ class AstarRouter:
 
             all_coords.extend(interpolated)
 
-        log.info(f"Extract and interpolate all coordinates net {net.name}  {all_coords=}")
+        # log.info(f"Extract and interpolate all coordinates net {net.name}  {all_coords=}")
         # Remove duplicate consecutive points
         cleaned_coords = []
         prev = None
@@ -197,7 +203,7 @@ class AstarRouter:
                 cleaned_coords.append(snapped)
                 prev = snapped
 
-        log.info(f"Remove duplicate consecutive points net {net.name}  {cleaned_coords=}")
+        # log.info(f"Remove duplicate consecutive points net {net.name}  {cleaned_coords=}")
         # Reset step costs before calculation
         step_costs = {}
 
@@ -273,8 +279,12 @@ class AstarRouter:
         """Get the ortho length of the bounding box to estimate net length"""
         if not net.pins:
             return 0
-        xs = [p.draw.geom.x for p in net.pins.values()]
-        ys = [p.draw.geom.y for p in net.pins.values()]
+        # log.info(f" {net.name} {[p.draw.geom for p in net.pins.values() if p.draw.geom]}")
+        xs = [p.draw.geom.x for p in net.pins.values() if p.draw.geom]
+        ys = [p.draw.geom.y for p in net.pins.values() if p.draw.geom]
+        # no pin geom?
+        if not xs or not ys:
+            return 0
         min_x, max_x = min(xs), max(xs)
         min_y, max_y = min(ys), max(ys)
         return (max_x - min_x) + (max_y - min_y)

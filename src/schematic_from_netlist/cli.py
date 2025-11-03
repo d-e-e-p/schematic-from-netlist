@@ -4,6 +4,7 @@ import os
 
 import colorlog
 
+from schematic_from_netlist.global_placer.global_placer import GlobalPlacer
 from schematic_from_netlist.global_router.global_router import GlobalRouter
 from schematic_from_netlist.graph.gen_sch_data import GenSchematicData
 from schematic_from_netlist.graph.group_maker import SteinerGroupMaker
@@ -37,6 +38,7 @@ def produce_graph(db):
     """Build Graphviz layouts for groups and top-level interconnect."""
 
     gv = Graphviz(db)
+    gp = GlobalPlacer(db)
     gr = GlobalRouter(db)
     ar = AstarRouter(db)
     # router = AstarRouter(db)
@@ -47,6 +49,9 @@ def produce_graph(db):
     gv.generate_layout_figures(phase="initial")
     db.remove_multi_fanout_buffers()
     db.fig2geom()
+    gp.place_design()
+    exit()
+
     junctions = gr.insert_routing_junctions()
     # db.dump_to_table("route_guide_insertion")
     # dr.reroute()

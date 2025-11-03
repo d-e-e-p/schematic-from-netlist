@@ -18,7 +18,7 @@ from schematic_from_netlist.sastar_router.models import CostBuckets, CostEstimat
 from schematic_from_netlist.sastar_router.visualization import plot_result
 
 # Set to True to enable Pygame visualization
-ENABLE_PYGAME = False
+ENABLE_PYGAME = True
 COLORS = cycle(
     [
         (255, 0, 0),
@@ -229,7 +229,7 @@ class SimultaneousRouter:
         """
         connect one net
         """
-        terminals = [(pin.draw.geom.x, pin.draw.geom.y) for pin in net.pins.values()]
+        terminals = [(pin.draw.geom.x, pin.draw.geom.y) for pin in net.pins.values() if pin.draw.geom]
         if len(terminals) < 2:
             return [], 0
 
@@ -286,7 +286,7 @@ class SimultaneousRouter:
             current_mask_updated = current_mask
             if current_node in terminal_set:
                 current_mask_updated |= terminal_to_bit[current_node]
-                log.info(f"Terminal {current_node=} added to mask: {current_mask_updated}")
+                # log.info(f"Terminal {current_node=} added to mask: {current_mask_updated}")
 
             # Check if we've connected all terminals
             if current_mask_updated == all_terminals_mask:
