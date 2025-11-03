@@ -38,12 +38,13 @@ class CostBucket:
     length: int
     via: int
     crossing: int
+    diag: int
 
 
 class CostBuckets:
-    BASE = CostBucket(1, 5, 10)
-    HALO = CostBucket(4, 5, 10)
-    MACRO = CostBucket(100, 5, 10)
+    BASE = CostBucket(1, 5, 10, 200)
+    HALO = CostBucket(4, 5, 10, 200)
+    MACRO = CostBucket(100, 5, 10, 200)
 
 
 class CostEstimator:
@@ -58,7 +59,7 @@ class CostEstimator:
             return CostBuckets.HALO
         return CostBuckets.BASE
 
-    def get_move_cost(self, current_node, neighbor_node, parent_node, context):
+    def get_move_cost(self, parent_node, current_node, neighbor_node, context):
         """Calculate the cost of moving to a neighbor node."""
 
         costs = self._region_costs(neighbor_node, context)
@@ -69,7 +70,9 @@ class CostEstimator:
         if self.is_intersecting(neighbor_node, context):
             total_cost += costs.crossing
 
-        if self.is_bend(parent_node, current_node, neighbor_node):
+        if self.is_diag(parent_node, current_node, neighbor_node):
+            total_cost += costs.diag
+        elif self.is_bend(parent_node, current_node, neighbor_node):
             total_cost += costs.via
 
         return total_cost
@@ -87,6 +90,21 @@ class CostEstimator:
         cross = v1[0] * v2[1] - v1[1] * v2[0]
 
         return cross != 0
+
+    def is_diag(self, parent_node, current_node, neighbor_node):
+        """Detect if the step from current -> neighbor is diagonal (not orthogonal)."""
+        if neighbor_node is None or current_node is None:
+            return False
+
+        dx = neighbor_node[0] - current_node[0]
+        dy = neighbor_node[1] - current_node[1]
+
+        # A diagonal move has both dx and dy nonzero (e.g. (±1, ±1))
+        res = dx != 0 and dy != 0
+        if res:
+            log.info(f"Diagonal move {parent_node} -> {current_node} -> {neighbor_node}")
+            breakpoint()
+        return res
 
     def is_in_halo(self, point, context):
         """Check if a point is in any halo region."""

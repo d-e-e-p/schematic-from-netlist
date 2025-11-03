@@ -349,7 +349,7 @@ class VerilogModifier:
 
     def extract_portarg_with_width(self, port_arg, module_def):
         info = self.extract_portarg_info(port_arg, module_def)
-        log.debug(f"{info=}")
+        # log.debug(f"{info=}")
         return info
 
     def extract_portarg_info(self, port_arg, module_def):

@@ -1,13 +1,37 @@
 import datetime
 import logging as log
 import os
+import re
+import unicodedata
 
 import matplotlib.pyplot as plt
 import numpy as np
 from shapely.geometry import LineString, MultiLineString
 
 
-def plot_result(net, obstacles, existing_nets):
+def clean_hierarchical_name(name: str, delimiter: str = "_") -> str:
+    """
+    Cleans a hierarchical name (e.g., 'Mod/Instance/Signal') into a flat,
+    filesystem-safe string (e.g., 'mod_instance_signal').
+    """
+
+    # 1. Normalize Unicode and convert to ASCII
+    name = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode("ascii")
+
+    # 2. Convert to lowercase
+    name = name.lower()
+
+    # The pattern now explicitly includes '/' and backslash '\'
+    name = re.sub(r"[^\w-]", delimiter, name)
+
+    # 4. Collapse multiple delimiters (which might result from the previous step)
+    #    and strip any leading/trailing delimiters.
+    name = re.sub(f"{delimiter}+", delimiter, name).strip(delimiter)
+
+    return name
+
+
+def plot_result(net, obstacles, existing_nets, prefix=""):
     """
     Plot the routing result including terminals, obstacles, and paths
     Save to data/images/sastar/ instead of showing on screen
@@ -73,13 +97,8 @@ def plot_result(net, obstacles, existing_nets):
     # Find the current net object to get its cost
     current_net_cost = ""
     if net.name and existing_nets:
-        for net in existing_nets.values():
-            if net.name == net_name:
-                if hasattr(net, "step_costs") and net.draw.step_costs:
-                    current_net_cost = f" (cost: {sum(net.draw.step_costs.values()):.1f})"
-                elif hasattr(net, "total_cost"):
-                    current_net_cost = f" (cost: {net.total_cost:.1f})"
-                break
+        net = existing_nets[net.name]
+        current_net_cost = f"total cost: {net.draw.total_cost}"
 
     # Plot current paths in blue
     i = 0
@@ -139,13 +158,9 @@ def plot_result(net, obstacles, existing_nets):
     if handles:
         ax.legend(handles, labels, loc="upper right")
 
-    # Generate filename with timestamp and net name
-    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    if net_name:
-        filename = f"data/images/sastar/route_{net_name}.png"
-    else:
-        filename = f"data/images/sastar/routing_{timestamp}.png"
+    # Generate filename with cleaned net name
+    filename = f"data/images/sastar/route_{prefix}_{clean_hierarchical_name(net_name)}.png"
 
     plt.savefig(filename, dpi=150, bbox_inches="tight")
     plt.close()  # Close the figure to free memory
-    print(f"Saved plot to {filename}")
+    log.info(f"Saved plot to {filename}")

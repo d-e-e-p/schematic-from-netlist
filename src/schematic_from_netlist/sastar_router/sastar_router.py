@@ -47,10 +47,11 @@ class AstarRouter:
             # flatten list
 
             other_paths = [n.draw.geom for j, n in enumerate(sorted_nets) if j != i]
+            log.info(f"calculating old cost of {net.name} with route={old_routed_paths}")
             old_total_cost, old_step_costs = self.calculate_existing_cost(net, old_routed_paths, obstacles, other_paths)
 
             # Calculate bounds from existing route
-            router_halo = self.get_route_halo(old_routed_paths, net.pins, padding=1)
+            router_halo = self.get_route_halo(old_routed_paths, net.pins, padding=2)
             # router_halo = self.get_preexisting_route_bounds(old_routed_paths)
 
             # Create router with bounds
@@ -58,6 +59,7 @@ class AstarRouter:
             new_routed_paths, new_total_cost = router.route_net(net, other_paths)
 
             # Calculate existing cost with other nets' paths
+            log.info(f"calculating new cost of {net.name} with route={new_routed_paths}")
             new_total_cost, new_step_costs = self.calculate_existing_cost(net, new_routed_paths, obstacles, other_paths)
 
             if not new_routed_paths and not old_routed_paths:
@@ -65,22 +67,35 @@ class AstarRouter:
                 return
 
             # Only update if new route is better
-            # log.info(f"Net {net.name} old paths {old_routed_paths} new paths {new_routed_paths}")
-            if new_total_cost < old_total_cost:
-                print(f"  New route cost {new_total_cost} < orig {old_total_cost} : keeping new route")
-                net.draw.geom = new_routed_paths
-                net.total_cost = new_total_cost
-                net.step_costs = new_step_costs
-            else:
-                print(f"  New route cost {new_total_cost} > orig {old_total_cost} : reverting to old")
-                net.draw.geom = old_routed_paths
-                net.total_cost = old_total_cost
-                net.step_costs = old_step_costs
+            log.debug(f"Net {net.name} pins {[p.draw.geom for p in net.pins.values() if p.draw.geom]}")
+            log.debug(f"Net {net.name} old paths {old_routed_paths} new paths {new_routed_paths}")
+            log.debug(f"Net {net.name} old steps {old_step_costs} new steps {new_step_costs}")
 
-            plot_result(net, obstacles, nets)
+            net.draw.geom = old_routed_paths
+            net.draw.total_cost = old_total_cost
+            net.draw.step_costs = old_step_costs
+            plot_result(net, obstacles, nets, "old")
+
+            net.draw.geom = new_routed_paths
+            net.draw.total_cost = new_total_cost
+            net.draw.step_costs = new_step_costs
+            plot_result(net, obstacles, nets, "new")
+
+            if new_total_cost < old_total_cost:
+                log.info(f"  New route cost {new_total_cost} < orig {old_total_cost} : keeping new route")
+                net.draw.geom = new_routed_paths
+                net.draw.total_cost = new_total_cost
+                net.draw.step_costs = new_step_costs
+            else:
+                log.info(f"  New route cost {new_total_cost} > orig {old_total_cost} : reverting to old")
+                net.draw.geom = old_routed_paths
+                net.draw.total_cost = old_total_cost
+                net.draw.step_costs = old_step_costs
+
+        plot_result(net, obstacles, nets)
 
         # After all nets are routed, check for overlaps between nets
-        self.check_for_overlaps(nets)
+        # self.check_for_overlaps(nets)
 
         """
         # Post-processing: Ensure all nets are connected
@@ -136,6 +151,10 @@ class AstarRouter:
 
         raise TypeError(f"Unsupported type in iter_lines: {type(geom)} → {geom!r}")
 
+    @staticmethod
+    def distance(p1, p2):
+        return abs(p1[0] - p2[0]) + abs(p1[1] - p2[1])
+
     def calculate_existing_cost(self, net, path, obstacles, existing_paths):
         """Calculate the cost of an existing route using the same cost estimation as routing"""
         # Create temporary router to get halo regions and context
@@ -189,6 +208,7 @@ class AstarRouter:
                     step = 1 if end[0] > start[0] else -1
                     interpolated += [(x, start[1]) for x in range(int(start[0]), int(end[0]) + step, step)]
                 else:  # Diagonal (shouldn't happen in our router)
+                    log.warning(f"Diagonal move detected: {start} → {end}")
                     interpolated.append(start)
                     interpolated.append(end)
 
@@ -221,8 +241,12 @@ class AstarRouter:
             if neighbor_node in terminal_set:
                 continue
 
+            if self.distance(current_node, neighbor_node) > 1:
+                log.warning(f"skipping long jump: {start} → {end}")
+                continue
+
             # Calculate move cost using the same logic as during routing
-            move_cost = cost_estimator.get_move_cost(current_node, neighbor_node, parent_node, context)
+            move_cost = cost_estimator.get_move_cost(parent_node, current_node, neighbor_node, context)
 
             # Store cost at the neighbor node
             step_costs[neighbor_node] = move_cost
