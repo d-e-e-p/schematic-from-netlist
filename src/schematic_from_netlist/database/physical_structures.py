@@ -226,7 +226,10 @@ class DesignPhysical(RectanglePhysical):
                 pin.draw.shape = None
 
     def _for_each_draw_obj(self, fn: Callable):
-        for module in self.design.modules.values():
+        modules = list(self.design.modules.values())
+        if self.design.flat_module:
+            modules.append(self.design.flat_module)
+        for module in modules:
             for collection in (
                 [module],
                 module.ports.values(),

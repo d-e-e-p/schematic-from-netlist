@@ -91,6 +91,8 @@ class NetlistOperationsMixin:
         for module in sorted_modules:
             if not module.is_leaf:
                 self.buffer_multi_fanout_nets_for_module(module)
+        if module := self.design.flat_module:
+            self.buffer_multi_fanout_nets_for_module(module)
 
         self._build_lookup_tables()
         self.print_design_stats("before buffering")
@@ -142,6 +144,9 @@ class NetlistOperationsMixin:
         for module in self.design.modules.values():
             if not module.is_leaf:
                 self.remove_multi_fanout_buffers_for_module(module)
+
+        if module := self.design.flat_module:
+            self.remove_multi_fanout_buffers_for_module(module)
 
         self._build_lookup_tables()
         self.print_design_stats("after removing buffers")

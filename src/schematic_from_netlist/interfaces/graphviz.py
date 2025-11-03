@@ -15,13 +15,18 @@ class Graphviz:
         self.db = db
         self.output_dir = "data/json"
         self.phase = "initial"
+        self.flat = False
 
-    def generate_layout_figures(self, phase: str = "initial"):
+    def generate_layout_figures(self, phase: str = "initial", flat: bool = False):
         self.phase = phase
-        sorted_modules = sorted(self.db.design.modules.values(), key=lambda m: m.depth, reverse=True)
-        for module in sorted_modules:
-            if not module.is_leaf:
-                self.generate_module_layout(module)
+        self.flat = flat
+        if flat:
+            self.generate_module_layout(self.db.design.flat_module)
+        else:
+            sorted_modules = sorted(self.db.design.modules.values(), key=lambda m: m.depth, reverse=True)
+            for module in sorted_modules:
+                if not module.is_leaf:
+                    self.generate_module_layout(module)
 
     def generate_module_layout(self, module):
         log.info(f"Generating layout for module {module.name} phase {self.phase}")
@@ -31,7 +36,10 @@ class Graphviz:
         self.set_attributes(A)
         self.add_nodes(A, module)
         self.add_edges(A, module)
-        self.add_ranks(A, module)
+        if self.flat:
+            self.add_flat_cluster(A, module)
+        else:
+            self.add_ranks(A, module)
         A = self.run_graphviz(A, module)
         self.extract_geometry(A, module)
 
@@ -162,6 +170,25 @@ class Graphviz:
 
                 A.add_subgraph(nbunch=unique_names, rank="same", name=sg_name)
                 log.debug(f"rank group: ref_name={ref_name}, prefix={prefix}, size={len(unique_names)}")
+
+    def add_flat_cluster(self, A, module):
+        """add clusters for flat designs"""
+        hier_groups = defaultdict(list)
+        for name, inst in module.instances.items():
+            if inst.is_buffer:
+                continue
+            module_name = inst.hier_module.name
+            prefix = inst.hier_prefix
+            subgraph_name = f"{prefix}_{module_name}"
+            hier_groups[subgraph_name].append(name)
+
+        for hier, names in hier_groups.items():
+            unique_names = sorted(set(names))
+            if len(unique_names) < 2:
+                continue
+            sg_name = f"cluster_{hier}"
+            A.add_subgraph(nbunch=unique_names, rank="same", name=sg_name)
+            log.debug(f"hier group: hier={hier}, size={len(unique_names)}")
 
     def run_graphviz(self, A, module):
         # Layout and extract size

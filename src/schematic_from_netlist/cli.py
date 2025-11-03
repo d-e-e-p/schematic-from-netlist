@@ -30,7 +30,7 @@ def load_netlist(netlist_file: str, debug: bool):
     db.debug = debug
     db.dump_to_table("initial_parse")
     db.determine_design_hierarchy()
-
+    db.elaborate()
     return db
 
 
@@ -46,7 +46,7 @@ def produce_graph(db):
     # graphviz -> extract macro and port locations -> remove buffers
     db.buffer_multi_fanout_nets()  # Insert fanout buffers
     db.dump_to_table("multi_fanout_insertion")
-    gv.generate_layout_figures(phase="initial")
+    gv.generate_layout_figures(phase="initial", flat=True)
     db.remove_multi_fanout_buffers()
     db.fig2geom()
     gp.place_design()

@@ -88,6 +88,7 @@ class Net:
 
     name: str
     module: "Module"
+    hier_module: Optional[Module] = None
     net_type: NetType = NetType.WIRE
     bus: Optional[Bus] = field(default=None)
 
@@ -131,6 +132,8 @@ class Instance:
     module: Module
     module_ref: str
     parent_module: Module
+    hier_module: Optional[Module] = None
+    hier_prefix: Optional[str] = None
     pins: Dict[str, Pin] = field(default_factory=dict)
     parameters: Dict[str, Any] = field(default_factory=dict)
     bus: Optional[Bus] = None
@@ -292,6 +295,7 @@ class Design:
     name: str
     modules: Dict[str, Module] = field(default_factory=dict)
     top_module: Optional[Module] = None
+    flat_module: Optional[Module] = None
     draw: DesignPhysical = field(init=False)
 
     def __post_init__(self):
