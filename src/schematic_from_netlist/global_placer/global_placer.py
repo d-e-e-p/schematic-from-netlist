@@ -1,9 +1,10 @@
 import logging as log
+import os
 import sys
 import time
-from collections import namedtuple
+from collections import deque, namedtuple
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from heapq import heappop, heappush
 
 import numpy as np
@@ -11,41 +12,617 @@ from shapely.geometry import GeometryCollection, LineString, MultiLineString, Po
 from shapely.ops import linemerge, unary_union
 from shapely.strtree import STRtree
 
-from schematic_from_netlist.database.netlist_structures import Module, Net
+from schematic_from_netlist.database.netlist_structures import Instance, Module, Net
 from schematic_from_netlist.interfaces.symbol_library import SymbolLibrary
-from schematic_from_netlist.sastar_router.models import CostBuckets, CostEstimator, PNet, RoutingContext
-from schematic_from_netlist.sastar_router.sim_router import SimultaneousRouter
-from schematic_from_netlist.sastar_router.test_cases import create_hard_test_case
-from schematic_from_netlist.sastar_router.visualization import plot_result
+
+try:
+    import pygame
+except ImportError:
+    log.warning("Pygame not found. Visualization will be disabled.")
+    pygame = None
 
 log.basicConfig(level=log.INFO)
 
 
+@dataclass
+class PlacerConfig:
+    max_iterations: int = 50000
+    step_size: float = 0.01
+    lambda_overlap: float = 10.0
+    lambda_region: float = 5.0
+    lambda_shape: float = 1.0
+    lambda_rigid: float = 5.0
+    convergence_tol: float = 1e-5
+    grid_size: int = 1
+    visualize: bool = True
+    visualization_interval: int = 10
+    cost_logging_interval: int = 100
+    macro_padding: float = 4.0
+
+
+@dataclass
+class PlacementRegion:
+    name: str
+    instances: list[int]
+    geom: Polygon = field(default_factory=Polygon)
+
+
+class Visualizer:
+    def __init__(self, width=800, height=600, enabled=True, padding=50):
+        self.enabled = enabled and pygame is not None
+        if not self.enabled:
+            return
+
+        pygame.init()
+        self.screen = pygame.display.set_mode((width, height))
+        pygame.display.set_caption("Macro Placer Visualization")
+        self.font = pygame.font.SysFont(None, 24)
+        self.padding = padding
+        self.colors = {
+            "background": (255, 255, 255),
+            "hard_macro": (100, 100, 200),
+            "soft_macro": (100, 200, 100),
+            "net": (200, 100, 100),
+            "region": (200, 200, 100, 100),
+        }
+
+    def _transform(self, x, y, scale, offset_x, offset_y, design_min_x, design_min_y):
+        return (x - design_min_x) * scale + offset_x, (y - design_min_y) * scale + offset_y
+
+    def draw(self, instances: list[Instance], nets: list[Net], regions: list[PlacementRegion] = None):
+        if not self.enabled:
+            return
+
+        self.screen.fill(self.colors["background"])
+
+        # Calculate bounding box of all objects
+        all_geoms = [inst.draw.geom for inst in instances if inst.draw.geom]
+        if regions:
+            all_geoms.extend([r.geom for r in regions if r.geom])
+
+        if not all_geoms:
+            pygame.display.flip()
+            return
+
+        overall_bounds = unary_union(all_geoms).bounds
+        design_min_x, design_min_y, design_max_x, design_max_y = overall_bounds
+        design_width = design_max_x - design_min_x
+        design_height = design_max_y - design_min_y
+
+        if design_width == 0 or design_height == 0:
+            return
+
+        # Calculate scale to fit design with padding
+        screen_width, screen_height = self.screen.get_size()
+        scale_x = (screen_width - 2 * self.padding) / design_width
+        scale_y = (screen_height - 2 * self.padding) / design_height
+        scale = min(scale_x, scale_y)
+
+        # Calculate offset to center the design
+        scaled_width = design_width * scale
+        scaled_height = design_height * scale
+        offset_x = (screen_width - scaled_width) / 2
+        offset_y = (screen_height - scaled_height) / 2
+
+        # Draw regions
+        if regions:
+            for region in regions:
+                if region.geom:
+                    x_min, y_min, x_max, y_max = region.geom.bounds
+                    sx_min, sy_min = self._transform(x_min, y_min, scale, offset_x, offset_y, design_min_x, design_min_y)
+                    sx_max, sy_max = self._transform(x_max, y_max, scale, offset_x, offset_y, design_min_x, design_min_y)
+                    s = pygame.Surface((sx_max - sx_min, sy_max - sy_min), pygame.SRCALPHA)
+                    s.fill(self.colors["region"])
+                    self.screen.blit(s, (sx_min, sy_min))
+
+        # Draw instances
+        for inst in instances:
+            if inst.draw.geom:
+                x_min, y_min, x_max, y_max = inst.draw.geom.bounds
+                sx_min, sy_min = self._transform(x_min, y_min, scale, offset_x, offset_y, design_min_x, design_min_y)
+                sx_max, sy_max = self._transform(x_max, y_max, scale, offset_x, offset_y, design_min_x, design_min_y)
+
+                rect = pygame.Rect(sx_min, sy_min, sx_max - sx_min, sy_max - sy_min)
+                color = self.colors["hard_macro"] if inst.draw.fixed_size else self.colors["soft_macro"]
+                pygame.draw.rect(self.screen, color, rect, 2)
+                text = self.font.render(inst.name, True, (0, 0, 0))
+                self.screen.blit(text, (sx_min, sy_min))
+
+        pygame.display.flip()
+
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                self.quit()
+
+    def quit(self):
+        if self.enabled:
+            pygame.quit()
+            self.enabled = False
+
+
 class GlobalPlacer:
-    def __init__(self, db):
+    def __init__(self, db, config: PlacerConfig = PlacerConfig()):
         self.db = db
+        self.config = config
         self.symbol_outlines = SymbolLibrary().get_symbol_outlines()
+        self.visualizer = Visualizer(enabled=self.config.visualize)
 
     def place_design(self):
         log.info("Placing design")
         components = set(self.symbol_outlines.keys())
         module = self.db.design.flat_module
-        for inst in module.instances.values():
+
+        instances = list(module.instances.values())
+        instance_map = {inst.full_name: i for i, inst in enumerate(instances)}
+        nets = list(module.nets.values())
+
+        num_instances = len(instances)
+        pos = np.zeros((num_instances, 2))
+        sizes = np.zeros((num_instances, 2))
+        is_soft = np.zeros(num_instances, dtype=bool)
+        areas = np.zeros(num_instances)
+        aspect_ratios = np.ones(num_instances)
+        r_min = np.full(num_instances, 0.2)
+        r_max = np.full(num_instances, 5.0)
+        r_pref = np.ones(num_instances)
+        instance_to_region = np.full(num_instances, -1, dtype=int)
+
+        for i, inst in enumerate(instances):
+            if inst.draw.geom:
+                x_min, y_min, x_max, y_max = inst.draw.geom.bounds
+                pos[i] = [(x_min + x_max) / 2, (y_min + y_max) / 2]
+                width = x_max - x_min
+                height = y_max - y_min
+                sizes[i] = [width, height]
+                areas[i] = width * height
+                if height > 0:
+                    aspect_ratios[i] = width / height
+
             if inst.module.name in components:
                 inst.draw.fixed_size = True
-            log.info(
-                f"inst {inst.name} with {inst.hier_prefix=} {inst.hier_module.name=}  seed location {inst.draw.geom=} {inst.draw.fixed_size=}"
-            )
+                is_soft[i] = False
+            else:
+                inst.draw.fixed_size = False
+                is_soft[i] = True
 
-    def create_testcase(self, type):
-        return db
+        # Create regions based on hierarchical modules
+        regions = []
+        hier_modules = {}
+        for i, inst in enumerate(instances):
+            if inst.hier_module.name not in hier_modules:
+                hier_modules[inst.hier_module.name] = len(regions)
+                regions.append(PlacementRegion(name=inst.hier_module.name, instances=[i]))
+            else:
+                region_idx = hier_modules[inst.hier_module.name]
+                regions[region_idx].instances.append(i)
+            instance_to_region[i] = hier_modules[inst.hier_module.name]
+
+        for region in regions:
+            region_pos = pos[region.instances]
+            region_sizes = sizes[region.instances]
+            min_coords = np.min(region_pos - region_sizes / 2, axis=0)
+            max_coords = np.max(region_pos + region_sizes / 2, axis=0)
+            region.geom = box(min_coords[0], min_coords[1], max_coords[0], max_coords[1])
+
+        # Pre-computation for rigidity penalty
+        parent_indices = np.full(num_instances, -1, dtype=int)
+        template_groups = {}
+        for i, inst in enumerate(instances):
+            if inst.hier_prefix:
+                parent_name = "/".join(inst.full_name.split("/")[:-1])
+                if parent_name in instance_map:
+                    parent_idx = instance_map[parent_name]
+                    parent_indices[i] = parent_idx
+
+                    template_key = (inst.hier_module.name, inst.name)
+                    if template_key not in template_groups:
+                        template_groups[template_key] = []
+                    template_groups[template_key].append(i)
+
+        # Calculate and print initial cost
+        initial_cost = self._calculate_total_cost(
+            pos,
+            sizes,
+            aspect_ratios,
+            areas,
+            is_soft,
+            r_min,
+            r_max,
+            r_pref,
+            nets,
+            {inst.name: i for i, inst in enumerate(instances)},
+            regions,
+            instance_to_region,
+            parent_indices,
+            template_groups,
+        )
+        log.info(
+            f"Initial cost: {initial_cost['total']:.2f} (HPWL: {initial_cost['hpwl']:.2f}, Overlap: {initial_cost['overlap']:.2f}, Region: {initial_cost['region']:.2f}, Shape: {initial_cost['shape']:.2f}, Rigid: {initial_cost['rigid']:.2f})"
+        )
+
+        cost_history = deque(maxlen=5)
+
+        # Main optimization loop
+        for i in range(self.config.max_iterations):
+            grad_hpwl_pos, grad_hpwl_r = self._calculate_hpwl_gradient(
+                pos, sizes, aspect_ratios, areas, is_soft, nets, {inst.name: i for i, inst in enumerate(instances)}
+            )
+            grad_overlap_pos, grad_overlap_r = self._calculate_overlap_gradient(pos, sizes, aspect_ratios, areas, is_soft)
+            grad_shape_r = self._calculate_shape_gradient(aspect_ratios, r_min, r_max, r_pref, is_soft)
+            grad_region_pos = self._calculate_region_gradient(pos, sizes, regions, instance_to_region)
+            grad_rigidity_pos = self._calculate_rigidity_gradient(pos, parent_indices, template_groups)
+
+            # Total gradient
+            grad_pos = (
+                grad_hpwl_pos
+                + self.config.lambda_overlap * grad_overlap_pos
+                + self.config.lambda_region * grad_region_pos
+                + self.config.lambda_rigid * grad_rigidity_pos
+            )
+            grad_r = grad_hpwl_r + self.config.lambda_overlap * grad_overlap_r + self.config.lambda_shape * grad_shape_r
+
+            # Update positions and aspect ratios
+            pos -= self.config.step_size * grad_pos
+            aspect_ratios -= self.config.step_size * grad_r
+
+            # Clamp aspect ratios
+            aspect_ratios = np.clip(aspect_ratios, r_min, r_max)
+
+            # Update sizes for soft macros
+            soft_indices = np.where(is_soft)[0]
+            if len(soft_indices) > 0:
+                r = aspect_ratios[soft_indices]
+                A = areas[soft_indices]
+                W = np.sqrt(A * r)
+                H = np.sqrt(A / r)
+                sizes[soft_indices, 0] = W
+                sizes[soft_indices, 1] = H
+
+            # Update region centroids
+            for region in regions:
+                region_pos = pos[region.instances]
+                centroid = np.mean(region_pos, axis=0)
+                x_min, y_min, x_max, y_max = region.geom.bounds
+                w, h = x_max - x_min, y_max - y_min
+                region.geom = box(centroid[0] - w / 2, centroid[1] - h / 2, centroid[0] + w / 2, centroid[1] + h / 2)
+
+            # Update instance geometries
+            for j, inst in enumerate(instances):
+                x, y = pos[j]
+                w, h = sizes[j]
+                inst.draw.geom = box(x - w / 2, y - h / 2, x + w / 2, y + h / 2)
+
+            if i % self.config.cost_logging_interval == 0:
+                cost = self._calculate_total_cost(
+                    pos,
+                    sizes,
+                    aspect_ratios,
+                    areas,
+                    is_soft,
+                    r_min,
+                    r_max,
+                    r_pref,
+                    nets,
+                    {inst.name: i for i, inst in enumerate(instances)},
+                    regions,
+                    instance_to_region,
+                    parent_indices,
+                    template_groups,
+                )
+                log.info(
+                    f"Iter {i}: cost: {cost['total']:.2f} (HPWL: {cost['hpwl']:.2f}, Overlap: {cost['overlap']:.2f}, Region: {cost['region']:.2f}, Shape: {cost['shape']:.2f}, Rigid: {cost['rigid']:.2f})"
+                )
+                breakpoint()
+                cost_history.append(cost["total"])
+                if len(cost_history) == cost_history.maxlen:
+                    rel_change = (max(cost_history) - min(cost_history)) / (np.mean(cost_history) + 1e-6)
+                    if rel_change < self.config.convergence_tol:
+                        log.info(f"Converged after {i} iterations.")
+                        break
+
+            if self.config.visualize and i % self.config.visualization_interval == 0:
+                self.visualizer.draw(instances, nets, regions)
+
+            if self.visualizer.enabled:
+                for event in pygame.event.get():
+                    if event.type == pygame.QUIT:
+                        self.visualizer.quit()
+                        break
+            if not self.visualizer.enabled:
+                break
+
+        if self.visualizer.enabled:
+            self.visualizer.quit()
+
+        self._legalize(instances, pos, sizes, nets, regions)
+
+    def _calculate_total_cost(
+        self,
+        pos,
+        sizes,
+        aspect_ratios,
+        areas,
+        is_soft,
+        r_min,
+        r_max,
+        r_pref,
+        nets,
+        instance_map,
+        regions,
+        instance_to_region,
+        parent_indices,
+        template_groups,
+    ):
+        # HPWL
+        cost_hpwl = 0
+        for net in nets:
+            if len(net.pins) < 2:
+                continue
+            pin_inst_indices = [instance_map[pin.instance.name] for pin in net.pins.values() if pin.instance.name in instance_map]
+            if not pin_inst_indices:
+                continue
+            net_pos = pos[pin_inst_indices]
+            min_coords = np.min(net_pos, axis=0)
+            max_coords = np.max(net_pos, axis=0)
+            cost_hpwl += np.sum(max_coords - min_coords)
+
+        # Overlap
+        cost_overlap = 0
+        padding = self.config.macro_padding
+        for i in range(pos.shape[0]):
+            for j in range(i + 1, pos.shape[0]):
+                overlap_x = max(0, (sizes[i, 0] + padding + sizes[j, 0] + padding) / 2 - abs(pos[i, 0] - pos[j, 0]))
+                overlap_y = max(0, (sizes[i, 1] + padding + sizes[j, 1] + padding) / 2 - abs(pos[i, 1] - pos[j, 1]))
+                cost_overlap += overlap_x * overlap_y
+
+        # Region
+        cost_region = 0
+        for i in range(pos.shape[0]):
+            region = regions[instance_to_region[i]]
+            x_min, y_min, x_max, y_max = region.geom.bounds
+            ix_min, iy_min, ix_max, iy_max = (
+                pos[i, 0] - sizes[i, 0] / 2,
+                pos[i, 1] - sizes[i, 1] / 2,
+                pos[i, 0] + sizes[i, 0] / 2,
+                pos[i, 1] + sizes[i, 1] / 2,
+            )
+            cost_region += max(0, x_min - ix_min) ** 2 + max(0, ix_max - x_max) ** 2
+            cost_region += max(0, y_min - iy_min) ** 2 + max(0, iy_max - y_max) ** 2
+
+        # Shape
+        cost_shape = 0
+        soft_indices = np.where(is_soft)[0]
+        if len(soft_indices) > 0:
+            r, r_p, r_mi, r_ma = (
+                aspect_ratios[soft_indices],
+                r_pref[soft_indices],
+                r_min[soft_indices],
+                r_max[soft_indices],
+            )
+            cost_shape = np.sum(((r - r_p) / (r_ma - r_mi)) ** 2)
+
+        # Rigidity
+        cost_rigid = 0
+        for _, group_indices in template_groups.items():
+            if len(group_indices) < 2:
+                continue
+            local_pos = np.array([pos[i] - pos[parent_indices[i]] for i in group_indices if parent_indices[i] != -1])
+            if len(local_pos) > 0:
+                avg_local_pos = np.mean(local_pos, axis=0)
+                cost_rigid += np.sum(np.linalg.norm(local_pos - avg_local_pos, axis=1) ** 2)
+
+        total_cost = (
+            cost_hpwl
+            + self.config.lambda_overlap * cost_overlap
+            + self.config.lambda_region * cost_region
+            + self.config.lambda_shape * cost_shape
+            + self.config.lambda_rigid * cost_rigid
+        )
+
+        return {
+            "total": total_cost,
+            "hpwl": cost_hpwl,
+            "overlap": cost_overlap,
+            "region": cost_region,
+            "shape": cost_shape,
+            "rigid": cost_rigid,
+        }
+
+    def _legalize(self, instances, pos, sizes, nets, regions):
+        log.info("Legalizing placement")
+        # Snap to grid
+        pos = np.round(pos / self.config.grid_size) * self.config.grid_size
+
+        # Greedy overlap removal
+        for _ in range(10):  # 10 iterations of overlap removal
+            overlap_found = False
+            for i in range(len(instances)):
+                for j in range(i + 1, len(instances)):
+                    dx = pos[i, 0] - pos[j, 0]
+                    dy = pos[i, 1] - pos[j, 1]
+
+                    w_sum = (sizes[i, 0] + self.config.macro_padding + sizes[j, 0] + self.config.macro_padding) / 2
+                    h_sum = (sizes[i, 1] + self.config.macro_padding + sizes[j, 1] + self.config.macro_padding) / 2
+
+                    overlap_x = w_sum - abs(dx)
+                    overlap_y = h_sum - abs(dy)
+
+                    if overlap_x > 0 and overlap_y > 0:
+                        overlap_found = True
+                        # Move them apart
+                        move_x = overlap_x / 2 * np.sign(dx) if dx != 0 else overlap_x / 2
+                        move_y = overlap_y / 2 * np.sign(dy) if dy != 0 else overlap_y / 2
+                        pos[i, 0] += move_x
+                        pos[i, 1] += move_y
+                        pos[j, 0] -= move_x
+                        pos[j, 1] -= move_y
+            if not overlap_found:
+                break
+
+        # Update final geometries
+        for i, inst in enumerate(instances):
+            x, y = pos[i]
+            w, h = sizes[i]
+            inst.draw.geom = box(x - w / 2, y - h / 2, x + w / 2, y + h / 2)
+
+        log.info("Legalization finished.")
+        if self.config.visualize:
+            self.visualizer = Visualizer(enabled=True)
+            self.visualizer.draw(instances, nets, regions)
+
+            # Save final placement image
+            output_dir = "data/images/placer"
+            os.makedirs(output_dir, exist_ok=True)
+            output_path = os.path.join(output_dir, f"final_placement_{self.db.design.name}.png")
+            pygame.image.save(self.visualizer.screen, output_path)
+            log.info(f"Saved final placement image to {output_path}")
+
+            time.sleep(2)
+            self.visualizer.quit()
+
+    def _calculate_rigidity_gradient(self, pos, parent_indices, template_groups):
+        grad_pos = np.zeros_like(pos)
+        for template_key, group_indices in template_groups.items():
+            if len(group_indices) < 2:
+                continue
+
+            local_pos = np.zeros((len(group_indices), 2))
+            for i, inst_idx in enumerate(group_indices):
+                parent_idx = parent_indices[inst_idx]
+                if parent_idx != -1:
+                    local_pos[i] = pos[inst_idx] - pos[parent_idx]
+
+            avg_local_pos = np.mean(local_pos, axis=0)
+
+            for i, inst_idx in enumerate(group_indices):
+                parent_idx = parent_indices[inst_idx]
+                if parent_idx != -1:
+                    grad = 2 * (local_pos[i] - avg_local_pos)
+                    grad_pos[inst_idx] += grad
+                    grad_pos[parent_idx] -= grad
+        return grad_pos
+
+    def _calculate_region_gradient(self, pos, sizes, regions, instance_to_region):
+        grad_pos = np.zeros_like(pos)
+        for i in range(pos.shape[0]):
+            region = regions[instance_to_region[i]]
+            x_min, y_min, x_max, y_max = region.geom.bounds
+
+            ix_min = pos[i, 0] - sizes[i, 0] / 2
+            iy_min = pos[i, 1] - sizes[i, 1] / 2
+            ix_max = pos[i, 0] + sizes[i, 0] / 2
+            iy_max = pos[i, 1] + sizes[i, 1] / 2
+
+            if ix_min < x_min:
+                grad_pos[i, 0] += -2 * (x_min - ix_min)
+            if ix_max > x_max:
+                grad_pos[i, 0] += -2 * (x_max - ix_max)
+            if iy_min < y_min:
+                grad_pos[i, 1] += -2 * (y_min - iy_min)
+            if iy_max > y_max:
+                grad_pos[i, 1] += -2 * (y_max - iy_max)
+        return grad_pos
+
+    def _calculate_hpwl_gradient(self, pos, sizes, aspect_ratios, areas, is_soft, nets, instance_map):
+        grad_pos = np.zeros_like(pos)
+        grad_r = np.zeros_like(aspect_ratios)
+        # For soft macros, pin positions depend on size, which depends on r.
+        # p_x = x + alpha * W = x + alpha * sqrt(A*r)
+        # p_y = y + beta * H = y + beta * sqrt(A/r)
+        # For now, we assume pins are at the center (alpha=0, beta=0), so HPWL gradient w.r.t. r is 0.
+        # This will be updated when we have actual pin positions.
+        for net in nets:
+            if len(net.pins) < 2:
+                continue
+
+            pin_inst_indices = [instance_map[pin.instance.name] for pin in net.pins.values() if pin.instance.name in instance_map]
+            if not pin_inst_indices:
+                continue
+
+            net_pos = pos[pin_inst_indices]
+            min_coords = np.min(net_pos, axis=0)
+            max_coords = np.max(net_pos, axis=0)
+
+            for i, inst_idx in enumerate(pin_inst_indices):
+                if net_pos[i, 0] == min_coords[0]:
+                    grad_pos[inst_idx, 0] -= 1
+                if net_pos[i, 0] == max_coords[0]:
+                    grad_pos[inst_idx, 0] += 1
+                if net_pos[i, 1] == min_coords[1]:
+                    grad_pos[inst_idx, 1] -= 1
+                if net_pos[i, 1] == max_coords[1]:
+                    grad_pos[inst_idx, 1] += 1
+        return grad_pos, grad_r
+
+    def _calculate_overlap_gradient(self, pos, sizes, aspect_ratios, areas, is_soft):
+        grad_pos = np.zeros_like(pos)
+        grad_r = np.zeros_like(aspect_ratios)
+        num_instances = pos.shape[0]
+        padding = self.config.macro_padding
+        for i in range(num_instances):
+            for j in range(i + 1, num_instances):
+                dx = abs(pos[i, 0] - pos[j, 0])
+                dy = abs(pos[i, 1] - pos[j, 1])
+
+                w_sum = (sizes[i, 0] + padding + sizes[j, 0] + padding) / 2
+                h_sum = (sizes[i, 1] + padding + sizes[j, 1] + padding) / 2
+
+                overlap_x = max(0, w_sum - dx)
+                overlap_y = max(0, h_sum - dy)
+
+                if overlap_x > 0 and overlap_y > 0:
+                    # Gradient w.r.t. position
+                    grad_x_pos = -overlap_x * np.sign(pos[i, 0] - pos[j, 0])
+                    grad_y_pos = -overlap_y * np.sign(pos[i, 1] - pos[j, 1])
+
+                    grad_pos[i, 0] += grad_x_pos
+                    grad_pos[i, 1] += grad_y_pos
+                    grad_pos[j, 0] -= grad_x_pos
+                    grad_pos[j, 1] -= grad_y_pos
+
+                    # Gradient w.r.t. aspect ratio
+                    # d(overlap)/dr = d(overlap)/d(size) * d(size)/dr
+                    # d(overlap_x)/dW_i = 0.5, d(overlap_y)/dH_i = 0.5
+                    # dW/dr = 0.5 * np.sqrt(A/r), dH/dr = -0.5 * np.sqrt(A/r^3)
+                    if is_soft[i]:
+                        r_i = aspect_ratios[i]
+                        A_i = areas[i]
+                        dW_dr_i = 0.5 * np.sqrt(A_i / r_i)
+                        dH_dr_i = -0.5 * np.sqrt(A_i / (r_i**3))
+                        grad_r[i] += 0.5 * overlap_x * dW_dr_i + 0.5 * overlap_y * dH_dr_i
+                    if is_soft[j]:
+                        r_j = aspect_ratios[j]
+                        A_j = areas[j]
+                        dW_dr_j = 0.5 * np.sqrt(A_j / r_j)
+                        dH_dr_j = -0.5 * np.sqrt(A_j / (r_j**3))
+                        grad_r[j] += 0.5 * overlap_x * dW_dr_j + 0.5 * overlap_y * dH_dr_j
+
+        return grad_pos, grad_r
+
+    def _calculate_shape_gradient(self, aspect_ratios, r_min, r_max, r_pref, is_soft):
+        grad_r = np.zeros_like(aspect_ratios)
+        soft_indices = np.where(is_soft)[0]
+        if len(soft_indices) == 0:
+            return grad_r
+
+        r = aspect_ratios[soft_indices]
+        r_p = r_pref[soft_indices]
+        r_mi = r_min[soft_indices]
+        r_ma = r_max[soft_indices]
+
+        # C_shape = sum(((r - r_p) / (r_ma - r_mi))^2)
+        # dC/dr = 2 * (r - r_p) / (r_ma - r_mi)^2
+        grad_r[soft_indices] = 2 * (r - r_p) / ((r_ma - r_mi) ** 2)
+        return grad_r
 
 
 if __name__ == "__main__":
-    # Define nets
+    from schematic_from_netlist.sastar_router.test_cases import create_hard_test_case
+
     log.basicConfig(level=log.INFO)
 
     # Create test cases assuming db is not populated
-    db = create_testcase("precision")
-    global_placer = GlobalPlacer(db)
+    db = create_hard_test_case("precision")
+    placer_config = PlacerConfig()
+    global_placer = GlobalPlacer(db, config=placer_config)
     global_placer.place_design()

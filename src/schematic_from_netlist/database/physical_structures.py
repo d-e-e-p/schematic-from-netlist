@@ -197,6 +197,7 @@ class NetPhysical:
 class InstancePhysical(RectanglePhysical):
     rank: int = -1
     orient: str = "R0"
+    fixed_size: bool = False
 
 
 # -----------------------------
