@@ -13,7 +13,9 @@ from shapely.strtree import STRtree
 
 from schematic_from_netlist.database.netlist_structures import Module, Net
 from schematic_from_netlist.detailed_router.pcst_router import PcstRouter
+from schematic_from_netlist.sastar_router.models import CostBuckets, CostEstimator, RoutingContext
 from schematic_from_netlist.sastar_router.sim_router import SimultaneousRouter
+from schematic_from_netlist.sastar_router.visualization import plot_result
 
 log.basicConfig(level=log.INFO)
 
@@ -35,9 +37,10 @@ class DetailedRouter:
         """
         # Sort nets by bbox diagonal (larger first)
         sorted_nets = sorted(nets.values(), key=lambda net: self.get_orthogonal_span(net), reverse=True)
-
         routed_nets = []
         for i, net in enumerate(sorted_nets):
+            if net.num_conn < 2:
+                continue
             log.info(f"{i} : Routing net {net.name} with {len(net.pins)} pins")
 
             # Temporarily remove this net's existing paths for routing
@@ -51,10 +54,13 @@ class DetailedRouter:
             # Calculate bounds from existing route
             router_halo = self.get_route_halo(old_routed_paths, net.pins, padding=5)
             # router_halo = self.get_preexisting_route_bounds(old_routed_paths)
+            terminals = [(int(pin.draw.geom.x), int(pin.draw.geom.y)) for pin in net.pins.values() if pin.draw.geom]
 
-            # Create router with bounds
-            router = PcstRouter(obstacle_geoms=obstacles, halo_size=4, bounds=router_halo)
-            new_routed_paths, new_total_cost = router.route_net(net, other_paths)
+            # Create router object with everything we need for one net
+            router = PcstRouter(
+                obstacle_geoms=obstacles, halo_size=4, bounds=router_halo, other_paths=other_paths, terminals=terminals
+            )
+            new_routed_paths, new_total_cost = router.route_net(net.name)
 
             # Calculate existing cost with other nets' paths
             log.info(f"calculating new cost of {net.name} with route={new_routed_paths}")

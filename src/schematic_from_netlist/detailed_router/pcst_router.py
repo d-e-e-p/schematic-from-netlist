@@ -49,6 +49,8 @@ class PcstRouter:
         obstacle_geoms=None,
         halo_size=4,
         bounds=None,
+        other_paths=[],
+        terminals=[],
         debug: bool | None = None,
         log_interval: int = 100,
         prune_cycles: bool = True,
@@ -59,6 +61,8 @@ class PcstRouter:
         self.obstacles = obstacle_geoms or []
         self.obstacles_index = STRtree(self.obstacles) if self.obstacles else None
         self.bounds = bounds  # Add bounds parameter
+        self.other_paths = other_paths
+        self.terminals = terminals
         self.scale = 1.0
         self.width, self.height = 800, 600
 
@@ -95,14 +99,11 @@ class PcstRouter:
         if not self.bounds:
             self._calculate_default_bounds()
 
-    def route_net(self, net, other_paths=[]):
+    def route_net(self, net_name):
         """
         connect one net
         """
-        if net.num_conn < 2:
-            return [], 0
-
-        edges_input, prizes, costs, root, num_clusters, blockage_cost_val = self.setup_pcst_grid(net, other_paths)
+        edges_input, prizes, costs, root, num_clusters, blockage_cost_val = self.setup_pcst_grid(net_name)
 
         # Configure the solver
         pruning = "gw"  # Use strong pruning for sparse solutions
@@ -331,18 +332,18 @@ class PcstRouter:
                     res.add((int(x), int(y)))
         return res
 
-    def setup_pcst_grid(self, net, other_paths):
+    def setup_pcst_grid(self, net_name):
         """
         creates custom grid for each net
         """
 
         NORMAL_COST = 1  # Cost for routing straight
-        BLOCKAGE_COST = 1  # Cost for routing over a blockage cell
-        HALO_COST = 1  # Cost for routing over a blockage cell
+        BLOCKAGE_COST = 100  # Cost for routing over a blockage cell
+        HALO_COST = 4  # Cost for routing over a blockage cell
         TURN_COST = 10  # PENALTY: Cost applied for any 90-degree turn
         PRIZE_VALUE = 100  # Prize high enough to force connection but low enough to prevent MST
 
-        log.info(f"Creating detailed route grid for {net.name}")
+        log.info(f"Creating detailed route grid for {net_name}")
 
         edges_list = []
         costs_list = []
@@ -350,7 +351,7 @@ class PcstRouter:
         blockage_cells = self.coords_inside_poly(self.obstacles)
         halo_cells = self.coords_inside_poly(self.halo_geoms)
         grid_cells = self.coords_inside_poly([self.bounds])
-        other_route_cells = self.coords_from_multilinestring(other_paths)
+        other_route_cells = self.coords_from_multilinestring(self.other_paths)
         log.info(f"routing using {len(grid_cells)} grid cells")
 
         # --- 1. Edge & Cost Generation ---
@@ -402,10 +403,11 @@ class PcstRouter:
 
                 # Base cost is 1 unit of length
                 cost = NORMAL_COST
-
                 # Apply blockage cost if *this segment* is in the blockage
                 if (r, c) in blockage_cells or (r_b, c_b) in blockage_cells:
                     cost = BLOCKAGE_COST
+                elif (r, c) in halo_cells or (r_b, c_b) in halo_cells:
+                    cost = HALO_COST
 
                 # Add edge (a->b and b->a are added for undirected graph)
                 edges_list.append([node_a, node_b])
@@ -416,8 +418,7 @@ class PcstRouter:
         prizes = np.zeros(self.next_id + 1, dtype=np.int64)
 
         # We set prize on ALL directional nodes in the target cell to simplify connection
-        terminals = [(int(pin.draw.geom.x), int(pin.draw.geom.y)) for pin in net.pins.values() if pin.draw.geom]
-        terminal_set = set(terminals)
+        terminal_set = set(self.terminals)
         required_terminals = []
         for r, c in terminal_set:
             for dir in ["N", "E", "S", "W"]:
@@ -632,4 +633,5 @@ class PcstRouter:
 
 
 if __name__ == "__main__":
-    log.info(sr.clean_hierarchical_name("/tnoi/is/a/test"))
+    # log.info(sr.clean_hierarchical_name("/tnoi/is/a/test"))
+    pass
