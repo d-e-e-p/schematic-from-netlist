@@ -4,6 +4,7 @@ import os
 
 import colorlog
 
+from schematic_from_netlist.detailed_router.detailed_router import DetailedRouter
 from schematic_from_netlist.global_placer.global_placer import GlobalPlacer
 from schematic_from_netlist.global_router.global_router import GlobalRouter
 from schematic_from_netlist.graph.gen_sch_data import GenSchematicData
@@ -11,7 +12,6 @@ from schematic_from_netlist.graph.group_maker import SteinerGroupMaker
 from schematic_from_netlist.interfaces.graphviz import Graphviz
 from schematic_from_netlist.interfaces.ltspice_writer import LTSpiceWriter
 from schematic_from_netlist.interfaces.verilog_parser import VerilogParser
-from schematic_from_netlist.sastar_router.sastar_router import AstarRouter
 from schematic_from_netlist.utils.config import setup_logging
 
 # ---------------- Pipeline Stages ---------------- #
@@ -40,7 +40,7 @@ def produce_graph(db):
     gv = Graphviz(db)
     gp = GlobalPlacer(db)
     gr = GlobalRouter(db)
-    ar = AstarRouter(db)
+    dr = DetailedRouter(db)
     # router = AstarRouter(db)
 
     # graphviz -> extract macro and port locations -> remove buffers
@@ -57,7 +57,7 @@ def produce_graph(db):
 
     bypass_phase2 = True
     if bypass_phase2:
-        ar.route_design(flat=True)
+        dr.route_design(flat=True)
         # db.remove_multi_fanout_buffers()
         db.geom2shape()
     else:

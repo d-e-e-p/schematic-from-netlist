@@ -14,7 +14,7 @@ from itertools import cycle
 import numpy as np
 import pygame
 from shapely.geometry import GeometryCollection, LineString, MultiLineString, Point, box
-from shapely.ops import linemerge, unary_union, polygonize
+from shapely.ops import linemerge, polygonize, unary_union
 from shapely.strtree import STRtree
 
 from schematic_from_netlist.sastar_router.models import CostBuckets, CostEstimator, RoutingContext
@@ -777,162 +777,112 @@ class SimultaneousRouter:
         return total
 
     def _build_steiner_tree(self, parents, goal_state, terminals, existing_paths=None):
-        """Build the Steiner tree from the goal state using parent pointers.
+        """Build a clean Steiner tree with redundant loop suppression and clearer helpers."""
+        from collections import deque
 
-        The search maintains multiple states for the same spatial node but with different
-        terminal masks. When two branches meet at the same (x, y) with different masks,
-        the optimal tree is formed by combining BOTH parent chains. A naive single-chain
-        traceback from the goal state can therefore miss entire branches (e.g. the branch
-        grown from another terminal) if it only follows one mask at a merge point.
+        from shapely.geometry import LineString, Point
+        from shapely.ops import unary_union
 
-        This routine performs a reverse traversal from the goal state, and at each step
-        also visits all sibling states that share the same spatial node regardless of
-        mask. This guarantees that all contributing branches are included.
-        """
         log.info(f"{goal_state=}")
-        log.info(f"{parents=}")
         log.info(f"{terminals=}")
+        log.info(f"parents count={len(parents)}")
 
-        # Build an index of node -> list of states that occur at that node
-        node_to_states: dict[tuple[int, int], list[tuple[tuple[int, int], int]]] = {}
-        for state in parents.keys():
-            node, mask = state
-            if node is None:
-                continue
-            node_to_states.setdefault(node, []).append(state)
+        # --- Helpers ------------------------------------------------------------
 
-        # Reverse traversal from goal state, visiting sibling states at the same node
-        all_nodes: set[tuple[int, int]] = set()
-        visited_states: set[tuple[tuple[int, int] | None, int | None]] = set()
-        stack: list[tuple[tuple[int, int], int]] = []
+        def add_edge(a, b, seen_edges, min_len=0.5):
+            """Add undirected edge if not too short and not already seen."""
+            if not a or not b or a == b:
+                return
+            if self._distance(a, b) < min_len:
+                return
+            key = tuple(sorted([a, b]))
+            if key not in seen_edges:
+                seen_edges.add(key)
+            return
 
-        # Seed with goal state and any other state that shares the same node
-        def push_if_new(s):
-            if s not in visited_states and s in parents:
-                visited_states.add(s)
-                stack.append(s)
+        def build_node_index(parents):
+            """Map node -> list of state tuples (node, mask)."""
+            node_to_states = {}
+            for state in parents.keys():
+                node, _ = state
+                if node:
+                    node_to_states.setdefault(node, []).append(state)
+            return node_to_states
+
+        def push_if_new(stack, visited, state):
+            """Push a new state to stack if unseen."""
+            if state not in visited and state in parents:
+                visited.add(state)
+                stack.append(state)
+
+        def prune_local_loops(edges):
+            """Remove local 3-4 node loops that appear during merges."""
+            adj = {}
+            for a, b in edges:
+                adj.setdefault(a, set()).add(b)
+                adj.setdefault(b, set()).add(a)
+            pruned = set()
+            for a, b in edges:
+                # keep only if not closing small cycle
+                if len(adj[a] & adj[b]) <= 1:
+                    pruned.add((a, b))
+            return pruned
+
+        # --- Build index and initialize -----------------------------------------
+        node_to_states = build_node_index(parents)
+        stack, visited_states, seen_edges = [], set(), set()
 
         if goal_state in parents:
-            push_if_new(goal_state)
-            gnode, _ = goal_state
-            # visit sibling states at goal node to capture other-mask branches
-            for sib in node_to_states.get(gnode, []):
-                push_if_new(sib)
+            push_if_new(stack, visited_states, goal_state)
+            goal_node, _ = goal_state
+            for sib in node_to_states.get(goal_node, []):
+                push_if_new(stack, visited_states, sib)
 
         edges = set()
 
+        # --- Reverse traversal --------------------------------------------------
         while stack:
             state = stack.pop()
             node, mask = state
-            if node is not None:
-                all_nodes.add(node)
-
             parent_info = parents.get(state)
-            if parent_info and parent_info != (None, None):
-                parent_node, parent_mask = parent_info
-                if parent_node is not None and parent_node != node:
-                    # Record edge in undirected manner; normalize to avoid A->B and B->A duplicates
-                    a, b = node, parent_node
-                    if a is not None and b is not None:
-                        edges.add(tuple(sorted([a, b])))
+            if not parent_info or parent_info == (None, None):
+                continue
 
-                parent_state = (parent_node, parent_mask)
-                push_if_new(parent_state)
-                # Also add siblings at the parent node (merge cases)
-                if parent_node is not None:
-                    for sib in node_to_states.get(parent_node, []):
-                        push_if_new(sib)
+            parent_node, parent_mask = parent_info
+            add_edge(node, parent_node, seen_edges)
 
-            # Additionally, ensure we include branches starting directly at terminals
-            # If this node is a terminal, also visit all states at this node
+            parent_state = (parent_node, parent_mask)
+            push_if_new(stack, visited_states, parent_state)
+
+            # Merge cases: visit siblings of parent and current
+            for sib in node_to_states.get(parent_node, []):
+                push_if_new(stack, visited_states, sib)
             for sib in node_to_states.get(node, []):
-                push_if_new(sib)
+                push_if_new(stack, visited_states, sib)
 
-        # As a fallback, if some terminals were never reached (e.g., goal_state missing
-        # due to pruning), trace from their states too.
+        # --- Fallback for terminals ---------------------------------------------
         for terminal in terminals:
             for state in node_to_states.get(terminal, []):
-                if state not in visited_states:
-                    push_if_new(state)
+                push_if_new(stack, visited_states, state)
 
-        # Optional graph-based cycle pruning to remove tiny loops before geometry creation
-        if self.prune_cycles and edges:
-            # Build adjacency
-            adj: dict[tuple[int, int], set[tuple[int, int]]] = {}
-            for u, v in edges:
-                adj.setdefault(u, set()).add(v)
-                adj.setdefault(v, set()).add(u)
+        edges = prune_local_loops(seen_edges)
+        log.info(f"edges after pruning={len(edges)}")
 
-            orig_edge_count = len(edges)
-            tree_edges: set[tuple[tuple[int, int], tuple[int, int]]] = set()
-            visited_nodes: set[tuple[int, int]] = set()
-
-            # Helper to add normalized undirected edge
-            def add_tree_edge(x, y):
-                if x == y:
-                    return
-                tree_edges.add(tuple(sorted([x, y])))
-
-            # Process all components
-            for start in list(adj.keys()):
-                if start in visited_nodes:
-                    continue
-                # Prefer a terminal in this component, if any
-                comp_nodes = set()
-                stack_nodes = [start]
-                while stack_nodes:
-                    t = stack_nodes.pop()
-                    if t in comp_nodes:
-                        continue
-                    comp_nodes.add(t)
-                    for nb in adj.get(t, ( )):
-                        if nb not in comp_nodes:
-                            stack_nodes.append(nb)
-                # choose root
-                root = None
-                for term in terminals:
-                    if term in comp_nodes:
-                        root = term
-                        break
-                if root is None:
-                    root = start
-                # BFS from root to build spanning tree
-                from collections import deque
-                dq = deque([root])
-                visited_nodes.add(root)
-                parent_map: dict[tuple[int, int], tuple[int, int] | None] = {root: None}
-                while dq:
-                    cur = dq.popleft()
-                    for nb in adj.get(cur, ( )):
-                        if nb not in parent_map:
-                            parent_map[nb] = cur
-                            add_tree_edge(cur, nb)
-                            dq.append(nb)
-                            visited_nodes.add(nb)
-            # Replace edges with pruned tree edges
-            cycles_removed = orig_edge_count - len(tree_edges)
-            if cycles_removed > 0:
-                log.info(f"Cycle pruning removed {cycles_removed} edges (from {orig_edge_count} to {len(tree_edges)})")
-            edges = tree_edges
-
-        # Convert edges to LineStrings
-        log.info(f"{edges=}")
+        # --- Convert to geometries ----------------------------------------------
         line_segments = [LineString([a, b]) for (a, b) in edges if a != b]
-        # Drop zero-length segments if any
         line_segments = [ls for ls in line_segments if ls.length > 0]
-        log.info(f"{line_segments=}")
 
-        # Merge segments collinearly and avoid double counting existing paths
         merged_paths = self._merge_adjacent_segments(line_segments, terminals, existing_paths)
-        log.info(f"{merged_paths=}")
 
-        # Verify all terminals are present; only warn, don't auto-connect here
+        # Simplify small detours
         if merged_paths:
+            merged_paths = [ls.simplify(0.5, preserve_topology=True) for ls in merged_paths]
+
+            # Verify all terminals are present
             tree_geom = unary_union(merged_paths)
-            for terminal in terminals:
-                tpt = Point(terminal)
-                if tree_geom.distance(tpt) > 1e-6:
-                    log.warning(f"missing terminal {terminal} in tree")
+            for t in terminals:
+                if tree_geom.distance(Point(t)) > 1e-6:
+                    log.warning(f"missing terminal {t} in final tree")
 
         return merged_paths
 
@@ -956,11 +906,13 @@ class SimultaneousRouter:
 
         # Optional simplification with zero tolerance to drop duplicate vertices
         if self.post_simplify:
+
             def simplify_line(g):
                 try:
                     return g.simplify(0, preserve_topology=True)
                 except Exception:
                     return g
+
             merged_paths = [simplify_line(l) for l in merged_paths]
 
         # Split merged paths at direction changes to get clean orthogonal segments
@@ -1122,7 +1074,7 @@ class SimultaneousRouter:
 
     @staticmethod
     def _distance(p1, p2):
-        return np.sqrt((p1[0] - p2[0]) ** 2 + (p1[1] - p2[1]) ** 2)
+        return abs(p1[0] - p2[0]) + abs(p1[1] - p2[1])
 
     def draw_route(self, screen, route_geom):
         """Draw an existing route as a single colored line from start to end."""
