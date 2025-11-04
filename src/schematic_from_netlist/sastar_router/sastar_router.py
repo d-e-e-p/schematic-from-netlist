@@ -241,8 +241,8 @@ class AstarRouter:
             if neighbor_node in terminal_set:
                 continue
 
-            if self.distance(current_node, neighbor_node) > 1:
-                log.warning(f"skipping long jump: {start} → {end}")
+            if (distance := self.distance(current_node, neighbor_node)) > 1:
+                log.warning(f"skipping long jump: {current_node} → {neighbor_node} ({distance})")
                 continue
 
             # Calculate move cost using the same logic as during routing

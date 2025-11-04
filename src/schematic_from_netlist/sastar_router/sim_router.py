@@ -288,7 +288,7 @@ class SimultaneousRouter:
         """
         connect one net
         """
-        terminals = [(pin.draw.geom.x, pin.draw.geom.y) for pin in net.pins.values() if pin.draw.geom]
+        terminals = [(int(pin.draw.geom.x), int(pin.draw.geom.y)) for pin in net.pins.values() if pin.draw.geom]
         if len(terminals) < 2:
             return [], 0
 
@@ -769,61 +769,84 @@ class SimultaneousRouter:
         return total
 
     def _build_steiner_tree(self, parents, goal_state, terminals, existing_paths=None):
-        """Build the Steiner tree from the goal state using parent pointers"""
-        all_nodes = set()
+        """Build the Steiner tree from the goal state using parent pointers.
+
+        The search maintains multiple states for the same spatial node but with different
+        terminal masks. When two branches meet at the same (x, y) with different masks,
+        the optimal tree is formed by combining BOTH parent chains. A naive single-chain
+        traceback from the goal state can therefore miss entire branches (e.g. the branch
+        grown from another terminal) if it only follows one mask at a merge point.
+
+        This routine performs a reverse traversal from the goal state, and at each step
+        also visits all sibling states that share the same spatial node regardless of
+        mask. This guarantees that all contributing branches are included.
+        """
         log.info(f"{goal_state=}")
         log.info(f"{parents=}")
         log.info(f"{terminals=}")
 
-        def trace_state_chain(start_state):
-            """Follow parent pointers up to a root, collecting real nodes only."""
-            current_state = start_state
-            visited = set()
-            while current_state in parents:
-                if current_state in visited:
-                    log.warning(f"Cycle detected in parents: {current_state}")
-                    break
-                visited.add(current_state)
+        # Build an index of node -> list of states that occur at that node
+        node_to_states: dict[tuple[int, int], list[tuple[tuple[int, int], int]]] = {}
+        for state in parents.keys():
+            node, mask = state
+            if node is None:
+                continue
+            node_to_states.setdefault(node, []).append(state)
 
-                node, mask = current_state
-                if node is not None:
-                    all_nodes.add(node)
+        # Reverse traversal from goal state, visiting sibling states at the same node
+        all_nodes: set[tuple[int, int]] = set()
+        visited_states: set[tuple[tuple[int, int] | None, int | None]] = set()
+        stack: list[tuple[tuple[int, int], int]] = []
 
-                parent_info = parents.get(current_state)
-                if not parent_info or parent_info == (None, None):
-                    break
+        # Seed with goal state and any other state that shares the same node
+        def push_if_new(s):
+            if s not in visited_states and s in parents:
+                visited_states.add(s)
+                stack.append(s)
 
-                parent_node, parent_mask = parent_info
+        if goal_state in parents:
+            push_if_new(goal_state)
+            gnode, _ = goal_state
+            # visit sibling states at goal node to capture other-mask branches
+            for sib in node_to_states.get(gnode, []):
+                push_if_new(sib)
 
-                # Mask must strictly lose terminals → prevents infinite cycles
-                if parent_mask & mask == mask and parent_mask != mask:
-                    log.error(f"Invalid parent mask transition: {current_state} → {(parent_node, parent_mask)}")
-                    break
-
-                current_state = (parent_node, parent_mask)
-
-        # Collect all nodes reachable from terminals
-        for terminal in terminals:
-            for state, (pnode, _) in parents.items():
-                node, _ = state
-                if node == terminal:
-                    trace_state_chain(state)
-                    break
-
-        # Collect tree nodes from goal state also
-        trace_state_chain(goal_state)
-
-        # Build valid edges from collected nodes
         edges = set()
-        for state, parent_info in parents.items():
-            node, _ = state
+
+        while stack:
+            state = stack.pop()
+            node, mask = state
+            if node is not None:
+                all_nodes.add(node)
+
+            parent_info = parents.get(state)
             if parent_info and parent_info != (None, None):
-                parent_node, _ = parent_info
-                if node in all_nodes and parent_node in all_nodes:
+                parent_node, parent_mask = parent_info
+                if parent_node is not None:
+                    # Record edge in undirected manner
                     edges.add(tuple(sorted([node, parent_node])))
-        log.info(f"{edges=}")
+
+                parent_state = (parent_node, parent_mask)
+                push_if_new(parent_state)
+                # Also add siblings at the parent node (merge cases)
+                if parent_node is not None:
+                    for sib in node_to_states.get(parent_node, []):
+                        push_if_new(sib)
+
+            # Additionally, ensure we include branches starting directly at terminals
+            # If this node is a terminal, also visit all states at this node
+            for sib in node_to_states.get(node, []):
+                push_if_new(sib)
+
+        # As a fallback, if some terminals were never reached (e.g., goal_state missing
+        # due to pruning), trace from their states too.
+        for terminal in terminals:
+            for state in node_to_states.get(terminal, []):
+                if state not in visited_states:
+                    push_if_new(state)
 
         # Convert edges to LineStrings
+        log.info(f"{edges=}")
         line_segments = [LineString([a, b]) for (a, b) in edges]
         log.info(f"{line_segments=}")
 
@@ -831,15 +854,13 @@ class SimultaneousRouter:
         merged_paths = self._merge_adjacent_segments(line_segments, terminals, existing_paths)
         log.info(f"{merged_paths=}")
 
-        # Fix any dropped terminal connections
+        # Verify all terminals are present; only warn, don't auto-connect here
         if merged_paths:
             tree_geom = unary_union(merged_paths)
             for terminal in terminals:
                 tpt = Point(terminal)
                 if tree_geom.distance(tpt) > 1e-6:
-                    log.warning(f"mising terminal {terminal} in tree")
-                    nearest = tree_geom.interpolate(tree_geom.project(tpt))
-                    # merged_paths.append(LineString([terminal, (nearest.x, nearest.y)]))
+                    log.warning(f"missing terminal {terminal} in tree")
 
         return merged_paths
 
