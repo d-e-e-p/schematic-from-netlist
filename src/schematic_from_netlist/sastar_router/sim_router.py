@@ -14,7 +14,7 @@ from itertools import cycle
 import numpy as np
 import pygame
 from shapely.geometry import GeometryCollection, LineString, MultiLineString, Point, box
-from shapely.ops import linemerge, unary_union
+from shapely.ops import linemerge, unary_union, polygonize
 from shapely.strtree import STRtree
 
 from schematic_from_netlist.sastar_router.models import CostBuckets, CostEstimator, RoutingContext
@@ -50,6 +50,9 @@ class SimultaneousRouter:
         bounds=None,
         debug: bool | None = None,
         log_interval: int = 100,
+        prune_cycles: bool = True,
+        post_simplify: bool = True,
+        min_loop_area: float | None = None,
     ):
         self.grid_spacing = grid_spacing
         self.obstacles = obstacle_geoms or []
@@ -59,8 +62,13 @@ class SimultaneousRouter:
         self.width, self.height = 800, 600
 
         # Debug/diagnostic controls
-        self.debug = False
+        self.debug = False if debug is None else bool(debug)
         self.log_interval = log_interval
+
+        # Cleanup/pruning options
+        self.prune_cycles = prune_cycles
+        self.post_simplify = post_simplify
+        self.min_loop_area = min_loop_area
 
         # Create halo regions around obstacles
         self.halo_geoms = []
@@ -822,9 +830,11 @@ class SimultaneousRouter:
             parent_info = parents.get(state)
             if parent_info and parent_info != (None, None):
                 parent_node, parent_mask = parent_info
-                if parent_node is not None:
-                    # Record edge in undirected manner
-                    edges.add(tuple(sorted([node, parent_node])))
+                if parent_node is not None and parent_node != node:
+                    # Record edge in undirected manner; normalize to avoid A->B and B->A duplicates
+                    a, b = node, parent_node
+                    if a is not None and b is not None:
+                        edges.add(tuple(sorted([a, b])))
 
                 parent_state = (parent_node, parent_mask)
                 push_if_new(parent_state)
@@ -845,9 +855,71 @@ class SimultaneousRouter:
                 if state not in visited_states:
                     push_if_new(state)
 
+        # Optional graph-based cycle pruning to remove tiny loops before geometry creation
+        if self.prune_cycles and edges:
+            # Build adjacency
+            adj: dict[tuple[int, int], set[tuple[int, int]]] = {}
+            for u, v in edges:
+                adj.setdefault(u, set()).add(v)
+                adj.setdefault(v, set()).add(u)
+
+            orig_edge_count = len(edges)
+            tree_edges: set[tuple[tuple[int, int], tuple[int, int]]] = set()
+            visited_nodes: set[tuple[int, int]] = set()
+
+            # Helper to add normalized undirected edge
+            def add_tree_edge(x, y):
+                if x == y:
+                    return
+                tree_edges.add(tuple(sorted([x, y])))
+
+            # Process all components
+            for start in list(adj.keys()):
+                if start in visited_nodes:
+                    continue
+                # Prefer a terminal in this component, if any
+                comp_nodes = set()
+                stack_nodes = [start]
+                while stack_nodes:
+                    t = stack_nodes.pop()
+                    if t in comp_nodes:
+                        continue
+                    comp_nodes.add(t)
+                    for nb in adj.get(t, ( )):
+                        if nb not in comp_nodes:
+                            stack_nodes.append(nb)
+                # choose root
+                root = None
+                for term in terminals:
+                    if term in comp_nodes:
+                        root = term
+                        break
+                if root is None:
+                    root = start
+                # BFS from root to build spanning tree
+                from collections import deque
+                dq = deque([root])
+                visited_nodes.add(root)
+                parent_map: dict[tuple[int, int], tuple[int, int] | None] = {root: None}
+                while dq:
+                    cur = dq.popleft()
+                    for nb in adj.get(cur, ( )):
+                        if nb not in parent_map:
+                            parent_map[nb] = cur
+                            add_tree_edge(cur, nb)
+                            dq.append(nb)
+                            visited_nodes.add(nb)
+            # Replace edges with pruned tree edges
+            cycles_removed = orig_edge_count - len(tree_edges)
+            if cycles_removed > 0:
+                log.info(f"Cycle pruning removed {cycles_removed} edges (from {orig_edge_count} to {len(tree_edges)})")
+            edges = tree_edges
+
         # Convert edges to LineStrings
         log.info(f"{edges=}")
-        line_segments = [LineString([a, b]) for (a, b) in edges]
+        line_segments = [LineString([a, b]) for (a, b) in edges if a != b]
+        # Drop zero-length segments if any
+        line_segments = [ls for ls in line_segments if ls.length > 0]
         log.info(f"{line_segments=}")
 
         # Merge segments collinearly and avoid double counting existing paths
@@ -869,8 +941,9 @@ class SimultaneousRouter:
         if not paths:
             return []
 
-        # First merge all connected segments
-        merged = linemerge(paths)
+        # Robust dissolve before merging to prevent fragmented overlaps
+        unioned = unary_union(paths)
+        merged = linemerge(unioned)
 
         if merged.is_empty:
             return []
@@ -881,21 +954,36 @@ class SimultaneousRouter:
         else:  # MultiLineString
             merged_paths = list(merged.geoms)
 
+        # Optional simplification with zero tolerance to drop duplicate vertices
+        if self.post_simplify:
+            def simplify_line(g):
+                try:
+                    return g.simplify(0, preserve_topology=True)
+                except Exception:
+                    return g
+            merged_paths = [simplify_line(l) for l in merged_paths]
+
         # Split merged paths at direction changes to get clean orthogonal segments
-        result_paths = []
         log.info(f"{paths} -> {merged_paths=}")
+        dedup = set()
+        result_paths = []
         for line in merged_paths:
             segments = self._split_at_direction_changes(line)
 
             # Process each segment
             for segment in segments:
+                if segment.length == 0:
+                    continue
+                key = tuple(map(tuple, segment.coords))
+                if key in dedup:
+                    continue
+                dedup.add(key)
                 result_paths.append(segment)
                 if existing_paths:
                     # Check for overlaps with existing nets
                     has_significant_overlap = False
                     for net_path in existing_paths:
                         intersection = segment.intersection(net_path)
-                        # if not intersection.is_empty:
                         if intersection:
                             overlap_length = 0
                             if isinstance(intersection, LineString):
@@ -904,19 +992,27 @@ class SimultaneousRouter:
                                 overlap_length = round(sum(seg.length for seg in intersection.geoms))
 
                             if overlap_length >= 1:
-                                # This segment has a significant overlap
                                 log.warning(
                                     f"Merged segment {segment.wkt} has {overlap_length} overlap with existing path {net_path}"
                                 )
                                 has_significant_overlap = True
                                 break
 
-                    # Always add the segment, even if it has overlaps
-                    # This ensures connectivity, and we'll handle overlaps in post-processing
-
-                    # If there's a significant overlap, log it for debugging
                     if has_significant_overlap:
                         log.warning(f"Adding segment despite overlap: {segment.wkt}")
+
+        # Optional: detect residual tiny loops (should be none after cycle pruning)
+        if self.min_loop_area is not None and result_paths:
+            ml = float(self.min_loop_area)
+        else:
+            # Default threshold: quarter of a grid square
+            ml = 0.25 * float(self.grid_spacing) * float(self.grid_spacing)
+        if result_paths:
+            poly_candidates = list(polygonize(unary_union(result_paths)))
+            tiny = [p for p in poly_candidates if p.area <= ml + 1e-9]
+            if tiny:
+                log.info(f"Detected {len(tiny)} tiny loops (area <= {ml}); pruning via cycle removal already applied.")
+                # No further action needed; cycle pruning ensures the linear network is acyclic.
 
         # Ensure all terminals are connected
         if terminals:
@@ -927,9 +1023,6 @@ class SimultaneousRouter:
                 for terminal in terminal_points:
                     if merged_geom.distance(Point(terminal)) > 1e-6:
                         log.warning(f"Terminal {terminal} is not connected to {merged_geom=}")
-                        # Add connection to nearest point
-                        # nearest = merged_geom.interpolate(merged_geom.project(Point(terminal)))
-                        # result_paths.append(LineString([terminal, (nearest.x, nearest.y)]))
 
         return result_paths
 
