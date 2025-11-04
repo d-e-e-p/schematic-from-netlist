@@ -12,10 +12,7 @@ from shapely.ops import linemerge, unary_union
 from shapely.strtree import STRtree
 
 from schematic_from_netlist.database.netlist_structures import Module, Net
-from schematic_from_netlist.detailed_router.models import CostBuckets, CostEstimator, PNet, RoutingContext
 from schematic_from_netlist.detailed_router.pcst_router import PcstRouter
-from schematic_from_netlist.detailed_router.test_cases import create_hard_test_case
-from schematic_from_netlist.detailed_router.visualization import plot_result
 from schematic_from_netlist.sastar_router.sim_router import SimultaneousRouter
 
 log.basicConfig(level=log.INFO)
