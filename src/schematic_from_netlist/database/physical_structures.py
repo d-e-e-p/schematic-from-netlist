@@ -112,6 +112,7 @@ class PortPhysical(PointPhysical):
 @dataclass
 class PinPhysical(PointPhysical):
     fixed: bool = False
+    direction: str = "C"
 
 
 # -----------------------------

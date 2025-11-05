@@ -7,9 +7,10 @@ import time
 import unicodedata
 from collections import namedtuple
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from heapq import heappop, heappush
 from itertools import cycle
+from typing import Any, Dict, Tuple
 
 import numpy as np
 import pygame
@@ -40,6 +41,24 @@ COLORS = cycle(BASE_COLORS)
 
 
 log.basicConfig(level=log.INFO)
+
+
+@dataclass
+class Terminal:
+    name: str
+    pt: Tuple
+    direction: str
+
+
+@dataclass
+class PCost:
+    """Defines the baseline costs for various routing elements."""
+
+    base: int = 1  # Cost for routing straight
+    macro: int = 100  # Cost for routing over a macro
+    halo: int = 40  # Cost for routing near a macro
+    turn: int = 10  # PENALTY: Cost applied for any 90-degree turn
+    prize: int = 1000  # Prize for required terminals
 
 
 class PcstRouter:
@@ -91,15 +110,21 @@ class PcstRouter:
             self.halo_geoms.append(halo)
         self.halo_index = STRtree(self.halo_geoms) if self.halo_geoms else None
 
-        # Initialize cost estimator
-        self.cost_estimator = CostEstimator(grid_spacing)
-
         # Calculate bounds if not provided
         # Ensure bounds include all terminals by expanding if necessary
         if not self.bounds:
             self._calculate_default_bounds()
 
-    def route_net(self, net_name):
+        # Initialize cost estimator
+        self.cost_estimator = CostEstimator(grid_spacing)
+        self.cost = PCost()
+
+    def route_net(
+        self,
+        net_name: str,
+        # Use a Dict to accept optional keyword arguments for cost overrides
+        cost_overrides: Dict[str, Any] = None,
+    ):
         """
         connect one net
         """
@@ -109,11 +134,6 @@ class PcstRouter:
         pruning = "gw"  # Use strong pruning for sparse solutions
         verbosity_level = 1
         vertices, edges_output = pcst_fast(edges_input, prizes, costs, root, num_clusters, pruning, verbosity_level)
-
-        # --- Print Results ---
-        log.info("--- PCST Solution ---")
-        log.info(f"Selected Vertices (Nodes): {vertices}")
-        log.info(f"Selected Edges (Indices): {edges_output}")
 
         selected_cost = np.sum(costs[edges_output])
         log.info(f"Total Cost of Route (Weighted): {selected_cost:.0f}")
@@ -155,11 +175,11 @@ class PcstRouter:
         screen_y = self.height - ((y - self.min_y) * scale + (self.height - (self.max_y - self.min_y) * scale) / 2)
         return (int(screen_x), int(screen_y))
 
-    def _initialize_visualization(self, terminals, existing_paths, port_colors=None):
+    def _initialize_visualization(self, port_colors=None):
         """Initialize Pygame and draw the initial state."""
         pygame.init()
         screen = pygame.display.set_mode((self.width, self.height))
-        pygame.display.set_caption("A* Routing Visualization")
+        pygame.display.set_caption("P Routing Visualization")
         font = pygame.font.Font(None, 24)
 
         # Scale factors
@@ -188,14 +208,14 @@ class PcstRouter:
             pygame.draw.polygon(screen, (255, 0, 0), bounds_points, 3)
 
         # Draw existing nets in different colors
-        if existing_paths:
-            for route_geom in existing_paths:
-                self.draw_route(screen, route_geom)
+        for route_geom in self.other_paths:
+            self.draw_route(screen, route_geom)
 
         # Draw terminals with per-port colors if provided
         legend_y = 10
-        for i, term in enumerate(terminals):
-            pos = self.to_screen_coords(term)
+        port_colors = {i: BASE_COLORS[i % len(BASE_COLORS)] for i in range(len(self.terminals))}
+        for i, term in enumerate(self.terminals):
+            pos = self.to_screen_coords(term.pt)
             color = (255, 0, 0)
             if port_colors and i in port_colors:
                 color = port_colors[i]
@@ -211,7 +231,13 @@ class PcstRouter:
         pygame.draw.circle(screen, (150, 150, 150), (15, legend_y + 5), 5)
         merge_text = font.render("Merge", True, (0, 0, 0))
         screen.blit(merge_text, (30, legend_y))
+        pygame.display.flip()
+
         return screen, font
+
+    def _display_flip(self):
+        """Visualize the final path and save the image."""
+        pygame.display.update()
 
     def _handle_pygame_events(self):
         """Handle Pygame events."""
@@ -299,11 +325,6 @@ class PcstRouter:
                 # Log the turn node only, as it doesn't represent a physical segment
                 pass
 
-        # --- Print decoded coordinates with integer casting as requested ---
-        log.info("\nDecoded Route Segments (R, C):")
-        for seg in coord_segments:
-            log.info(f" ({int(seg[0][0])}, {int(seg[0][1])}) -> ({int(seg[1][0])}, {int(seg[1][1])})")
-
         return coord_segments
 
     def coords_outside_poly(self, poly_list):
@@ -337,12 +358,6 @@ class PcstRouter:
         creates custom grid for each net
         """
 
-        NORMAL_COST = 1  # Cost for routing straight
-        BLOCKAGE_COST = 100  # Cost for routing over a blockage cell
-        HALO_COST = 4  # Cost for routing over a blockage cell
-        TURN_COST = 10  # PENALTY: Cost applied for any 90-degree turn
-        PRIZE_VALUE = 100  # Prize high enough to force connection but low enough to prevent MST
-
         log.info(f"Creating detailed route grid for {net_name}")
 
         edges_list = []
@@ -375,13 +390,13 @@ class PcstRouter:
 
                     if is_turn and not is_straight_through:
                         # 90-degree turn (e.g., N->E, E->S)
-                        cost = TURN_COST
+                        cost = self.cost.turn
                     elif is_straight_through:
                         # 180-degree pass-through (e.g., N->S). Cost 0 for D-Node transition.
                         cost = 0.0
                     else:
                         # This should cover 90-degree turns and self-loops (which are skipped above)
-                        cost = TURN_COST
+                        cost = self.cost.turn
 
                     # NOTE: This implementation is simplified. A full router would ensure N->N (self-loop) is skipped
                     # and often only connect adjacent D-Nodes. Given the constraints, we use the
@@ -402,12 +417,12 @@ class PcstRouter:
                 node_b = self.coord_to_node_id(r_b, c_b, dir_to)
 
                 # Base cost is 1 unit of length
-                cost = NORMAL_COST
+                cost = self.cost.base
                 # Apply blockage cost if *this segment* is in the blockage
                 if (r, c) in blockage_cells or (r_b, c_b) in blockage_cells:
-                    cost = BLOCKAGE_COST
+                    cost = self.cost.macro
                 elif (r, c) in halo_cells or (r_b, c_b) in halo_cells:
-                    cost = HALO_COST
+                    cost = self.cost.halo
 
                 # Add edge (a->b and b->a are added for undirected graph)
                 edges_list.append([node_a, node_b])
@@ -415,32 +430,31 @@ class PcstRouter:
 
         edges = np.array(edges_list, dtype=np.int64)
         costs = np.array(costs_list, dtype=np.int64)
-        prizes = np.zeros(self.next_id + 1, dtype=np.int64)
 
         # We set prize on ALL directional nodes in the target cell to simplify connection
-        terminal_set = set(self.terminals)
         required_terminals = []
-        for r, c in terminal_set:
-            for dir in ["N", "E", "S", "W"]:
-                required_terminals.append(self.coord_to_node_id(r, c, dir))
+        for term in self.terminals:
+            r, c = term.pt.x, term.pt.y
+            dir = term.direction
+            required_terminals.append(self.coord_to_node_id(r, c, dir))
 
-        # We choose the first of the four D-Nodes as the official root index
+        # just choose the first as the root index
         # TODO: find optimal terminal to start from
         root = required_terminals[0]
 
         # Max shortest path cost (8 straight segments + max 1 turn) is ~13.
         # Set prize higher than the worst single-path cost to force connectivity.
-        PRIZE_VALUE = 20
 
+        prizes = np.zeros(self.next_id + 1, dtype=np.int64)
         for node_id in required_terminals:
-            prizes[node_id] = PRIZE_VALUE
+            prizes[node_id] = self.cost.prize
 
-        log.info(f"Required Terminals: {terminal_set} (Total Prize: {PRIZE_VALUE * len(required_terminals):.0f})")
-        log.info(f"Blockage Cost: {BLOCKAGE_COST}. Turn Cost: {TURN_COST}. Normal Cost: {NORMAL_COST}")
+        log.info(f"Required Terminals: {self.terminals} (Total Prize: {self.cost.prize * len(required_terminals):.0f})")
+        log.info(f"Blockage Cost: {self.cost.macro}. Turn Cost: {self.cost.turn}. Normal Cost: {self.cost.base}")
 
         num_clusters = 1
 
-        return edges, prizes, costs, root, num_clusters, BLOCKAGE_COST
+        return edges, prizes, costs, root, num_clusters, self.cost.macro
 
     def _merge_adjacent_segments(self, paths, terminals=None, existing_paths=None):
         """Merge adjacent segments into clean orthogonal lines while avoiding overlaps"""
@@ -617,6 +631,11 @@ class PcstRouter:
         """Draw an existing route as a single colored line from start to end."""
         color = next(COLORS)
 
+        font = pygame.font.Font(None, 12)
+        pos = self.to_screen_coords((0, 10))
+        text = font.render(f"{self.cost.halo=}", True, (0, 0, 0))
+        screen.blit(text, (pos[0], pos[1]))
+
         # Flatten either MultiLineString or LineString
         if isinstance(route_geom, MultiLineString):
             lines = list(route_geom.geoms)
@@ -630,6 +649,7 @@ class PcstRouter:
             coords = list(seg.coords)
             for a, b in zip(coords, coords[1:]):
                 pygame.draw.line(screen, color, self.to_screen_coords(a), self.to_screen_coords(b), 2)
+        pygame.display.flip()
 
 
 if __name__ == "__main__":

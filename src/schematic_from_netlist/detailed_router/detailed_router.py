@@ -1,4 +1,6 @@
 import logging as log
+import os
+import pickle
 import sys
 import time
 from collections import namedtuple
@@ -12,7 +14,7 @@ from shapely.ops import linemerge, unary_union
 from shapely.strtree import STRtree
 
 from schematic_from_netlist.database.netlist_structures import Module, Net
-from schematic_from_netlist.detailed_router.pcst_router import PcstRouter
+from schematic_from_netlist.detailed_router.pcst_router import PcstRouter, Terminal
 from schematic_from_netlist.sastar_router.models import CostBuckets, CostEstimator, RoutingContext
 from schematic_from_netlist.sastar_router.sim_router import SimultaneousRouter
 from schematic_from_netlist.sastar_router.visualization import plot_result
@@ -23,6 +25,7 @@ log.basicConfig(level=log.INFO)
 class DetailedRouter:
     def __init__(self, db):
         self.db = db
+        self.router_padding = 10
 
     def route_design(self, flat=False):
         log.info("Routing design using PCST Router")
@@ -52,19 +55,23 @@ class DetailedRouter:
             old_total_cost, old_step_costs = self.calculate_existing_cost(net, old_routed_paths, obstacles, other_paths)
 
             # Calculate bounds from existing route
-            router_halo = self.get_route_halo(old_routed_paths, net.pins, padding=5)
+            router_halo = self.get_route_halo(old_routed_paths, net.pins, padding=self.router_padding)
             # router_halo = self.get_preexisting_route_bounds(old_routed_paths)
-            terminals = [(int(pin.draw.geom.x), int(pin.draw.geom.y)) for pin in net.pins.values() if pin.draw.geom]
+            terminals = self.get_terminals_on_net(net)
 
             # Create router object with everything we need for one net
             router = PcstRouter(
                 obstacle_geoms=obstacles, halo_size=4, bounds=router_halo, other_paths=other_paths, terminals=terminals
             )
+
             new_routed_paths, new_total_cost = router.route_net(net.name)
 
             # Calculate existing cost with other nets' paths
             log.info(f"calculating new cost of {net.name} with route={new_routed_paths}")
             new_total_cost, new_step_costs = self.calculate_existing_cost(net, new_routed_paths, obstacles, other_paths)
+
+            if net.name == "components/VDD" or net.name == "top/u1/VDD":
+                save_testcase(router, net)
 
             if not new_routed_paths and not old_routed_paths:
                 log.warning(f"Net {net.name} failed to route")
@@ -132,6 +139,15 @@ class DetailedRouter:
         """
 
         return nets
+
+    def get_terminals_on_net(self, net):
+        """define terminal properties"""
+        terminals = []
+        for pin in net.pins.values():
+            if pin.draw.geom:
+                term = Terminal(pin.full_name, pin.draw.geom, pin.draw.direction)
+                terminals.append(term)
+        return terminals
 
     def iter_lines(self, geom):
         """Yield LineStrings from a geometry or nested geometry structure."""
@@ -377,23 +393,46 @@ class DetailedRouter:
         return macros.buffer(buffer_dist)
 
 
+def save_testcase(router, net):
+    os.makedirs("data/pkl", exist_ok=True)
+    with open("data/pkl/router.pkl", "wb") as f:
+        pickle.dump(router, f)
+    with open("data/pkl/net.pkl", "wb") as f:
+        pickle.dump(net, f)
+
+
+def restore_testcase():
+    with open("data/pkl/router.pkl", "rb") as f:
+        router = pickle.load(f)
+    """
+    with open("data/pkl/net.pkl", "rb") as f:
+        net = pickle.load(f)
+    """
+    return router
+
+
 if __name__ == "__main__":
     # Define nets
-    log.basicConfig(level=log.INFO)
-    # nets, obstacles = create_hard_test_case("macro_grid")
-    nets, obstacles = create_hard_test_case("precision")
 
-    # Route all nets
-    db = []
-    ar = AstarRouter(db)
-    routed_nets = ar.route_nets(nets, obstacles)
+    log.basicConfig(level=log.DEBUG, format="%(levelname)s - %(funcName)s - %(name)s - %(message)s")
 
-    # Print results
-    for net in routed_nets:
-        if net.draw.geom:
-            # Convert to MultiLineString to ensure consistent output format
-            # Create a MultiLineString from all paths
-            multi_line = MultiLineString(net.draw.geom)
-            print(f"Net {net.name} geometry: {multi_line.wkt}")
-        else:
-            print(f"Net {net.name} failed to route")
+    router = restore_testcase()
+    net = Net("nx", Module("hgy"))
+    screen, font = router._initialize_visualization()
+
+    for halo_cost in range(20, 101, 10):
+        log.warning(f"{halo_cost=}")
+        router.cost.halo = halo_cost
+        new_routed_paths, new_total_cost = router.route_net(net.name)
+        router.draw_route(screen, new_routed_paths)
+        router._display_flip()
+
+        log.info(f"calculating new cost route={new_routed_paths}")
+        dr = DetailedRouter(None)
+        new_total_cost, new_step_costs = dr.calculate_existing_cost(net, new_routed_paths, router.obstacles, router.other_paths)
+        net.draw.geom = new_routed_paths
+        net.draw.total_cost = new_total_cost
+        net.draw.step_costs = new_step_costs
+        nets = {net.name: net}
+        plot_result(net, router.obstacles, nets, "testcase")
+        breakpoint()

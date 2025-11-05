@@ -1210,6 +1210,7 @@ class GlobalRouter:
                             new_pin_loc = nearest_points(start_point, intersection)[1]
                     if new_pin_loc:
                         child.draw.geom = new_pin_loc
+                        child.draw.direction = self.determine_pin_direction(child)
                     else:
                         log.warning(
                             f"Could not find intersection for pin {child.full_name} on macro boundary. Using original pin location."
@@ -1298,6 +1299,37 @@ class GlobalRouter:
         else:
             log.warning(f"Found {violations} crossing/overlap violations.")
         log.info(f"--- End of Diagnosis ---")
+
+    def determine_pin_direction(self, pin: Pin):
+        """Return pin direction relative to instance boundary (N, S, E, W)."""
+        geom = pin.draw.geom
+        inst_geom = pin.instance.draw.geom
+
+        if not isinstance(geom, Point) or not isinstance(inst_geom, Polygon):
+            log.warning("Invalid geometries for pin or instance.")
+            return None
+
+        # Get bounding box of instance polygon
+        minx, miny, maxx, maxy = inst_geom.bounds
+        x, y = geom.x, geom.y
+
+        # Define small tolerance for floating point comparisons
+        tol = 1e-6
+
+        if abs(y - maxy) <= tol:
+            return "N"
+        elif abs(y - miny) <= tol:
+            return "S"
+        elif abs(x - minx) <= tol:
+            return "W"
+        elif abs(x - maxx) <= tol:
+            return "E"
+        else:
+            # Handle corner or off-boundary cases
+            log.warning(f"Pin {geom} not on exact boundary of instance.")
+            # Optionally return closest edge
+            dxs = {"W": abs(x - minx), "E": abs(x - maxx), "S": abs(y - miny), "N": abs(y - maxy)}
+            return min(dxs, key=dxs.get)
 
     @staticmethod
     def _subtract_intervals(
