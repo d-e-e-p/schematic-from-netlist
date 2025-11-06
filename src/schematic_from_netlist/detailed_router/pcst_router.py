@@ -7,10 +7,10 @@ import time
 import unicodedata
 from collections import namedtuple
 from collections.abc import Iterable
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from heapq import heappop, heappush
 from itertools import cycle
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pygame
@@ -19,6 +19,7 @@ from shapely.geometry import GeometryCollection, LineString, MultiLineString, Po
 from shapely.ops import linemerge, polygonize, unary_union
 from shapely.strtree import STRtree
 
+from schematic_from_netlist.detailed_router.pcst_debug import PCSTGridDebugger
 from schematic_from_netlist.sastar_router.models import CostBuckets, CostEstimator, RoutingContext
 from schematic_from_netlist.sastar_router.visualization import plot_result
 
@@ -61,6 +62,39 @@ class PCost:
     prize: int = 1000  # Prize for required terminals
 
 
+@dataclass
+class PcstInputs:
+    """All inputs required to run pcst_fast()."""
+
+    edges: Optional[List[Tuple[int, int]]] = field(default=None)
+    prizes: Optional[List[float]] = field(default=None)
+    costs: Optional[List[float]] = field(default=None)
+    root: Optional[int] = None
+    num_clusters: int = 1
+    pruning: str = "gw"
+    verbosity_level: int = 1
+
+    def run(self):
+        """Run pcst_fast using current attributes."""
+        if self.edges is None or self.prizes is None or self.costs is None:
+            raise ValueError("edges, prizes, and costs must be set before running pcst_fast.")
+
+        edges_arr = np.array(self.edges, dtype=int)
+        prizes_arr = np.array(self.prizes, dtype=float)
+        costs_arr = np.array(self.costs, dtype=float)
+
+        vertices, edges = pcst_fast(
+            edges_arr,
+            prizes_arr,
+            costs_arr,
+            self.root,
+            self.num_clusters,
+            self.pruning,
+            self.verbosity_level,
+        )
+        return vertices, edges
+
+
 class PcstRouter:
     def __init__(
         self,
@@ -85,7 +119,7 @@ class PcstRouter:
         self.scale = 1.0
         self.width, self.height = 800, 600
 
-        self.GRID_SIZE = 0
+        self.GRID_SIZE = 1
         self.DIR_MAP = {"N": 0, "E": 1, "S": 2, "W": 3}
         self.DIR_VEC = {"N": (-1, 0), "E": (0, 1), "S": (1, 0), "W": (0, -1)}
         self.OPPOSITE_DIR = {"N": "S", "S": "N", "E": "W", "W": "E"}
@@ -128,18 +162,19 @@ class PcstRouter:
         """
         connect one net
         """
-        edges_input, prizes, costs, root, num_clusters, blockage_cost_val = self.setup_pcst_grid(net_name)
+        pcst = self.setup_pcst_grid(net_name)
+        debugger = PCSTGridDebugger(self, pcst)
+        debugger.print_debug_stats(net_name)
+        debugger.visualize_grid(net_name)
 
         # Configure the solver
-        pruning = "gw"  # Use strong pruning for sparse solutions
-        verbosity_level = 1
-        vertices, edges_output = pcst_fast(edges_input, prizes, costs, root, num_clusters, pruning, verbosity_level)
+        vertices, edges_output = pcst.run()
 
-        selected_cost = np.sum(costs[edges_output])
+        selected_cost = np.sum(pcst.costs[edges_output])
         log.info(f"Total Cost of Route (Weighted): {selected_cost:.0f}")
 
         # --- Decode Coordinates ---
-        coord_segments = self.decode_edges_to_coords(edges_output, edges_input, costs)
+        coord_segments = self.decode_edges_to_coords(edges_output, pcst.edges, pcst.costs)
         segments = [LineString([start, end]) for start, end in coord_segments]
         merged_segments = MultiLineString(self._merge_adjacent_segments(segments))
         return merged_segments, selected_cost
@@ -355,7 +390,7 @@ class PcstRouter:
 
     def setup_pcst_grid(self, net_name):
         """
-        creates custom grid for each net
+        creates custom cost grid for each net
         """
 
         log.info(f"Creating detailed route grid for {net_name}")
@@ -452,9 +487,13 @@ class PcstRouter:
         log.info(f"Required Terminals: {self.terminals} (Total Prize: {self.cost.prize * len(required_terminals):.0f})")
         log.info(f"Blockage Cost: {self.cost.macro}. Turn Cost: {self.cost.turn}. Normal Cost: {self.cost.base}")
 
-        num_clusters = 1
+        pcst_inputs = PcstInputs()
+        pcst_inputs.edges = edges
+        pcst_inputs.prizes = prizes
+        pcst_inputs.costs = costs
+        pcst_inputs.root = root
 
-        return edges, prizes, costs, root, num_clusters, self.cost.macro
+        return pcst_inputs
 
     def _merge_adjacent_segments(self, paths, terminals=None, existing_paths=None):
         """Merge adjacent segments into clean orthogonal lines while avoiding overlaps"""
