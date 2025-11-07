@@ -152,13 +152,13 @@ class PCSTGridDebugger:
                 ax.scatter(x, y, marker=marker, s=size, c=color, edgecolors=edgecolor, linewidths=linewidth, zorder=5)
 
                 # Label node
-                label = f"{axis}\n{node_id}"
+                label = f"{axis}\n({int(r)},{int(c)})"
                 if has_prize:
                     label += f"\n★{int(prizes[node_id])}"
 
                 ax.text(
-                    x + 0.15,
-                    y + 0.15,
+                    x + 0.10,
+                    y + 0.10,
                     label,
                     fontsize=7,
                     ha="left",
@@ -232,7 +232,8 @@ class PCSTGridDebugger:
                 ax.plot([x1, x2], [y1, y2], "-", color=color, linewidth=linewidth, alpha=alpha, zorder=zorder)
 
             # Label edge cost if selected or turn
-            if is_selected or is_turn:
+            # if is_selected or is_turn:
+            if True:
                 mid_x, mid_y = (x1 + x2) / 2, (y1 + y2) / 2
                 ax.text(
                     mid_x,
@@ -252,8 +253,8 @@ class PCSTGridDebugger:
 
         term_label = f"{terminal.name}\n({term_r},{term_c})\n{terminal.direction}→{term_axis}"
         ax.text(
-            term_c,
-            term_r - 0.6,
+            term_c - 1,
+            term_r - 1,
             term_label,
             fontsize=10,
             ha="center",
@@ -324,8 +325,8 @@ class PCSTGridDebugger:
         ax.legend(handles=legend_elements, loc="upper right", fontsize=8, framealpha=0.9)
 
         # Save
-        filename = f"pcst_debug_{net_name}_{terminal.name}.png"
-        filename = self.router.clean_hierarchical_name(filename)
+        filename = f"pcst_debug_{net_name}_{terminal.name}"
+        filename = self.router.clean_hierarchical_name(filename) + ".svg"
         filepath = output_path / filename
         plt.savefig(filepath, dpi=150, bbox_inches="tight")
         plt.close(fig)
