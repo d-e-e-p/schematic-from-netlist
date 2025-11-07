@@ -32,7 +32,7 @@ class PCSTGridDebugger:
         self.vertices = vertices
         self.edges_output = edges_output
 
-    def visualize_grid(self, net_name, grid_size=8, output_dir="data/images/droute"):
+    def visualize_terminal_grid(self, net_name, grid_size=8, output_dir="data/images/droute", row_origin: str = "top"):
         """
         Create visualization focused on each terminal showing:
         - Grid cells around terminal
@@ -44,6 +44,8 @@ class PCSTGridDebugger:
             net_name: Name of the net
             grid_size: Size of grid to show around each terminal (e.g., 8x8)
             output_dir: Directory to save images
+            row_origin: "top" (default) means row index increases downward (screen/array style);
+                        "bottom" keeps math/plotting style (row increases upward).
         """
 
         # Create output directory
@@ -63,16 +65,228 @@ class PCSTGridDebugger:
 
         # Process each terminal
         for term in self.router.terminals:
-            self._visualize_terminal_region(term, net_name, edges, prizes, costs, root, selected_edges_set, grid_size, output_path)
+            self._visualize_terminal_region(term, net_name, edges, prizes, costs, root, selected_edges_set, grid_size, output_path, row_origin)
 
         log.info(f"Saved {len(self.router.terminals)} debug images to {output_path}")
 
-    def _visualize_terminal_region(
-        self, terminal, net_name, edges, prizes, costs, root, selected_edges_set, grid_size, output_path
-    ):
-        """Create focused visualization around a single terminal"""
+    def visualize_full_grid(self, net_name: str, output_dir: str = "data/images/droute", scale: float = 4.0, row_origin: str = "top"):
+        """
+        Create a single SVG that visualizes the entire known grid:
+        - All grid cells within the design bounds
+        - All nodes (NS/EW per cell)
+        - All edges, with styling by type/cost
+        - Highlight the root, prize nodes, in-solution nodes, and mark all terminals
 
-        term_r, term_c = terminal.pt.x, terminal.pt.y
+        Args:
+            net_name: Name of the net
+            output_dir: Directory to save the SVG image
+            scale: Scale factor for the figure size (multiplies width/height). Use 4.0 to enlarge labels and spacing.
+            row_origin: "top" (default) means row index increases downward (screen/array style);
+                        "bottom" keeps math/plotting style (row increases upward).
+        """
+        # Prepare output directory
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+
+        pcst_inputs = self.pcst_inputs
+        edges = np.array(pcst_inputs.edges)
+        prizes = np.array(pcst_inputs.prizes)
+        costs = np.array(pcst_inputs.costs)
+        root = pcst_inputs.root
+
+        # Selected edges if we have a solution
+        selected_edges_set = set(self.edges_output) if self.edges_output is not None else set()
+
+        # Determine full grid cells inside bounds
+        all_grid_cells = set(self.router.coords_inside_poly([self.router.bounds]))
+        blockage_cells = set(self.router.coords_inside_poly(self.router.obstacles))
+        halo_cells = set(self.router.coords_inside_poly(self.router.halo_geoms))
+
+        if not all_grid_cells:
+            log.warning("No grid cells found for full-grid visualization.")
+            return
+
+        # Compute extents
+        # all_grid_cells contains tuples as (x, y) from geometry; for display we use r=y (rows), c=x (cols)
+        xs = [x for x, _ in all_grid_cells]
+        ys = [y for _, y in all_grid_cells]
+        r_min, r_max = min(ys), max(ys)
+        c_min, c_max = min(xs), max(xs)
+
+        # Create figure
+        # Compute base figsize from extent, then scale up (default 4x) and clamp
+        base_height = max(8, min(20, (r_max - r_min + 1) * 0.25))
+        base_width = max(8, min(20, (c_max - c_min + 1) * 0.25))
+        height = max(8 * scale, min(20 * scale, base_height * scale))
+        width = max(8 * scale, min(20 * scale, base_width * scale))
+        fig, ax = plt.subplots(figsize=(width, height))
+
+        # --- 1. Draw grid cells ---
+        for x, y in all_grid_cells:
+            r, c = y, x  # rows=y, cols=x
+            if (x, y) in blockage_cells:
+                color = "red"; alpha = 0.3
+            elif (x, y) in halo_cells:
+                color = "orange"; alpha = 0.2
+            else:
+                color = "lightgray"; alpha = 0.1
+            rect = mpatches.Rectangle((c - 0.5, r - 0.5), 1, 1, linewidth=1, edgecolor="gray", facecolor=color, alpha=alpha)
+            ax.add_patch(rect)
+
+        # --- 2. Draw nodes ---
+        node_positions = {}
+        axis_offsets = {"NS": (0, 0.25), "EW": (0, -0.25)}
+        for x, y in all_grid_cells:
+            r, c = y, x
+            for axis in ["NS", "EW"]:
+                try:
+                    node_id = self.router.coord_to_node_id(x, y, axis)
+                except (KeyError, AttributeError):
+                    continue
+                dx, dy = axis_offsets[axis]
+                x_plot, y_plot = c + dx, r + dy
+                node_positions[node_id] = (x_plot, y_plot)
+
+                has_prize = node_id < len(prizes) and prizes[node_id] > 0
+                is_root = node_id == root
+                is_in_solution = self.vertices is not None and node_id in self.vertices
+
+                if is_root:
+                    marker, size, color = "*", 200, "gold"; edgecolor, linewidth = "red", 3
+                elif has_prize:
+                    marker, size, color = "o", 150, "gold"; edgecolor, linewidth = "darkgoldenrod", 2
+                elif is_in_solution:
+                    marker, size, color = "o", 100, "lightgreen"; edgecolor, linewidth = "darkgreen", 2
+                else:
+                    marker, size, color = "o", 80, "lightblue"; edgecolor, linewidth = "blue", 1
+
+                ax.scatter(x_plot, y_plot, marker=marker, s=size, c=color, edgecolors=edgecolor, linewidths=linewidth, zorder=5)
+
+                label = f"{axis}\n({int(r)},{int(c)})"
+                if has_prize:
+                    label += f"\n★{int(prizes[node_id])}"
+                ax.text(
+                    x_plot + 0.10,
+                    y_plot + 0.10,
+                    label,
+                    fontsize=6,
+                    ha="left",
+                    va="bottom",
+                    bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.8, edgecolor=edgecolor, linewidth=0.5),
+                    zorder=6,
+                )
+
+        # --- 3. Draw edges ---
+        for edge_idx, (node_a, node_b) in enumerate(edges):
+            if node_a not in node_positions or node_b not in node_positions:
+                continue
+            x1, y1 = node_positions[node_a]
+            x2, y2 = node_positions[node_b]
+
+            try:
+                r1, c1, axis1 = self.router.node_id_to_coord(node_a)
+                r2, c2, axis2 = self.router.node_id_to_coord(node_b)
+            except (KeyError, ValueError):
+                continue
+
+            is_selected = edge_idx in selected_edges_set
+            cost = costs[edge_idx]
+
+            is_inter_cell = r1 != r2 or c1 != c2
+            is_turn = not is_inter_cell and axis1 != axis2
+
+            if is_selected:
+                color = "green"; linewidth = 3; alpha = 1.0; zorder = 4
+            elif is_turn:
+                color = "red"; linewidth = 1.5; alpha = 0.6; zorder = 2
+            elif cost == self.router.cost.base:
+                color = "blue"; linewidth = 1; alpha = 0.3; zorder = 1
+            elif cost == self.router.cost.halo:
+                color = "orange"; linewidth = 1.5; alpha = 0.5; zorder = 2
+            else:
+                color = "red"; linewidth = 2; alpha = 0.5; zorder = 2
+
+            if is_turn:
+                ax.annotate(
+                    "", xy=(x2, y2), xytext=(x1, y1),
+                    arrowprops=dict(arrowstyle="->", color=color, lw=linewidth, alpha=alpha, connectionstyle="arc3,rad=0.3"),
+                    zorder=zorder,
+                )
+            else:
+                ax.plot([x1, x2], [y1, y2], "-", color=color, linewidth=linewidth, alpha=alpha, zorder=zorder)
+
+            # Always label cost to aid debugging
+            mid_x, mid_y = (x1 + x2) / 2, (y1 + y2) / 2
+            ax.text(
+                mid_x, mid_y, f"{int(cost)}", fontsize=6, ha="center", va="center",
+                bbox=dict(boxstyle="round,pad=0.2", facecolor="white", alpha=0.9, edgecolor=color, linewidth=1),
+                zorder=7,
+            )
+
+        # --- 4. Mark terminals ---
+        for terminal in getattr(self.router, "terminals", []):
+            # terminal.pt is (x, y); plot expects (c=x, r=y)
+            tr, tc = terminal.pt.y, terminal.pt.x
+            ax.scatter(tc, tr, marker="s", s=400, facecolors="none", edgecolors="green", linewidths=3, zorder=10)
+            term_axis = self.router.DIR_TO_AXIS[terminal.direction]
+            label = f"{terminal.name}\n({tr},{tc})\n{terminal.direction}→{term_axis}"
+            ax.text(
+                tc - 0.6, tr - 0.6, label, fontsize=8, ha="left", va="top",
+                bbox=dict(boxstyle="round,pad=0.4", facecolor="white", edgecolor="green", linewidth=1.5),
+                zorder=11,
+            )
+
+        # --- 5. Finalize plot ---
+        ax.set_xlim(c_min - 0.5, c_max + 0.5)
+        if row_origin == "top":
+            # Rows increase downward: invert Y so larger r appears lower
+            ax.set_ylim(r_max + 0.5, r_min - 0.5)
+            y_label = "Row (r) [down]"
+        else:
+            ax.set_ylim(r_min - 0.5, r_max + 0.5)
+            y_label = "Row (r)"
+        ax.set_aspect("equal")
+        ax.grid(True, alpha=0.3, linestyle="--")
+        ax.set_xlabel("Column (c)", fontsize=10)
+        ax.set_ylabel(y_label, fontsize=10)
+
+        solution_status = "WITH SOLUTION" if self.edges_output is not None else "NO SOLUTION"
+        ax.set_title(
+            f"PCST Full Grid: {net_name} ({solution_status})\n"
+            f"Extent r:[{r_min},{r_max}] c:[{c_min},{c_max}]  Nodes:{len(prizes)}  Edges:{len(edges)}",
+            fontsize=12,
+            fontweight="bold",
+        )
+
+        from matplotlib.lines import Line2D
+        legend_elements = [
+            Line2D([0],[0], marker="*", color="w", markerfacecolor="gold", markersize=15, markeredgecolor="red", markeredgewidth=2, label="Root Terminal"),
+            Line2D([0],[0], marker="o", color="w", markerfacecolor="gold", markersize=12, markeredgecolor="darkgoldenrod", markeredgewidth=2, label="Prize Node"),
+            Line2D([0],[0], marker="o", color="w", markerfacecolor="lightgreen", markersize=10, markeredgecolor="darkgreen", markeredgewidth=2, label="In Solution"),
+            Line2D([0],[0], color="green", linewidth=3, label="Selected Edge"),
+            Line2D([0],[0], color="red", linewidth=2, label="Turn Edge"),
+            Line2D([0],[0], color="blue", linewidth=1, alpha=0.5, label="Normal Edge"),
+        ]
+        ax.legend(handles=legend_elements, loc="upper right", fontsize=8, framealpha=0.9)
+
+        # Save SVG
+        filename = f"pcst_full_{net_name}"
+        filename = self.router.clean_hierarchical_name(filename) + ".svg"
+        filepath = output_path / filename
+        plt.savefig(filepath, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        log.info(f"Saved full-grid SVG: {filepath}")
+
+    def _visualize_terminal_region(
+        self, terminal, net_name, edges, prizes, costs, root, selected_edges_set, grid_size, output_path, row_origin: str = "top"
+    ):
+        """Create focused visualization around a single terminal
+        Args:
+            row_origin: "top" means rows increase downward; "bottom" means rows increase upward.
+        """
+
+        # Note: terminal.pt uses (x, y). For plotting we use (row=r=y, col=c=x)
+        term_r, term_c = terminal.pt.y, terminal.pt.x
         term_axis = self.router.DIR_TO_AXIS[terminal.direction]
 
         # Calculate grid bounds around terminal
@@ -88,16 +302,17 @@ class PCSTGridDebugger:
         blockage_cells = set(self.router.coords_inside_poly(self.router.obstacles))
         halo_cells = set(self.router.coords_inside_poly(self.router.halo_geoms))
 
-        # Filter cells in view
-        view_cells = [(r, c) for r, c in all_grid_cells if r_min <= r <= r_max and c_min <= c <= c_max]
+        # Filter cells in view (geometry gives (x,y)); we want r=y, c=x
+        view_cells = [(x, y) for x, y in all_grid_cells if r_min <= y <= r_max and c_min <= x <= c_max]
 
         # --- 1. Draw grid cells ---
-        for r, c in view_cells:
+        for x, y in view_cells:
+            r, c = y, x
             # Determine cell color
-            if (r, c) in blockage_cells:
+            if (x, y) in blockage_cells:
                 color = "red"
                 alpha = 0.3
-            elif (r, c) in halo_cells:
+            elif (x, y) in halo_cells:
                 color = "orange"
                 alpha = 0.2
             else:
@@ -119,16 +334,17 @@ class PCSTGridDebugger:
             "EW": (0, -0.25),  # Slightly below center
         }
 
-        for r, c in view_cells:
+        for x, y in view_cells:
+            r, c = y, x
             for axis in ["NS", "EW"]:
                 try:
-                    node_id = self.router.coord_to_node_id(r, c, axis)
+                    node_id = self.router.coord_to_node_id(x, y, axis)
                 except (KeyError, AttributeError):
                     continue
 
                 dx, dy = axis_offsets[axis]
-                x, y = c + dx, r + dy
-                node_positions[node_id] = (x, y)
+                x_plot, y_plot = c + dx, r + dy
+                node_positions[node_id] = (x_plot, y_plot)
 
                 # Determine node appearance
                 has_prize = node_id < len(prizes) and prizes[node_id] > 0
@@ -266,11 +482,16 @@ class PCSTGridDebugger:
 
         # --- 5. Setup plot ---
         ax.set_xlim(c_min - 0.5, c_max + 0.5)
-        ax.set_ylim(r_min - 0.5, r_max + 0.5)
+        if row_origin == "top":
+            ax.set_ylim(r_max + 0.5, r_min - 0.5)
+            y_label = "Row (r) [down]"
+        else:
+            ax.set_ylim(r_min - 0.5, r_max + 0.5)
+            y_label = "Row (r)"
         ax.set_aspect("equal")
         ax.grid(True, alpha=0.3, linestyle="--")
         ax.set_xlabel("Column (c)", fontsize=10)
-        ax.set_ylabel("Row (r)", fontsize=10)
+        ax.set_ylabel(y_label, fontsize=10)
 
         # Title
         solution_status = "WITH SOLUTION" if self.edges_output is not None else "NO SOLUTION"

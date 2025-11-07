@@ -174,7 +174,7 @@ class PcstRouter:
         debugger = PCSTGridDebugger(self, pcst)
         debugger.set_solution(vertices, edges_output)
         debugger.print_debug_stats(net_name)
-        debugger.visualize_grid(net_name)
+        debugger.visualize_full_grid(net_name)
 
         selected_cost = np.sum(pcst.costs[edges_output])
         log.info(f"Total Cost of Route (Weighted): {selected_cost:.0f}")
@@ -368,7 +368,7 @@ class PcstRouter:
             minx, miny, maxx, maxy = poly.bounds
             for x in range(int(minx), int(maxx) + 1):
                 for y in range(int(miny), int(maxy) + 1):
-                    if poly.contains(Point(x, y)):
+                    if poly.covers(Point(x, y)):
                         res.add((x, y))
         return res
 
@@ -436,11 +436,16 @@ class PcstRouter:
         edges_list = []
         costs_list = []
 
-        blockage_cells = set(self.coords_inside_poly(self.obstacles))
-        halo_cells = set(self.coords_inside_poly(self.halo_geoms))
-        grid_cells = list(self.coords_inside_poly([self.bounds]))
+        blockage_cells_xy = set(self.coords_inside_poly(self.obstacles))
+        halo_cells_xy = set(self.coords_inside_poly(self.halo_geoms))
+        grid_cells_xy = list(self.coords_inside_poly([self.bounds]))
 
-        log.info(f"routing using {len(grid_cells)} grid cells")
+        # Remap geometry coords (x,y) to router coords (r=y, c=x)
+        grid_cells = [(y, x) for (x, y) in grid_cells_xy]
+        blockage_cells_rc = set((y, x) for (x, y) in blockage_cells_xy)
+        halo_cells_rc = set((y, x) for (x, y) in halo_cells_xy)
+
+        log.info(f"routing {net_name} using {len(grid_cells)} grid cells")
 
         # --- 1. Create nodes and intra-cell edges (turns) ---
         for r, c in grid_cells:
@@ -467,9 +472,9 @@ class PcstRouter:
 
                     # Determine cost based on blockage/halo
                     cost = self.cost.base
-                    if (r, c) in blockage_cells or (r_b, c_b) in blockage_cells:
+                    if (r, c) in blockage_cells_rc or (r_b, c_b) in blockage_cells_rc:
                         cost = self.cost.macro
-                    elif (r, c) in halo_cells or (r_b, c_b) in halo_cells:
+                    elif (r, c) in halo_cells_rc or (r_b, c_b) in halo_cells_rc:
                         cost = self.cost.halo
 
                     edges_list.append([node_a, node_b])

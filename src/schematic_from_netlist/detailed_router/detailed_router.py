@@ -25,7 +25,7 @@ log.basicConfig(level=log.INFO)
 class DetailedRouter:
     def __init__(self, db):
         self.db = db
-        self.router_padding = 10
+        self.router_padding = 1
 
     def route_design(self, flat=False):
         log.info("Routing design using PCST Router")
