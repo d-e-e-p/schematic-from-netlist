@@ -123,6 +123,10 @@ class PcstRouter:
         self.DIR_MAP = {"N": 0, "E": 1, "S": 2, "W": 3}
         self.DIR_VEC = {"N": (-1, 0), "E": (0, 1), "S": (1, 0), "W": (0, -1)}
         self.OPPOSITE_DIR = {"N": "S", "S": "N", "E": "W", "W": "E"}
+        # Direction to axis mapping
+        # TODO: hunt down C dir pins
+        self.DIR_TO_AXIS = {"C": "EW", "N": "NS", "S": "NS", "E": "EW", "W": "EW"}
+        self.AXIS_TO_DIRS = {"NS": ["N", "S"], "EW": ["E", "W"]}
 
         self.coord_to_id = {}
         self.id_to_coord = {}
@@ -163,12 +167,14 @@ class PcstRouter:
         connect one net
         """
         pcst = self.setup_pcst_grid(net_name)
-        debugger = PCSTGridDebugger(self, pcst)
-        debugger.print_debug_stats(net_name)
-        debugger.visualize_grid(net_name)
 
         # Configure the solver
         vertices, edges_output = pcst.run()
+
+        debugger = PCSTGridDebugger(self, pcst)
+        debugger.set_solution(vertices, edges_output)
+        debugger.print_debug_stats(net_name)
+        debugger.visualize_grid(net_name)
 
         selected_cost = np.sum(pcst.costs[edges_output])
         log.info(f"Total Cost of Route (Weighted): {selected_cost:.0f}")
@@ -302,20 +308,6 @@ class PcstRouter:
 
         return name
 
-    def coord_to_node_id(self, r, c, direction):
-        """Converts (r, c, direction) to a unique node index."""
-        key = (r, c, direction)
-        if key not in self.coord_to_id:
-            node_id = self.next_id
-            self.coord_to_id[key] = node_id
-            self.id_to_coord[node_id] = key
-            self.next_id += 1
-        return self.coord_to_id[key]
-
-    def node_id_to_coord(self, node_id):
-        """Converts a node index back to (r, c, direction)."""
-        return self.id_to_coord[node_id]
-
     def decode_edges_to_coords(self, edges_output, edges_input, all_costs):
         """
         Decodes the selected edges into a list of simplified (R, C) segments,
@@ -388,112 +380,261 @@ class PcstRouter:
                     res.add((int(x), int(y)))
         return res
 
+    def coord_to_node_id(self, r, c, axis_or_direction):
+        """
+        Converts (r, c, axis) to a unique node index.
+
+        Args:
+            r, c: Grid coordinates
+            axis_or_direction: Either 'NS', 'EW' (axis) or 'N', 'S', 'E', 'W' (direction)
+
+        Returns:
+            node_id: Unique integer node identifier
+        """
+        # Convert direction to axis if needed
+        if axis_or_direction in self.DIR_TO_AXIS:
+            axis = self.DIR_TO_AXIS[axis_or_direction]
+        else:
+            axis = axis_or_direction
+
+        key = (r, c, axis)
+        if key not in self.coord_to_id:
+            node_id = self.next_id
+            self.coord_to_id[key] = node_id
+            self.id_to_coord[node_id] = key
+            self.next_id += 1
+        return self.coord_to_id[key]
+
+    def node_id_to_coord(self, node_id):
+        """
+        Converts a node index back to (r, c, axis).
+
+        Returns:
+            (r, c, axis): Tuple with row, column, and axis ('NS' or 'EW')
+        """
+        return self.id_to_coord[node_id]
+
     def setup_pcst_grid(self, net_name):
         """
-        creates custom cost grid for each net
+        Creates optimized cost grid with merged opposite-direction nodes.
+
+        Graph structure:
+        - 2 nodes per cell: NS (North-South axis) and EW (East-West axis)
+        - Intra-cell edges: NS ↔ EW with turn cost
+        - Inter-cell edges: Axis-aligned connections with base/blockage/halo costs
+
+        Returns:
+            edges: np.array of [node_a, node_b] pairs
+            prizes: np.array of prize values per node
+            costs: np.array of edge costs
+            root: Root node ID for PCST
+            num_clusters: Number of clusters (always 1)
         """
 
-        log.info(f"Creating detailed route grid for {net_name}")
+        log.info(f"Creating optimized route grid for {net_name}")
 
         edges_list = []
         costs_list = []
 
-        blockage_cells = self.coords_inside_poly(self.obstacles)
-        halo_cells = self.coords_inside_poly(self.halo_geoms)
-        grid_cells = self.coords_inside_poly([self.bounds])
-        other_route_cells = self.coords_from_multilinestring(self.other_paths)
+        blockage_cells = set(self.coords_inside_poly(self.obstacles))
+        halo_cells = set(self.coords_inside_poly(self.halo_geoms))
+        grid_cells = list(self.coords_inside_poly([self.bounds]))
+
         log.info(f"routing using {len(grid_cells)} grid cells")
 
-        # --- 1. Edge & Cost Generation ---
+        # --- 1. Create nodes and intra-cell edges (turns) ---
         for r, c in grid_cells:
-            # A. Intra-Cell Edges (Turns): Connects all 4 D-Nodes within the same cell
-            for dir_from in self.DIR_MAP.keys():
-                for dir_to in self.DIR_MAP.keys():
-                    if dir_from == dir_to:
-                        continue  # No cost for continuing straight
+            # Create two merged nodes per cell
+            node_ns = self.coord_to_node_id(r, c, "NS")
+            node_ew = self.coord_to_node_id(r, c, "EW")
 
-                    # Connection between D-Nodes within the same cell
-                    node_a = self.coord_to_node_id(r, c, dir_from)
-                    node_b = self.coord_to_node_id(r, c, dir_to)
+            # Intra-cell edge: Turn between NS and EW axes
+            # This represents a 90-degree turn
+            edges_list.append([node_ns, node_ew])
+            costs_list.append(self.cost.turn)
 
-                    cost = 0  # Default cost is free for internal movement
+        # --- 2. Inter-cell edges (straight movement between adjacent cells) ---
+        grid_cells_set = set(grid_cells)
 
-                    # Check for 90-degree turn: The direction from is NOT the opposite of the direction to
-                    # and the two directions are NOT the same.
-                    is_turn = dir_from != self.OPPOSITE_DIR.get(dir_to)
-                    is_straight_through = dir_from == self.OPPOSITE_DIR.get(dir_to)
+        for r, c in grid_cells:
+            # North-South axis connections
+            # Connect NS node at (r,c) to NS nodes in adjacent cells (above/below)
+            for dr in [-1, 1]:  # North and South
+                r_b, c_b = r + dr, c
+                if (r_b, c_b) in grid_cells_set:
+                    node_a = self.coord_to_node_id(r, c, "NS")
+                    node_b = self.coord_to_node_id(r_b, c_b, "NS")
 
-                    if is_turn and not is_straight_through:
-                        # 90-degree turn (e.g., N->E, E->S)
-                        cost = self.cost.turn
-                    elif is_straight_through:
-                        # 180-degree pass-through (e.g., N->S). Cost 0 for D-Node transition.
-                        cost = 0.0
-                    else:
-                        # This should cover 90-degree turns and self-loops (which are skipped above)
-                        cost = self.cost.turn
-
-                    # NOTE: This implementation is simplified. A full router would ensure N->N (self-loop) is skipped
-                    # and often only connect adjacent D-Nodes. Given the constraints, we use the
-                    # N-S, E-W axis to define the straight-through path.
+                    # Determine cost based on blockage/halo
+                    cost = self.cost.base
+                    if (r, c) in blockage_cells or (r_b, c_b) in blockage_cells:
+                        cost = self.cost.macro
+                    elif (r, c) in halo_cells or (r_b, c_b) in halo_cells:
+                        cost = self.cost.halo
 
                     edges_list.append([node_a, node_b])
                     costs_list.append(cost)
 
-            # B. Inter-Cell Edges (Movement): Connects D-Nodes in adjacent cells
-            for dir_from, (dr, dc) in self.DIR_VEC.items():
-                r_b, c_b = r + dr, c + dc
+            # East-West axis connections
+            # Connect EW node at (r,c) to EW nodes in adjacent cells (left/right)
+            for dc in [-1, 1]:  # West and East
+                r_b, c_b = r, c + dc
+                if (r_b, c_b) in grid_cells_set:
+                    node_a = self.coord_to_node_id(r, c, "EW")
+                    node_b = self.coord_to_node_id(r_b, c_b, "EW")
 
-                # Node A is the directional node *at* (r, c)
-                node_a = self.coord_to_node_id(r, c, dir_from)
+                    # Determine cost based on blockage/halo
+                    cost = self.cost.base
+                    if (r, c) in blockage_cells or (r_b, c_b) in blockage_cells:
+                        cost = self.cost.macro
+                    elif (r, c) in halo_cells or (r_b, c_b) in halo_cells:
+                        cost = self.cost.halo
 
-                # Node B is the directional node *entering* (r_b, c_b) from the opposite direction
-                dir_to = self.OPPOSITE_DIR[dir_from]
-                node_b = self.coord_to_node_id(r_b, c_b, dir_to)
-
-                # Base cost is 1 unit of length
-                cost = self.cost.base
-                # Apply blockage cost if *this segment* is in the blockage
-                if (r, c) in blockage_cells or (r_b, c_b) in blockage_cells:
-                    cost = self.cost.macro
-                elif (r, c) in halo_cells or (r_b, c_b) in halo_cells:
-                    cost = self.cost.halo
-
-                # Add edge (a->b and b->a are added for undirected graph)
-                edges_list.append([node_a, node_b])
-                costs_list.append(cost)
+                    edges_list.append([node_a, node_b])
+                    costs_list.append(cost)
 
         edges = np.array(edges_list, dtype=np.int64)
         costs = np.array(costs_list, dtype=np.int64)
 
-        # We set prize on ALL directional nodes in the target cell to simplify connection
+        # --- 3. Map terminals to merged nodes ---
         required_terminals = []
         for term in self.terminals:
             r, c = term.pt.x, term.pt.y
-            dir = term.direction
-            required_terminals.append(self.coord_to_node_id(r, c, dir))
+            direction = term.direction
 
-        # just choose the first as the root index
-        # TODO: find optimal terminal to start from
+            # Convert direction to axis (handles both 'N'/'S' and 'E'/'W')
+            axis = self.DIR_TO_AXIS.get(direction)
+            if axis is None:
+                raise ValueError(f"Unknown terminal direction: {direction}")
+
+            node_id = self.coord_to_node_id(r, c, axis)
+            required_terminals.append(node_id)
+
+        # Choose first terminal as root
         root = required_terminals[0]
 
-        # Max shortest path cost (8 straight segments + max 1 turn) is ~13.
-        # Set prize higher than the worst single-path cost to force connectivity.
-
-        prizes = np.zeros(self.next_id + 1, dtype=np.int64)
+        # Set prizes on terminal nodes
+        prizes = np.zeros(self.next_id, dtype=np.int64)
         for node_id in required_terminals:
             prizes[node_id] = self.cost.prize
 
-        log.info(f"Required Terminals: {self.terminals} (Total Prize: {self.cost.prize * len(required_terminals):.0f})")
-        log.info(f"Blockage Cost: {self.cost.macro}. Turn Cost: {self.cost.turn}. Normal Cost: {self.cost.base}")
+        # Calculate theoretical savings
+        theoretical_nodes = len(grid_cells) * 4
+        actual_nodes = self.next_id
 
-        pcst_inputs = PcstInputs()
-        pcst_inputs.edges = edges
-        pcst_inputs.prizes = prizes
-        pcst_inputs.costs = costs
-        pcst_inputs.root = root
+        log.info(f"Optimized Grid Stats:")
+        log.info(f"  Grid cells: {len(grid_cells)}")
+        log.info(f"  Nodes (4-dir design): {theoretical_nodes}")
+        log.info(f"  Nodes (optimized): {actual_nodes} ({actual_nodes / theoretical_nodes * 100:.1f}%)")
+        log.info(f"  Edges: {len(edges)}")
+        log.info(f"  Required Terminals: {len(required_terminals)} (Total Prize: {self.cost.prize * len(required_terminals):.0f})")
+        log.info(f"  Costs: Base={self.cost.base}, Turn={self.cost.turn}, Halo={self.cost.halo}, Macro={self.cost.macro}")
+        pcst = PcstInputs(edges, prizes, costs, root)
+        return pcst
 
-        return pcst_inputs
+    def decode_edges_to_coords(self, edges_output, edges_input, all_costs):
+        """
+        Decodes the selected edges into a list of (r, c) coordinate segments.
+
+        With merged nodes:
+        - Inter-cell edges represent physical wire segments
+        - Intra-cell edges represent turns (no physical segment)
+
+        Args:
+            edges_output: List of edge indices selected by PCST
+            edges_input: Array of [node_a, node_b] edge pairs
+            all_costs: Array of edge costs
+
+        Returns:
+            coord_segments: List of ((r1, c1), (r2, c2)) tuples representing wire segments
+        """
+        coord_segments = []
+        unique_segments = set()
+        turn_points = []  # Track where turns occur
+
+        for edge_index in edges_output:
+            node_a, node_b = edges_input[edge_index]
+            cost = all_costs[edge_index]
+
+            try:
+                r1, c1, axis1 = self.node_id_to_coord(node_a)
+                r2, c2, axis2 = self.node_id_to_coord(node_b)
+            except (KeyError, ValueError):
+                log.warning(f"Invalid node ID in edge {edge_index}: {node_a} or {node_b}")
+                continue
+
+            # Inter-Cell Movement (Physical wire segment)
+            # This occurs when moving between different cells
+            if r1 != r2 or c1 != c2:
+                # Create canonical segment representation
+                if (r1, c1) < (r2, c2):
+                    segment = ((r1, c1), (r2, c2))
+                else:
+                    segment = ((r2, c2), (r1, c1))
+
+                if segment not in unique_segments:
+                    coord_segments.append(segment)
+                    unique_segments.add(segment)
+
+            # Intra-Cell Turn (Axis change within same cell)
+            # This occurs when switching between NS and EW axes
+            elif axis1 != axis2:
+                # Record turn location for debugging/visualization
+                turn_points.append((r1, c1, axis1, axis2))
+                # No physical segment added - turn is implicit at this cell
+                log.debug(f"Turn at ({r1},{c1}): {axis1} → {axis2}")
+
+        log.info(f"Decoded {len(coord_segments)} wire segments and {len(turn_points)} turns")
+
+        return coord_segments
+
+    def get_path_directions(self, edges_output, edges_input):
+        """
+        Extract the sequence of directions taken by the path.
+        Useful for debugging and visualization.
+
+        Returns:
+            path_info: List of (r, c, axis, cost) tuples in path order
+        """
+        # Build adjacency for path reconstruction
+        from collections import defaultdict
+
+        graph = defaultdict(list)
+
+        for edge_index in edges_output:
+            node_a, node_b = edges_input[edge_index]
+            try:
+                coord_a = self.node_id_to_coord(node_a)
+                coord_b = self.node_id_to_coord(node_b)
+                graph[coord_a].append(coord_b)
+                graph[coord_b].append(coord_a)
+            except (KeyError, ValueError):
+                continue
+
+        # Simple path extraction (assumes single path)
+        path_info = []
+        visited = set()
+
+        # Start from a terminal
+        if self.terminals:
+            r, c = self.terminals[0].pt.x, self.terminals[0].pt.y
+            axis = self.DIR_TO_AXIS[self.terminals[0].direction]
+            start = (r, c, axis)
+
+            # DFS to build path
+            def dfs(node):
+                if node in visited:
+                    return
+                visited.add(node)
+                path_info.append(node)
+
+                for neighbor in graph[node]:
+                    if neighbor not in visited:
+                        dfs(neighbor)
+
+            dfs(start)
+
+        return path_info
 
     def _merge_adjacent_segments(self, paths, terminals=None, existing_paths=None):
         """Merge adjacent segments into clean orthogonal lines while avoiding overlaps"""

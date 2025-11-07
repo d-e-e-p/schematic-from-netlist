@@ -1,28 +1,54 @@
-import logging as log
+import logging
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from pathlib import Path
+from typing import Any, List, Optional, Tuple
 
 import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
-import networkx as nx
 import numpy as np
+
+log = logging.getLogger(__name__)
 
 
 class PCSTGridDebugger:
-    """Debug and visualize PCST directional grid"""
+    """Debug and visualize PCST directional grid with merged NS/EW nodes"""
 
     def __init__(self, router, pcst_inputs):
         """
         Args:
-            router: Your router object with node_id_to_coord method
+            router: Your router object with node_id_to_coord method and DIR_TO_AXIS mapping
             pcst_inputs: PcstInputs dataclass with edges, prizes, costs, root
         """
         self.router = router
         self.pcst_inputs = pcst_inputs
 
-    def visualize_grid(self, net_name, save_path=None):
-        """Create comprehensive visualization of the PCST grid"""
+        # Get PCST solution if available
+        self.vertices = None
+        self.edges_output = None
+
+    def set_solution(self, vertices, edges_output):
+        """Set the PCST solution for visualization"""
+        self.vertices = vertices
+        self.edges_output = edges_output
+
+    def visualize_grid(self, net_name, grid_size=8, output_dir="data/images/droute"):
+        """
+        Create visualization focused on each terminal showing:
+        - Grid cells around terminal
+        - All nodes (NS/EW per cell)
+        - All edges (with costs)
+        - Selected path (if solution provided)
+
+        Args:
+            net_name: Name of the net
+            grid_size: Size of grid to show around each terminal (e.g., 8x8)
+            output_dir: Directory to save images
+        """
+
+        # Create output directory
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
 
         pcst_inputs = self.pcst_inputs
         edges = np.array(pcst_inputs.edges)
@@ -30,336 +56,281 @@ class PCSTGridDebugger:
         costs = np.array(pcst_inputs.costs)
         root = pcst_inputs.root
 
-        # Create figure with subplots
-        fig = plt.figure(figsize=(20, 12))
-        gs = fig.add_gridspec(2, 3, hspace=0.3, wspace=0.3)
+        # Get selected edges if solution exists
+        selected_edges_set = set()
+        if self.edges_output is not None:
+            selected_edges_set = set(self.edges_output)
 
-        # 1. Cell-level grid with D-nodes
-        ax1 = fig.add_subplot(gs[0, 0])
-        self._plot_cell_dnodes(ax1, prizes, root)
-
-        # 2. Edge cost heatmap
-        ax2 = fig.add_subplot(gs[0, 1])
-        self._plot_cost_heatmap(ax2, edges, costs)
-
-        # 3. Intra-cell connections (turns)
-        ax3 = fig.add_subplot(gs[0, 2])
-        self._plot_intra_cell_edges(ax3, edges, costs)
-
-        # 4. Inter-cell connections (movement)
-        ax4 = fig.add_subplot(gs[1, 0])
-        self._plot_inter_cell_edges(ax4, edges, costs)
-
-        # 5. Terminal prizes
-        ax5 = fig.add_subplot(gs[1, 1])
-        self._plot_terminal_prizes(ax5, prizes, root)
-
-        # 6. Graph structure
-        ax6 = fig.add_subplot(gs[1, 2])
-        self._plot_graph_structure(ax6, edges, costs, prizes)
-
-        plt.suptitle(f"PCST Grid Debug: {net_name}", fontsize=16, fontweight="bold")
-
-        if save_path:
-            plt.savefig(save_path, dpi=150, bbox_inches="tight")
-        plt.show()
-
-    def _plot_cell_dnodes(self, ax, prizes, root):
-        """Plot grid cells with 4 directional nodes each"""
-        grid_cells = self.router.coords_inside_poly([self.router.bounds])
-        blockage_cells = self.router.coords_inside_poly(self.router.obstacles)
-        halo_cells = self.router.coords_inside_poly(self.router.halo_geoms)
-
-        # Convert to sets for fast lookup
-        blockage_set = set(blockage_cells)
-        halo_set = set(halo_cells)
-
-        # Draw cells
-        for r, c in grid_cells:
-            color = "lightgray"
-            if (r, c) in blockage_set:
-                color = "red"
-            elif (r, c) in halo_set:
-                color = "orange"
-
-            rect = mpatches.Rectangle((c - 0.5, r - 0.5), 1, 1, linewidth=1, edgecolor="black", facecolor=color, alpha=0.3)
-            ax.add_patch(rect)
-
-            # Draw 4 D-nodes per cell
-            d_offsets = {"N": (0, -0.3), "E": (0.3, 0), "S": (0, 0.3), "W": (-0.3, 0)}
-            for dir_name, (dx, dy) in d_offsets.items():
-                node_id = self.router.coord_to_node_id(r, c, dir_name)
-
-                # Highlight prize nodes
-                if node_id < len(prizes) and prizes[node_id] > 0:
-                    marker = "*" if node_id == root else "o"
-                    color_node = "gold"
-                    size = 8 if node_id == root else 6
-                else:
-                    marker = "o"
-                    color_node = "blue"
-                    size = 4
-
-                ax.plot(c + dx, r + dy, marker, markersize=size, color=color_node)
-                ax.text(c + dx + 0.1, r + dy + 0.1, f"{dir_name}", fontsize=5, ha="left", va="bottom", color="darkblue")
-
-        # Mark terminals
+        # Process each terminal
         for term in self.router.terminals:
-            r, c = term.pt.x, term.pt.y
-            ax.plot(c, r, "s", markersize=12, color="green", markeredgewidth=2, fillstyle="none", label="Terminal")
-            ax.text(c, r - 0.6, f"{term.direction}", fontsize=8, ha="center", color="green", fontweight="bold")
+            self._visualize_terminal_region(term, net_name, edges, prizes, costs, root, selected_edges_set, grid_size, output_path)
 
-        ax.set_aspect("equal")
-        ax.grid(True, alpha=0.3)
-        ax.set_title("Cell Grid with D-Nodes\n(Gold = Prize, Blue = Normal)")
-        ax.legend()
+        log.info(f"Saved {len(self.router.terminals)} debug images to {output_path}")
 
-    def _plot_cost_heatmap(self, ax, edges, costs):
-        """Show cost distribution across the grid"""
-        grid_cells = list(self.router.coords_inside_poly([self.router.bounds]))
+    def _visualize_terminal_region(
+        self, terminal, net_name, edges, prizes, costs, root, selected_edges_set, grid_size, output_path
+    ):
+        """Create focused visualization around a single terminal"""
 
-        if not grid_cells:
-            ax.text(0.5, 0.5, "No grid cells", ha="center", va="center")
-            return
+        term_r, term_c = terminal.pt.x, terminal.pt.y
+        term_axis = self.router.DIR_TO_AXIS[terminal.direction]
 
-        # Create cost matrix
-        rows = [r for r, c in grid_cells]
-        cols = [c for r, c in grid_cells]
-        min_r, max_r = min(rows), max(rows)
-        min_c, max_c = min(cols), max(cols)
+        # Calculate grid bounds around terminal
+        half_size = grid_size // 2
+        r_min, r_max = term_r - half_size, term_r + half_size
+        c_min, c_max = term_c - half_size, term_c + half_size
 
-        cost_matrix = np.zeros((max_r - min_r + 1, max_c - min_c + 1))
-        count_matrix = np.zeros((max_r - min_r + 1, max_c - min_c + 1))
+        # Create figure
+        fig, ax = plt.subplots(figsize=(12, 12))
 
-        # Aggregate costs per cell
-        for i, (node_a, node_b) in enumerate(edges):
-            r_a, c_a, dir_a = self.router.node_id_to_coord(node_a)
-            r_b, c_b, dir_b = self.router.node_id_to_coord(node_b)
-
-            # Add cost to both cells involved
-            if min_r <= r_a <= max_r and min_c <= c_a <= max_c:
-                cost_matrix[r_a - min_r, c_a - min_c] += costs[i]
-                count_matrix[r_a - min_r, c_a - min_c] += 1
-
-            if min_r <= r_b <= max_r and min_c <= c_b <= max_c:
-                cost_matrix[r_b - min_r, c_b - min_c] += costs[i]
-                count_matrix[r_b - min_r, c_b - min_c] += 1
-
-        # Average the costs
-        with np.errstate(divide="ignore", invalid="ignore"):
-            cost_matrix = np.divide(cost_matrix, count_matrix)
-            cost_matrix[~np.isfinite(cost_matrix)] = 0
-
-        im = ax.imshow(cost_matrix, cmap="RdYlGn_r", aspect="auto", origin="lower")
-        ax.set_title("Average Edge Cost per Cell")
-        ax.set_xlabel("Column")
-        ax.set_ylabel("Row")
-        plt.colorbar(im, ax=ax, label="Avg Cost")
-
-    def _plot_intra_cell_edges(self, ax, edges, costs):
-        """Visualize turn costs within cells"""
-        # Sample a few cells to show detail
-        grid_cells = list(self.router.coords_inside_poly([self.router.bounds]))
-
-        # Choose up to 4 representative cells
-        num_samples = min(4, len(grid_cells))
-        if num_samples == 0:
-            ax.text(0.5, 0.5, "No grid cells", ha="center", va="center")
-            ax.axis("off")
-            return
-
-        sample_cells = grid_cells[:num_samples]
-
-        for idx, (r, c) in enumerate(sample_cells):
-            row_idx = idx // 2
-            col_idx = idx % 2
-            ax_sub = plt.subplot(2, 2, idx + 1)
-
-            # Draw D-nodes
-            d_offsets = {"N": (0, -0.3), "E": (0.3, 0), "S": (0, 0.3), "W": (-0.3, 0)}
-            node_pos = {}
-            for dir_name, (dx, dy) in d_offsets.items():
-                node_id = self.router.coord_to_node_id(r, c, dir_name)
-                node_pos[node_id] = (dx, dy)
-                ax_sub.plot(dx, dy, "o", markersize=10, color="blue")
-                ax_sub.text(dx, dy, dir_name, fontsize=8, ha="center", va="center", color="white", fontweight="bold")
-
-            # Draw intra-cell edges
-            for i, (node_a, node_b) in enumerate(edges):
-                r_a, c_a, dir_a = self.router.node_id_to_coord(node_a)
-                r_b, c_b, dir_b = self.router.node_id_to_coord(node_b)
-
-                # Only intra-cell edges for this cell
-                if r_a == r and c_a == c and r_b == r and c_b == c:
-                    if node_a in node_pos and node_b in node_pos:
-                        x1, y1 = node_pos[node_a]
-                        x2, y2 = node_pos[node_b]
-
-                        # Color by cost
-                        if costs[i] == 0:
-                            color = "green"
-                            alpha = 0.4
-                        elif costs[i] == self.router.cost.turn:
-                            color = "red"
-                            alpha = 0.7
-                        else:
-                            color = "orange"
-                            alpha = 0.6
-
-                        # Draw curved arrow
-                        ax_sub.annotate(
-                            "",
-                            xy=(x2, y2),
-                            xytext=(x1, y1),
-                            arrowprops=dict(arrowstyle="->", color=color, alpha=alpha, lw=2, connectionstyle="arc3,rad=0.3"),
-                        )
-
-                        # Label cost at midpoint
-                        mid_x, mid_y = (x1 + x2) / 2, (y1 + y2) / 2
-                        ax_sub.text(
-                            mid_x,
-                            mid_y,
-                            f"{int(costs[i])}",
-                            fontsize=6,
-                            color=color,
-                            fontweight="bold",
-                            bbox=dict(boxstyle="round,pad=0.2", facecolor="white", alpha=0.7),
-                        )
-
-            ax_sub.set_xlim(-0.5, 0.5)
-            ax_sub.set_ylim(-0.5, 0.5)
-            ax_sub.set_aspect("equal")
-            ax_sub.set_title(f"Cell ({r},{c}) - Turn Costs\nGreen=0, Red=Turn", fontsize=8)
-            ax_sub.grid(True, alpha=0.3)
-
-        ax.axis("off")
-
-    def _plot_inter_cell_edges(self, ax, edges, costs):
-        """Show movement between cells"""
-        grid_cells = self.router.coords_inside_poly([self.router.bounds])
+        # Get all cells and context
+        all_grid_cells = set(self.router.coords_inside_poly([self.router.bounds]))
         blockage_cells = set(self.router.coords_inside_poly(self.router.obstacles))
         halo_cells = set(self.router.coords_inside_poly(self.router.halo_geoms))
 
-        # Draw cells
-        for r, c in grid_cells:
-            color = "lightgray"
+        # Filter cells in view
+        view_cells = [(r, c) for r, c in all_grid_cells if r_min <= r <= r_max and c_min <= c <= c_max]
+
+        # --- 1. Draw grid cells ---
+        for r, c in view_cells:
+            # Determine cell color
             if (r, c) in blockage_cells:
                 color = "red"
+                alpha = 0.3
             elif (r, c) in halo_cells:
                 color = "orange"
+                alpha = 0.2
+            else:
+                color = "lightgray"
+                alpha = 0.1
 
-            rect = mpatches.Rectangle((c - 0.5, r - 0.5), 1, 1, linewidth=1, edgecolor="gray", facecolor=color, alpha=0.2)
+            rect = mpatches.Rectangle((c - 0.5, r - 0.5), 1, 1, linewidth=1, edgecolor="gray", facecolor=color, alpha=alpha)
             ax.add_patch(rect)
-            ax.plot(c, r, "o", markersize=4, color="blue")
 
-        # Draw inter-cell edges
-        edge_types = {"base": [], "halo": [], "macro": []}
+            # Label cell coordinates
+            ax.text(c, r, f"{r},{c}", fontsize=6, ha="center", va="center", color="gray", alpha=0.5)
 
-        for i, (node_a, node_b) in enumerate(edges):
-            r_a, c_a, dir_a = self.router.node_id_to_coord(node_a)
-            r_b, c_b, dir_b = self.router.node_id_to_coord(node_b)
+        # --- 2. Draw nodes (NS and EW per cell) ---
+        node_positions = {}  # node_id -> (x, y) for edge drawing
 
-            # Only inter-cell edges
-            if not (r_a == r_b and c_a == c_b):
-                if costs[i] == self.router.cost.base:
-                    edge_types["base"].append(((c_a, r_a), (c_b, r_b)))
-                elif costs[i] == self.router.cost.halo:
-                    edge_types["halo"].append(((c_a, r_a), (c_b, r_b)))
+        # Offsets for NS and EW nodes within cell
+        axis_offsets = {
+            "NS": (0, 0.25),  # Slightly above center
+            "EW": (0, -0.25),  # Slightly below center
+        }
+
+        for r, c in view_cells:
+            for axis in ["NS", "EW"]:
+                try:
+                    node_id = self.router.coord_to_node_id(r, c, axis)
+                except (KeyError, AttributeError):
+                    continue
+
+                dx, dy = axis_offsets[axis]
+                x, y = c + dx, r + dy
+                node_positions[node_id] = (x, y)
+
+                # Determine node appearance
+                has_prize = node_id < len(prizes) and prizes[node_id] > 0
+                is_root = node_id == root
+                is_in_solution = self.vertices is not None and node_id in self.vertices
+
+                # Node styling
+                if is_root:
+                    marker, size, color = "*", 200, "gold"
+                    edgecolor, linewidth = "red", 3
+                elif has_prize:
+                    marker, size, color = "o", 150, "gold"
+                    edgecolor, linewidth = "darkgoldenrod", 2
+                elif is_in_solution:
+                    marker, size, color = "o", 100, "lightgreen"
+                    edgecolor, linewidth = "darkgreen", 2
                 else:
-                    edge_types["macro"].append(((c_a, r_a), (c_b, r_b)))
+                    marker, size, color = "o", 80, "lightblue"
+                    edgecolor, linewidth = "blue", 1
 
-        # Plot edges by type
-        for (x1, y1), (x2, y2) in edge_types["base"]:
-            ax.plot([x1, x2], [y1, y2], "-", color="green", alpha=0.3, linewidth=1)
-        for (x1, y1), (x2, y2) in edge_types["halo"]:
-            ax.plot([x1, x2], [y1, y2], "-", color="orange", alpha=0.5, linewidth=1.5)
-        for (x1, y1), (x2, y2) in edge_types["macro"]:
-            ax.plot([x1, x2], [y1, y2], "-", color="red", alpha=0.5, linewidth=2)
+                ax.scatter(x, y, marker=marker, s=size, c=color, edgecolors=edgecolor, linewidths=linewidth, zorder=5)
 
-        # Create legend
+                # Label node
+                label = f"{axis}\n{node_id}"
+                if has_prize:
+                    label += f"\n★{int(prizes[node_id])}"
+
+                ax.text(
+                    x + 0.15,
+                    y + 0.15,
+                    label,
+                    fontsize=7,
+                    ha="left",
+                    va="bottom",
+                    bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.8, edgecolor=edgecolor, linewidth=0.5),
+                    zorder=6,
+                )
+
+        # --- 3. Draw edges ---
+        for edge_idx, (node_a, node_b) in enumerate(edges):
+            # Check if nodes are in view
+            if node_a not in node_positions or node_b not in node_positions:
+                continue
+
+            x1, y1 = node_positions[node_a]
+            x2, y2 = node_positions[node_b]
+
+            # Get edge info
+            try:
+                r1, c1, axis1 = self.router.node_id_to_coord(node_a)
+                r2, c2, axis2 = self.router.node_id_to_coord(node_b)
+            except (KeyError, ValueError):
+                continue
+
+            is_selected = edge_idx in selected_edges_set
+            cost = costs[edge_idx]
+
+            # Determine edge type
+            is_inter_cell = r1 != r2 or c1 != c2
+            is_turn = not is_inter_cell and axis1 != axis2
+
+            # Edge styling
+            if is_selected:
+                color = "green"
+                linewidth = 3
+                alpha = 1.0
+                zorder = 4
+            elif is_turn:
+                color = "red"
+                linewidth = 1.5
+                alpha = 0.6
+                zorder = 2
+            elif cost == self.router.cost.base:
+                color = "blue"
+                linewidth = 1
+                alpha = 0.3
+                zorder = 1
+            elif cost == self.router.cost.halo:
+                color = "orange"
+                linewidth = 1.5
+                alpha = 0.5
+                zorder = 2
+            else:  # macro/blockage
+                color = "red"
+                linewidth = 2
+                alpha = 0.5
+                zorder = 2
+
+            # Draw edge
+            if is_turn:
+                # Curved arrow for turns
+                ax.annotate(
+                    "",
+                    xy=(x2, y2),
+                    xytext=(x1, y1),
+                    arrowprops=dict(arrowstyle="->", color=color, lw=linewidth, alpha=alpha, connectionstyle="arc3,rad=0.3"),
+                    zorder=zorder,
+                )
+            else:
+                # Straight line for inter-cell movement
+                ax.plot([x1, x2], [y1, y2], "-", color=color, linewidth=linewidth, alpha=alpha, zorder=zorder)
+
+            # Label edge cost if selected or turn
+            if is_selected or is_turn:
+                mid_x, mid_y = (x1 + x2) / 2, (y1 + y2) / 2
+                ax.text(
+                    mid_x,
+                    mid_y,
+                    f"{int(cost)}",
+                    fontsize=6,
+                    ha="center",
+                    va="center",
+                    bbox=dict(boxstyle="round,pad=0.2", facecolor="white", alpha=0.9, edgecolor=color, linewidth=1),
+                    zorder=7,
+                )
+
+        # --- 4. Highlight terminal ---
+        ax.scatter(
+            term_c, term_r, marker="s", s=400, facecolors="none", edgecolors="green", linewidths=4, zorder=10, label="Terminal"
+        )
+
+        term_label = f"{terminal.name}\n({term_r},{term_c})\n{terminal.direction}→{term_axis}"
+        ax.text(
+            term_c,
+            term_r - 0.6,
+            term_label,
+            fontsize=10,
+            ha="center",
+            fontweight="bold",
+            color="green",
+            bbox=dict(boxstyle="round,pad=0.5", facecolor="white", edgecolor="green", linewidth=2),
+            zorder=11,
+        )
+
+        # --- 5. Setup plot ---
+        ax.set_xlim(c_min - 0.5, c_max + 0.5)
+        ax.set_ylim(r_min - 0.5, r_max + 0.5)
+        ax.set_aspect("equal")
+        ax.grid(True, alpha=0.3, linestyle="--")
+        ax.set_xlabel("Column (c)", fontsize=10)
+        ax.set_ylabel("Row (r)", fontsize=10)
+
+        # Title
+        solution_status = "WITH SOLUTION" if self.edges_output is not None else "NO SOLUTION"
+        ax.set_title(
+            f"PCST Debug: {net_name} - Terminal: {terminal.name} ({solution_status})\n"
+            f"Grid: {grid_size}×{grid_size} around ({term_r},{term_c})",
+            fontsize=12,
+            fontweight="bold",
+        )
+
+        # Legend
         from matplotlib.lines import Line2D
 
         legend_elements = [
-            Line2D([0], [0], color="green", lw=2, label=f"Normal ({len(edge_types['base'])})"),
-            Line2D([0], [0], color="orange", lw=2, label=f"Halo ({len(edge_types['halo'])})"),
-            Line2D([0], [0], color="red", lw=2, label=f"Blockage ({len(edge_types['macro'])})"),
+            Line2D(
+                [0],
+                [0],
+                marker="*",
+                color="w",
+                markerfacecolor="gold",
+                markersize=15,
+                markeredgecolor="red",
+                markeredgewidth=2,
+                label="Root Terminal",
+            ),
+            Line2D(
+                [0],
+                [0],
+                marker="o",
+                color="w",
+                markerfacecolor="gold",
+                markersize=12,
+                markeredgecolor="darkgoldenrod",
+                markeredgewidth=2,
+                label="Prize Node",
+            ),
+            Line2D(
+                [0],
+                [0],
+                marker="o",
+                color="w",
+                markerfacecolor="lightgreen",
+                markersize=10,
+                markeredgecolor="darkgreen",
+                markeredgewidth=2,
+                label="In Solution",
+            ),
+            Line2D([0], [0], color="green", linewidth=3, label="Selected Edge"),
+            Line2D([0], [0], color="red", linewidth=2, label="Turn Edge"),
+            Line2D([0], [0], color="blue", linewidth=1, alpha=0.5, label="Normal Edge"),
         ]
+        ax.legend(handles=legend_elements, loc="upper right", fontsize=8, framealpha=0.9)
 
-        ax.set_aspect("equal")
-        ax.grid(True, alpha=0.3)
-        ax.set_title("Inter-Cell Movement Edges")
-        ax.legend(handles=legend_elements, loc="best")
+        # Save
+        filename = f"pcst_debug_{net_name}_{terminal.name}.png"
+        filename = self.router.clean_hierarchical_name(filename)
+        filepath = output_path / filename
+        plt.savefig(filepath, dpi=150, bbox_inches="tight")
+        plt.close(fig)
 
-    def _plot_terminal_prizes(self, ax, prizes, root):
-        """Show prize distribution"""
-        grid_cells = self.router.coords_inside_poly([self.router.bounds])
-
-        # Draw cells faintly
-        for r, c in grid_cells:
-            rect = mpatches.Rectangle((c - 0.5, r - 0.5), 1, 1, linewidth=0.5, edgecolor="gray", facecolor="white", alpha=0.5)
-            ax.add_patch(rect)
-
-        # Draw all D-nodes with prizes
-        d_offsets = {"N": (0, -0.3), "E": (0.3, 0), "S": (0, 0.3), "W": (-0.3, 0)}
-
-        for node_id in range(len(prizes)):
-            if prizes[node_id] > 0:
-                r, c, dir_name = self.router.node_id_to_coord(node_id)
-                dx, dy = d_offsets[dir_name]
-
-                marker = "*" if node_id == root else "o"
-                size = 15 if node_id == root else 10
-
-                ax.plot(c + dx, r + dy, marker, markersize=size, color="gold", markeredgecolor="red", markeredgewidth=2)
-                ax.text(c + dx, r + dy - 0.2, f"{int(prizes[node_id])}", fontsize=7, ha="center", color="red", fontweight="bold")
-                ax.text(c + dx, r + dy + 0.2, f"{dir_name}\n({r},{c})", fontsize=6, ha="center", color="blue")
-
-        ax.set_aspect("equal")
-        ax.grid(True, alpha=0.3)
-        ax.set_title(f"Terminal Prizes (* = Root node {root})")
-
-    def _plot_graph_structure(self, ax, edges, costs, prizes):
-        """Show graph connectivity using NetworkX"""
-        G = nx.Graph()
-
-        # Add edges with costs
-        for i, (node_a, node_b) in enumerate(edges):
-            G.add_edge(node_a, node_b, weight=costs[i])
-
-        # Node colors based on prizes
-        node_colors = []
-        for n in G.nodes():
-            if n < len(prizes) and prizes[n] > 0:
-                node_colors.append("gold")
-            else:
-                node_colors.append("lightblue")
-
-        # Use spring layout for visualization (sample if too large)
-        if G.number_of_nodes() > 200:
-            # Sample subgraph around terminals
-            terminal_nodes = [i for i in range(len(prizes)) if prizes[i] > 0]
-            subgraph_nodes = set(terminal_nodes)
-            for term in terminal_nodes:
-                neighbors = list(G.neighbors(term))[:5]  # Get a few neighbors
-                subgraph_nodes.update(neighbors)
-            G = G.subgraph(list(subgraph_nodes))
-            ax.set_title(f"Graph Structure (Sampled)\n({G.number_of_nodes()} nodes, {G.number_of_edges()} edges)")
-        else:
-            ax.set_title(f"Graph Structure\n({G.number_of_nodes()} nodes, {G.number_of_edges()} edges)")
-
-        pos = nx.spring_layout(G, k=0.5, iterations=50, seed=42)
-
-        nx.draw(
-            G,
-            pos,
-            ax=ax,
-            node_color=node_colors[: len(G.nodes())],
-            node_size=30,
-            with_labels=False,
-            edge_color="gray",
-            alpha=0.6,
-            width=0.5,
-        )
+        log.info(f"  Saved: {filepath}")
 
     def print_debug_stats(self, net_name):
         """Print detailed statistics about the grid"""
@@ -376,7 +347,12 @@ class PCSTGridDebugger:
         log.info(f"\n📊 Graph Structure:")
         log.info(f"  Total Nodes: {len(prizes)}")
         log.info(f"  Total Edges: {len(edges)}")
-        log.info(f"  Root Node: {root} -> {self.router.node_id_to_coord(root)}")
+
+        try:
+            root_coord = self.router.node_id_to_coord(root)
+            log.info(f"  Root Node: {root} -> {root_coord}")
+        except (KeyError, ValueError):
+            log.info(f"  Root Node: {root}")
 
         log.info(f"\n💰 Cost Distribution:")
         log.info(f"  Base  cost:  {self.router.cost.base}")
@@ -398,22 +374,34 @@ class PCSTGridDebugger:
         log.info(f"  Total prize nodes: {len(terminal_nodes)}")
         log.info(f"  Total prize value: {int(prizes_array.sum())}")
         log.info(f"  Terminal details:")
-        for node_id in terminal_nodes:
-            coord = self.router.node_id_to_coord(node_id)
-            log.info(f"    Node {node_id:4d} -> {coord} (prize: {int(prizes_array[node_id])})")
+        for term in self.router.terminals:
+            try:
+                axis = self.router.DIR_TO_AXIS[term.direction]
+                node_id = self.router.coord_to_node_id(term.pt.x, term.pt.y, axis)
+                prize_val = prizes_array[node_id] if node_id < len(prizes_array) else 0
+                log.info(
+                    f"    {term.name:15s} @ ({term.pt.x},{term.pt.y}) "
+                    f"{term.direction}→{axis}  Node:{node_id:5d}  Prize:{int(prize_val):4d}"
+                )
+            except (KeyError, ValueError, AttributeError):
+                log.error(f"    {term.name:15s} @ ({term.pt.x},{term.pt.y}) {term.direction} [ERROR]")
+                breakpoint()
 
         log.info(f"\n🔍 Edge Type Breakdown:")
         intra_cell = 0
         inter_cell = 0
 
         for node_a, node_b in edges:
-            r_a, c_a, dir_a = self.router.node_id_to_coord(node_a)
-            r_b, c_b, dir_b = self.router.node_id_to_coord(node_b)
+            try:
+                r_a, c_a, axis_a = self.router.node_id_to_coord(node_a)
+                r_b, c_b, axis_b = self.router.node_id_to_coord(node_b)
 
-            if r_a == r_b and c_a == c_b:
-                intra_cell += 1
-            else:
-                inter_cell += 1
+                if r_a == r_b and c_a == c_b:
+                    intra_cell += 1
+                else:
+                    inter_cell += 1
+            except (KeyError, ValueError):
+                continue
 
         total = len(edges)
         log.info(f"  Intra-cell (turn) edges: {intra_cell:6d} ({intra_cell / total * 100:5.1f}%)")
@@ -421,20 +409,47 @@ class PCSTGridDebugger:
 
         # Analyze turn costs
         turn_edges = sum(1 for c in costs if c == self.router.cost.turn)
-        straight_edges = sum(1 for c in costs if c == 0)
+        straight_edges = sum(1 for c in costs if c == self.router.cost.base)
         log.info(f"\n🔄 Turn Analysis:")
-        log.info(f"  Zero-cost edges: {straight_edges:6d} ({straight_edges / total * 100:5.1f}%)")
-        log.info(f"  Turn-cost edges: {turn_edges:6d} ({turn_edges / total * 100:5.1f}%)")
+        log.info(f"  Base-cost edges:  {straight_edges:6d} ({straight_edges / total * 100:5.1f}%)")
+        log.info(f"  Turn-cost edges:  {turn_edges:6d} ({turn_edges / total * 100:5.1f}%)")
+
+        # Solution stats if available
+        if self.edges_output is not None:
+            log.info(f"\n✅ Solution Statistics:")
+            log.info(f"  Selected edges: {len(self.edges_output)}")
+
+            if self.vertices is not None:
+                log.info(f"  Selected nodes: {len(self.vertices)}")
+
+            # Calculate total cost
+            total_cost = sum(costs[i] for i in self.edges_output)
+            log.info(f"  Total path cost: {int(total_cost)}")
+
+            # Count turns in solution
+            solution_turns = sum(1 for i in self.edges_output if costs[i] == self.router.cost.turn)
+            log.info(f"  Turns in path: {solution_turns}")
 
         log.info(f"\n{'=' * 60}\n")
 
 
-# Usage example:
+# Usage in route_net method:
 """
-# In your router code:
-pcst = self.setup_pcst_grid(net_name)
-debugger = PCSTGridDebugger(self, pcst)
-debugger.print_debug_stats(net_name)
-debugger.visualize_grid(net_name, save_path=f'debug_{net_name}.png')
+def route_net(self, net_name: str, cost_overrides: Dict[str, Any] = None):
+    '''Connect one net'''
+    
+    # Setup PCST grid
+    pcst = self.setup_pcst_grid(net_name)
+    
+    # Run PCST solver
+    vertices, edges_output = pcst.run()
+    
+    # Debug and visualize
+    debugger = PCSTGridDebugger(self, pcst)
+    debugger.set_solution(vertices, edges_output)  # Provide solution
+    debugger.print_debug_stats(net_name)
+    debugger.visualize_grid(net_name, grid_size=8)  # Creates images per terminal
+    
+    return vertices, edges_output
 """
 
