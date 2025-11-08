@@ -308,51 +308,6 @@ class PcstRouter:
 
         return name
 
-    def decode_edges_to_coords(self, edges_output, edges_input, all_costs):
-        """
-        Decodes the selected edges into a list of simplified (R, C) segments,
-        handling the complex 4-node model.
-        """
-        coord_segments = []
-
-        # Store visited segments to deduplicate and trace the path
-        unique_segments = set()
-
-        for edge_index in edges_output:
-            node_a, node_b = edges_input[edge_index]
-            cost = all_costs[edge_index]
-
-            # Determine if it is an inter-cell move or an intra-cell turn
-            try:
-                r1, c1, dir1 = self.node_id_to_coord(node_a)
-                r2, c2, dir2 = self.node_id_to_coord(node_b)
-            except ValueError:
-                continue  # Skip invalid nodes
-
-            # Inter-Cell Movement (Wiring between two different grid squares)
-            # This occurs when r1 != r2 or c1 != c2.
-            if r1 != r2 or c1 != c2:
-                # We record the segment as the connection between the two grid centers.
-                # Use the cell with the lower index as the start for canonical representation
-                if node_a < node_b:
-                    segment = ((r1, c1), (r2, c2))
-                else:
-                    segment = ((r2, c2), (r1, c1))
-
-                # The direction difference (dir1 != dir2) is usually minimal here
-
-                if segment not in unique_segments:
-                    coord_segments.append(segment)
-                    unique_segments.add(segment)
-
-            # Intra-Cell Turn (Wiring inside the same grid square)
-            # This occurs when r1 == r2 and c1 == c2, but dir1 != dir2.
-            elif dir1 != dir2:
-                # This represents a turn (e.g., entering North, leaving East)
-                # Log the turn node only, as it doesn't represent a physical segment
-                pass
-
-        return coord_segments
 
     def coords_outside_poly(self, poly_list):
         res = set()
@@ -490,9 +445,9 @@ class PcstRouter:
 
                     # Determine cost based on blockage/halo
                     cost = self.cost.base
-                    if (r, c) in blockage_cells or (r_b, c_b) in blockage_cells:
+                    if (r, c) in blockage_cells_rc or (r_b, c_b) in blockage_cells_rc:
                         cost = self.cost.macro
-                    elif (r, c) in halo_cells or (r_b, c_b) in halo_cells:
+                    elif (r, c) in halo_cells_rc or (r_b, c_b) in halo_cells_rc:
                         cost = self.cost.halo
 
                     edges_list.append([node_a, node_b])
@@ -504,7 +459,8 @@ class PcstRouter:
         # --- 3. Map terminals to merged nodes ---
         required_terminals = []
         for term in self.terminals:
-            r, c = term.pt.x, term.pt.y
+            # terminal.pt is (x, y); router grid uses (r=y, c=x)
+            r, c = term.pt.y, term.pt.x
             direction = term.direction
 
             # Convert direction to axis (handles both 'N'/'S' and 'E'/'W')
@@ -537,9 +493,12 @@ class PcstRouter:
         pcst = PcstInputs(edges, prizes, costs, root)
         return pcst
 
-    def decode_edges_to_coords(self, edges_output, edges_input, all_costs):
+    def decode_edges_to_coords(self, edges_output, edges_input, all_costs, export_coords: str = "xy"):
         """
-        Decodes the selected edges into a list of (r, c) coordinate segments.
+        Decode selected edges into a list of coordinate segments.
+
+        Internal graph uses (r,c,axis) with r=y and c=x. For external geometry,
+        we usually want (x,y) where x=c and y=r.
 
         With merged nodes:
         - Inter-cell edges represent physical wire segments
@@ -549,17 +508,19 @@ class PcstRouter:
             edges_output: List of edge indices selected by PCST
             edges_input: Array of [node_a, node_b] edge pairs
             all_costs: Array of edge costs
+            export_coords: 'xy' to return ((x1,y1),(x2,y2)) [DEFAULT],
+                           'rc' to return ((r1,c1),(r2,c2))
 
         Returns:
-            coord_segments: List of ((r1, c1), (r2, c2)) tuples representing wire segments
+            List of 2-point segments in the requested coordinate convention.
         """
-        coord_segments = []
-        unique_segments = set()
-        turn_points = []  # Track where turns occur
+        segments_rc: list[tuple[tuple[int,int], tuple[int,int]]] = []
+        unique_segments: set[tuple[tuple[int,int], tuple[int,int]]] = set()
+        turn_points = []  # Track where turns occur (debug only)
 
         for edge_index in edges_output:
             node_a, node_b = edges_input[edge_index]
-            cost = all_costs[edge_index]
+            _ = all_costs[edge_index]
 
             try:
                 r1, c1, axis1 = self.node_id_to_coord(node_a)
@@ -569,29 +530,37 @@ class PcstRouter:
                 continue
 
             # Inter-Cell Movement (Physical wire segment)
-            # This occurs when moving between different cells
             if r1 != r2 or c1 != c2:
-                # Create canonical segment representation
-                if (r1, c1) < (r2, c2):
-                    segment = ((r1, c1), (r2, c2))
-                else:
-                    segment = ((r2, c2), (r1, c1))
-
+                # Canonical ordering to deduplicate
+                a = (r1, c1)
+                b = (r2, c2)
+                if a > b:
+                    a, b = b, a
+                segment = (a, b)
                 if segment not in unique_segments:
-                    coord_segments.append(segment)
+                    segments_rc.append(segment)
                     unique_segments.add(segment)
 
-            # Intra-Cell Turn (Axis change within same cell)
-            # This occurs when switching between NS and EW axes
+            # Intra-Cell Turn (Axis change within same cell) — no physical segment
             elif axis1 != axis2:
-                # Record turn location for debugging/visualization
                 turn_points.append((r1, c1, axis1, axis2))
-                # No physical segment added - turn is implicit at this cell
-                log.debug(f"Turn at ({r1},{c1}): {axis1} → {axis2}")
 
-        log.info(f"Decoded {len(coord_segments)} wire segments and {len(turn_points)} turns")
+        log.info(f"Decoded {len(segments_rc)} wire segments and {len(turn_points)} turns")
 
-        return coord_segments
+        if export_coords == "rc":
+            return segments_rc
+        elif export_coords == "xy":
+            # Map ((r1,c1),(r2,c2)) -> ((x1,y1),(x2,y2))
+            def rc_to_xy(seg):
+                (r1, c1), (r2, c2) = seg
+                return (c1, r1), (c2, r2)
+            return [rc_to_xy(s) for s in segments_rc]
+        else:
+            log.warning(f"Unknown export_coords='{export_coords}', defaulting to 'xy'")
+            def rc_to_xy(seg):
+                (r1, c1), (r2, c2) = seg
+                return (c1, r1), (c2, r2)
+            return [rc_to_xy(s) for s in segments_rc]
 
     def get_path_directions(self, edges_output, edges_input):
         """
@@ -622,7 +591,9 @@ class PcstRouter:
 
         # Start from a terminal
         if self.terminals:
-            r, c = self.terminals[0].pt.x, self.terminals[0].pt.y
+            # Terminals are defined in geometry coords (x,y)
+            # Internal graph uses (r=y, c=x)
+            r, c = self.terminals[0].pt.y, self.terminals[0].pt.x
             axis = self.DIR_TO_AXIS[self.terminals[0].direction]
             start = (r, c, axis)
 

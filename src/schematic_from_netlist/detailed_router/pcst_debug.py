@@ -140,7 +140,7 @@ class PCSTGridDebugger:
             r, c = y, x
             for axis in ["NS", "EW"]:
                 try:
-                    node_id = self.router.coord_to_node_id(x, y, axis)
+                    node_id = self.router.coord_to_node_id(r, c, axis)
                 except (KeyError, AttributeError):
                     continue
                 dx, dy = axis_offsets[axis]
@@ -338,7 +338,7 @@ class PCSTGridDebugger:
             r, c = y, x
             for axis in ["NS", "EW"]:
                 try:
-                    node_id = self.router.coord_to_node_id(x, y, axis)
+                    node_id = self.router.coord_to_node_id(r, c, axis)
                 except (KeyError, AttributeError):
                     continue
 
@@ -365,7 +365,7 @@ class PCSTGridDebugger:
                     marker, size, color = "o", 80, "lightblue"
                     edgecolor, linewidth = "blue", 1
 
-                ax.scatter(x, y, marker=marker, s=size, c=color, edgecolors=edgecolor, linewidths=linewidth, zorder=5)
+                ax.scatter(x_plot, y_plot, marker=marker, s=size, c=color, edgecolors=edgecolor, linewidths=linewidth, zorder=5)
 
                 # Label node
                 label = f"{axis}\n({int(r)},{int(c)})"
@@ -373,8 +373,8 @@ class PCSTGridDebugger:
                     label += f"\n★{int(prizes[node_id])}"
 
                 ax.text(
-                    x + 0.10,
-                    y + 0.10,
+                    x_plot + 0.10,
+                    y_plot + 0.10,
                     label,
                     fontsize=7,
                     ha="left",
@@ -599,7 +599,8 @@ class PCSTGridDebugger:
         for term in self.router.terminals:
             try:
                 axis = self.router.DIR_TO_AXIS[term.direction]
-                node_id = self.router.coord_to_node_id(term.pt.x, term.pt.y, axis)
+                # Terminals are in geometry coords (x,y); router nodes use (r=y, c=x)
+                node_id = self.router.coord_to_node_id(term.pt.y, term.pt.x, axis)
                 prize_val = prizes_array[node_id] if node_id < len(prizes_array) else 0
                 log.info(
                     f"    {term.name:15s} @ ({term.pt.x},{term.pt.y}) "
