@@ -21,7 +21,7 @@ from schematic_from_netlist.sastar_router.models import CostBuckets, CostEstimat
 from schematic_from_netlist.sastar_router.visualization import plot_result
 
 # Set to True to enable Pygame visualization
-ENABLE_PYGAME = True
+ENABLE_PYGAME = False
 BASE_COLORS = [
     (255, 0, 0),
     (0, 255, 0),

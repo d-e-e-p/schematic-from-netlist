@@ -38,7 +38,7 @@ def plot_result(net, obstacles, existing_nets, prefix=""):
     """
     current_net = net
     net_name = net.name
-    terminals = [(pin.draw.geom.x, pin.draw.geom.y) for pin in net.pins.values()]
+    terminals = [(pin.draw.geom.x, pin.draw.geom.y) for pin in net.pins.values() if pin.draw.geom]
     path = net.draw.geom
     # Create directory if it doesn't exist
     os.makedirs("data/images/sastar", exist_ok=True)

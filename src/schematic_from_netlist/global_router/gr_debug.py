@@ -74,7 +74,7 @@ class RouterDebugger:
         ax.set_title(f"Module: {module.name} {title}")
         ax.set_xlabel("X")
         ax.set_ylabel("Y")
-        log.info(f"creating {stage}{module.name}_junctions.png")
+        log.debug(f"creating {stage}{module.name}_junctions.png")
 
         # --- Draw macros ---
         macros = get_macro_geometries(module)
@@ -171,7 +171,7 @@ class RouterDebugger:
         plt.savefig(fname, dpi=200)
         plt.close(fig)
 
-        log.info(f"Saved summary plot for module {module.name} → {fname}")
+        log.info(f"Saved summary plot for module {module.name} →  {fname}")
 
     def plot_cost_calculation(
         self,
