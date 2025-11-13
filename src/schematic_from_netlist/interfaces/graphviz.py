@@ -187,7 +187,8 @@ class Graphviz:
             if len(unique_names) < 2:
                 continue
             sg_name = f"cluster_{hier}"
-            A.add_subgraph(nbunch=unique_names, rank="same", name=sg_name)
+            # A.add_subgraph(nbunch=unique_names, rank="same", name=sg_name)
+            A.add_subgraph(nbunch=unique_names, name=sg_name)
             log.debug(f"hier group: hier={hier}, size={len(unique_names)}")
 
     def run_graphviz(self, A, module):

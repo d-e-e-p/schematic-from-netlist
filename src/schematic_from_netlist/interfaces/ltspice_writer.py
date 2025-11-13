@@ -241,7 +241,7 @@ class LTSpiceWriter:
             f.write(asy)
         log.debug(f"Generated symbol file: {asy_path}")
 
-    def produce_schematic(self, output_dir="data/ltspice"):
+    def produce_schematic_hier(self, output_dir="data/ltspice"):
         """Generates the .asc schematic and .asy symbol files."""
         os.makedirs(output_dir, exist_ok=True)
         self.output_dir = output_dir
@@ -273,6 +273,44 @@ class LTSpiceWriter:
 
         # Process wires
         for net in self.db.design.top_module.nets.values():
+            asc_content.append(self.format_asc_wire(net))
+
+        with open(asc_path, "w") as f:
+            f.write("\n".join(asc_content))
+        log.info(f"Generated schematic file: {asc_path}")
+
+    def produce_schematic_flat(self, output_dir="data/ltspice"):
+        """Generates the .asc schematic and .asy symbol files."""
+        os.makedirs(output_dir, exist_ok=True)
+        self.output_dir = output_dir
+
+        # first create symbols
+        self.db.uniquify_module_names()
+        for module in [self.db.design.flat_module]:
+            for inst in module.instances.values():
+                if inst.module.is_leaf:
+                    if inst.module.name in self.symlib.symbols:
+                        self.symlib.generate_symbol_asy(inst.module.name, output_dir)
+                        inst.module_ref_uniq = inst.module_ref
+                    else:
+                        self.generate_symbol_asy(inst)
+
+        top_module_name = self.db.design.flat_module.name
+        asc_path = os.path.join(output_dir, f"{top_module_name}.asc")
+
+        width, height = self.schematic_db.sheet_size
+        width *= self.schematic_db.schematic_grid_size
+        height *= self.schematic_db.schematic_grid_size
+        asc_content = ["Version 4", f"Sheet 1 {width} {height}"]
+
+        for inst in self.db.design.flat_module.instances.values():
+            if inst.module.is_leaf:
+                asc_content.append(self.asc_place_inst(inst))
+            else:
+                asc_content.append(self.asc_place_module(inst))
+
+        # Process wires
+        for net in self.db.design.flat_module.nets.values():
             asc_content.append(self.format_asc_wire(net))
 
         with open(asc_path, "w") as f:

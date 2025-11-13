@@ -74,7 +74,7 @@ def generate_schematic(db, output_dir: str):
         db.schematic_db.generate_schematic()
 
     writer = LTSpiceWriter(db)
-    writer.produce_schematic(output_dir)
+    writer.produce_schematic_flat(output_dir)
 
 
 def generate_steiner_buffers(db):

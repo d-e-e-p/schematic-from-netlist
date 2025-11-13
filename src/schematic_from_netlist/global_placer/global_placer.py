@@ -47,7 +47,7 @@ class PlacerConfig:
     max_grad_norm: float = 100.0
     convergence_tol: float = 1e-5
     grid_size: int = 1
-    visualize: bool = True
+    visualize: bool = False
     visualization_interval: int = 10
     cost_logging_interval: int = 100
     macro_padding: float = 4.0
@@ -387,7 +387,11 @@ class GlobalPlacer:
             + self.config.lambda_anchor * grad_anchor_pos
             + self.config.w_dummy * grad_dummy_pos
         )
-        grad_r = self.config.lambda_wire * grad_hpwl_r + self.config.lambda_overlap * grad_overlap_r + self.config.lambda_shape * grad_shape_r
+        grad_r = (
+            self.config.lambda_wire * grad_hpwl_r
+            + self.config.lambda_overlap * grad_overlap_r
+            + self.config.lambda_shape * grad_shape_r
+        )
 
         return {"pos": grad_pos, "aspect_ratio": grad_r}
 
@@ -402,15 +406,15 @@ class GlobalPlacer:
 
         # Gradient clipping to improve stability
         if self.config.max_grad_norm and self.config.max_grad_norm > 0:
-            gnorm_sq = float(np.sum(grad_pos ** 2) + np.sum(grad_r ** 2))
+            gnorm_sq = float(np.sum(grad_pos**2) + np.sum(grad_r**2))
             gnorm = np.sqrt(gnorm_sq)
             if gnorm > self.config.max_grad_norm:
                 scale = self.config.max_grad_norm / (gnorm + 1e-12)
                 grad_pos = grad_pos * scale
                 grad_r = grad_r * scale
-                gnorm_sq = float(np.sum(grad_pos ** 2) + np.sum(grad_r ** 2))
+                gnorm_sq = float(np.sum(grad_pos**2) + np.sum(grad_r**2))
         else:
-            gnorm_sq = float(np.sum(grad_pos ** 2) + np.sum(grad_r ** 2))
+            gnorm_sq = float(np.sum(grad_pos**2) + np.sum(grad_r**2))
 
         # Base step size
         alpha = self.config.step_size
@@ -502,8 +506,8 @@ class GlobalPlacer:
     def _log_cost(self, cost: dict, iteration: int, prefix: str = "Iter"):
         """Log cost breakdown in a consistent format."""
         # Support both legacy 'region' and new 'bound' keys
-        region_cost = cost.get('bound', cost.get('region', 0.0))
-        anchor_cost = cost.get('anchor', 0.0)
+        region_cost = cost.get("bound", cost.get("region", 0.0))
+        anchor_cost = cost.get("anchor", 0.0)
         log.info(
             f"{prefix} {iteration}: cost: {cost['total']:.2f} "
             f"(HPWL: {cost['hpwl']:.2f}, Overlap: {cost['overlap']:.2f}, "
@@ -649,7 +653,7 @@ class GlobalPlacer:
             # Weight per instance: 1 / (1 + degree)
             w = 1.0 / (1.0 + degrees)
             d = pos - anchor_pos
-            cost_anchor = float(np.sum(w[:, None] * (d ** 2)))
+            cost_anchor = float(np.sum(w[:, None] * (d**2)))
 
         # Optional dummy: weak pull to region centroid
         cost_dummy = 0.0
@@ -660,7 +664,7 @@ class GlobalPlacer:
                     continue
                 centroid = np.mean(region_pos, axis=0)
                 diffs = region_pos - centroid
-                cost_dummy += float(np.sum(diffs ** 2))
+                cost_dummy += float(np.sum(diffs**2))
 
         total_cost = (
             self.config.lambda_wire * cost_hpwl

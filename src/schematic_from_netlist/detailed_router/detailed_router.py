@@ -85,13 +85,14 @@ class DetailedRouter:
             net.draw.geom = old_routed_paths
             net.draw.total_cost = old_total_cost
             net.draw.step_costs = old_step_costs
-            plot_result(net, obstacles, nets, "old")
+            # plot_result(net, obstacles, nets, "old")
 
             net.draw.geom = new_routed_paths
             net.draw.total_cost = new_total_cost
             net.draw.step_costs = new_step_costs
-            plot_result(net, obstacles, nets, "new")
+            # plot_result(net, obstacles, nets, "new")
 
+            """
             if new_total_cost < old_total_cost:
                 log.info(f"  New route cost {new_total_cost} < orig {old_total_cost} : keeping new route")
                 net.draw.geom = new_routed_paths
@@ -102,8 +103,9 @@ class DetailedRouter:
                 net.draw.geom = old_routed_paths
                 net.draw.total_cost = old_total_cost
                 net.draw.step_costs = old_step_costs
+            """
 
-        plot_result(net, obstacles, nets)
+        # plot_result(net, obstacles, nets)
 
         # After all nets are routed, check for overlaps between nets
         # self.check_for_overlaps(nets)

@@ -557,7 +557,10 @@ class NetlistOperationsMixin:
 
     def uniquify_module_names(self):
         """needed to have each ref having different shape"""
-        for module in self.design.modules.values():
+        # operate on both flat and hierarchical modules
+        modules = list(self.design.modules.values())
+        modules.append(self.design.flat_module)
+        for module in modules:
             seen = {}
             for inst in module.instances.values():
                 if seen.get(inst.module_ref):

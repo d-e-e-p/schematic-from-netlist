@@ -916,7 +916,7 @@ class SimultaneousRouter:
             merged_paths = [simplify_line(l) for l in merged_paths]
 
         # Split merged paths at direction changes to get clean orthogonal segments
-        log.info(f"{paths} -> {merged_paths=}")
+        log.debug(f"{paths} -> {merged_paths=}")
         dedup = set()
         result_paths = []
         for line in merged_paths:

@@ -24,7 +24,7 @@ from schematic_from_netlist.sastar_router.models import CostBuckets, CostEstimat
 from schematic_from_netlist.sastar_router.visualization import plot_result
 
 # Set to True to enable Pygame visualization
-ENABLE_PYGAME = True
+ENABLE_PYGAME = False
 BASE_COLORS = [
     (255, 0, 0),
     (0, 255, 0),
@@ -308,7 +308,6 @@ class PcstRouter:
 
         return name
 
-
     def coords_outside_poly(self, poly_list):
         res = set()
         for poly in poly_list:
@@ -514,8 +513,8 @@ class PcstRouter:
         Returns:
             List of 2-point segments in the requested coordinate convention.
         """
-        segments_rc: list[tuple[tuple[int,int], tuple[int,int]]] = []
-        unique_segments: set[tuple[tuple[int,int], tuple[int,int]]] = set()
+        segments_rc: list[tuple[tuple[int, int], tuple[int, int]]] = []
+        unique_segments: set[tuple[tuple[int, int], tuple[int, int]]] = set()
         turn_points = []  # Track where turns occur (debug only)
 
         for edge_index in edges_output:
@@ -554,12 +553,15 @@ class PcstRouter:
             def rc_to_xy(seg):
                 (r1, c1), (r2, c2) = seg
                 return (c1, r1), (c2, r2)
+
             return [rc_to_xy(s) for s in segments_rc]
         else:
             log.warning(f"Unknown export_coords='{export_coords}', defaulting to 'xy'")
+
             def rc_to_xy(seg):
                 (r1, c1), (r2, c2) = seg
                 return (c1, r1), (c2, r2)
+
             return [rc_to_xy(s) for s in segments_rc]
 
     def get_path_directions(self, edges_output, edges_input):
@@ -642,7 +644,7 @@ class PcstRouter:
             merged_paths = [simplify_line(l) for l in merged_paths]
 
         # Split merged paths at direction changes to get clean orthogonal segments
-        log.info(f"{paths} -> {merged_paths=}")
+        log.debug(f"{paths} -> {merged_paths=}")
         dedup = set()
         result_paths = []
         for line in merged_paths:
